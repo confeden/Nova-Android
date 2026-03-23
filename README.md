@@ -3,7 +3,7 @@
 
 Открытый бета-тест начался 22.03.2026 
 
-[ссылка на скачивание apk в Releases](https://github.com/confeden/Nova-Android/releases)
+[Скачать из Releases](https://github.com/confeden/Nova-Android/releases)
 
 #
 

@@ -67,5 +67,9 @@ jobs:
           git config user.name "Nova Android Update Bot"
           git config user.email "bot@nova.app"
           git add apk_version.json
-          git commit -m "Auto-update Android to version ${{ env.VERSION }}" || exit 0
-          git push
+          if git diff --cached --quiet; then
+            echo "apk_version.json не изменился, пропускаем коммит"
+          else
+            git commit -m "Auto-update Android to version ${{ env.VERSION }}"
+            git push
+          fi

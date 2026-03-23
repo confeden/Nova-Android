@@ -17,6 +17,8 @@ on:
 jobs:
   update-apk-json:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Resolve release info
         run: |

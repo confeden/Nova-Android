@@ -1,26 +1,36 @@
-PROPRIETARY AND CONFIDENTIAL END USER LICENSE AGREEMENT
+PROPRIETARY END USER LICENSE AGREEMENT
 
-Copyright (c) 2026 NovaAndroid. All rights reserved.
+Copyright (c) 2026 Brent. All rights reserved.
 
-This software and its associated documentation are the confidential and proprietary information of NovaAndroid ("Proprietary Information"). You shall not disclose such Proprietary Information and shall use it only in accordance with the terms of the license agreement you entered into with NovaAndroid.
+This Software is proprietary. It is licensed, not sold.
 
 1. PERMITTED USE
-You are granted a limited, non-exclusive, non-transferable, revocable license to install and use the Software solely for your personal, non-commercial purposes.
+You are granted a limited, non-exclusive, non-transferable, revocable license to download, install, and use the Software solely for your personal, lawful, non-commercial purposes.
 
-2. RESTRICTIONS ON USE
-You shall NOT, under any circumstances:
-a) Copy, reproduce, distribute, publish, or publicly display the Software or any portion thereof;
-b) Reverse engineer, decompile, disassemble, or otherwise attempt to derive or discover the source code of the Software;
-c) Modify, adapt, translate, or create derivative works based on the Software;
-d) Rent, lease, lend, sell, redistribute, sublicense, or otherwise transfer rights to the Software;
-e) Remove, alter, or obscure any copyright, trademark, or other proprietary rights notices embedded in or on the Software.
+You may share the official download page or other official NovaAndroid release link so that other users can obtain the Software from the official source. No other distribution right is granted.
 
-3. OWNERSHIP
-All title, ownership rights, and intellectual property rights in and to the Software, including any updates or modifications, remain exclusively with NovaAndroid. The Software is licensed, not sold.
+2. RESTRICTIONS
+You shall NOT, and shall not permit any third party to:
+a) copy, mirror, host, re-upload, republish, redistribute, sell, sublicense, rent, lease, lend, or otherwise provide the Software itself from any non-official source;
+b) reverse engineer, decompile, disassemble, decrypt, unpack, analyze, or otherwise attempt to derive or discover the source code, internal logic, algorithms, protocols, or other non-public aspects of the Software;
+c) modify, adapt, translate, patch, alter, or create derivative works, modified builds, repackaged versions, or unofficial distributions of the Software;
+d) fork, publish, or distribute any source code, reconstructed source code, modified code, or derivative implementation of the Software without prior written permission from NovaAndroid;
+e) remove, alter, or obscure any copyright, trademark, attribution, or other proprietary notices contained in the Software;
+f) use the Nova name, branding, or related identifiers in a way that suggests endorsement, affiliation, or official status without prior written permission.
 
-4. TERMINATION
-This license is effective until terminated. Your rights under this license will terminate automatically and immediately without notice if you fail to comply with any of its terms. Upon termination, you must cease all use of the Software and destroy all copies, full or partial, of the Software in your possession or control.
+3. SOURCE CODE AND INTERNAL MATERIALS
+No right to access, receive, use, modify, publish, or redistribute the source code of the Software is granted under this license.
 
-5. DISCLAIMER OF WARRANTY
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+If any source code, internal files, technical materials, or non-public builds are provided separately, they remain proprietary and confidential and may not be copied, disclosed, forked, modified, or used without prior written permission from NovaAndroid.
 
+4. OWNERSHIP
+All title, ownership rights, and intellectual property rights in and to the Software, including all updates, improvements, modifications, documentation, branding, and related materials, remain exclusively with NovaAndroid.
+
+5. TERMINATION
+This license is effective until terminated. Your rights under this license will terminate automatically and immediately without notice if you fail to comply with any term of this Agreement. Upon termination, you must cease all use of the Software and destroy all copies in your possession or control.
+
+6. DISCLAIMER OF WARRANTY
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NONINFRINGEMENT.
+
+7. LIMITATION OF LIABILITY
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL NOVAANDROID OR ITS AUTHORS, DEVELOPERS, OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OF OR OTHER DEALINGS IN THE SOFTWARE.

@@ -26,7 +26,7 @@ Nova Android — приложение для обхода большинства
 
 В будущем возможно добавление поддержки ТВ-приставок
 
-## Скачать
+## Скачать Nova.apk
 
 [Скачать из Releases](https://github.com/confeden/Nova-Android/releases)
 

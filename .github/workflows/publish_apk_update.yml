@@ -12,13 +12,11 @@ on:
         required: false
         type: string
   release:
-    types: [published, edited]
+    types: [published]
 
 jobs:
   update-apk-json:
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Resolve release info
         run: |
@@ -38,9 +36,29 @@ jobs:
             echo "ASSET_URL=https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/Nova.apk" >> "$GITHUB_ENV"
           fi
 
-      - name: Download APK asset
+      - name: Download APK asset (with retry)
         run: |
-          wget "${{ env.ASSET_URL }}" -O Nova.apk
+          for attempt in 1 2 3 4 5; do
+            echo "Попытка $attempt скачать APK..."
+            if wget --timeout=30 -q "${{ env.ASSET_URL }}" -O Nova.apk 2>/dev/null; then
+              FILE_SIZE=$(stat -c%s Nova.apk 2>/dev/null || echo 0)
+              if [ "$FILE_SIZE" -gt 1000 ]; then
+                echo "APK скачан успешно (${FILE_SIZE} байт)."
+                exit 0
+              else
+                echo "Файл слишком маленький (${FILE_SIZE} байт), asset ещё не готов."
+                rm -f Nova.apk
+              fi
+            else
+              echo "wget вернул ошибку, asset ещё недоступен."
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              echo "Ждём 15 секунд перед следующей попыткой..."
+              sleep 15
+            fi
+          done
+          echo "Не удалось скачать APK после 5 попыток." >&2
+          exit 1
 
       - name: Calculate SHA256
         run: |
@@ -48,7 +66,7 @@ jobs:
           echo "SHA256=$HASH" >> "$GITHUB_ENV"
 
       - name: Checkout updates repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: confeden/nova_updates
           token: ${{ secrets.UPDATES_TOKEN }}

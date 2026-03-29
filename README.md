@@ -37,4 +37,4 @@ Nova Android — приложение для обхода большинства
 
 Отзывы, сообщения об ошибках и предложения по улучшению пишите в группе Telegram: https://t.me/nova_txt
 
-благодарность (не обязательна!): [https://telegra.ph/](https://telegra.ph/donaty-ne-obyazatelno-03-29)
+благодарность (не обязательна!): https://confeden.github.io/Nova-donations/

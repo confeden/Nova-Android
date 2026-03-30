@@ -33,7 +33,7 @@ Nova Android — приложение для обхода большинства
 [Скачать из Releases](https://github.com/confeden/Nova-Android/releases)
 
 
-## Обратная связь
+# Создано с ❤️
 
 Отзывы, сообщения об ошибках и предложения по улучшению пишите в группе Telegram: https://t.me/nova_txt
 

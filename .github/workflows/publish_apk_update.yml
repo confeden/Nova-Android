@@ -1,14 +1,13 @@
 name: Publish Android Update JSON
-
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Версия без префикса v"
+        description: "Версия без префикса v (например, 1.9)"
         required: false
         type: string
       asset_url:
-        description: "Полный URL до Nova.apk"
+        description: "Полный URL до APK файла"
         required: false
         type: string
   release:
@@ -27,42 +26,45 @@ jobs:
               echo "Для ручного запуска нужны version и asset_url" >&2
               exit 1
             fi
+            # Извлекаем имя файла из URL для ручного запуска
+            FILENAME=$(basename "$ASSET_URL_INPUT")
             echo "VERSION=$VERSION_INPUT" >> "$GITHUB_ENV"
             echo "ASSET_URL=$ASSET_URL_INPUT" >> "$GITHUB_ENV"
+            echo "APK_NAME=$FILENAME" >> "$GITHUB_ENV"
           else
             TAG_NAME="${{ github.ref_name }}"
             CLEAN_VERSION="${TAG_NAME#v}"
+            FILENAME="Nova_${CLEAN_VERSION}.apk"
             echo "VERSION=$CLEAN_VERSION" >> "$GITHUB_ENV"
-            echo "ASSET_URL=https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/Nova.apk" >> "$GITHUB_ENV"
+            echo "APK_NAME=$FILENAME" >> "$GITHUB_ENV"
+            echo "ASSET_URL=https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/${FILENAME}" >> "$GITHUB_ENV"
           fi
 
       - name: Download APK asset (with retry)
         run: |
           for attempt in 1 2 3 4 5; do
-            echo "Попытка $attempt скачать APK..."
-            if wget --timeout=30 -q "${{ env.ASSET_URL }}" -O Nova.apk 2>/dev/null; then
-              FILE_SIZE=$(stat -c%s Nova.apk 2>/dev/null || echo 0)
+            echo "Попытка $attempt скачать ${{ env.APK_NAME }}..."
+            # Используем оригинальное имя файла для сохранения (-O)
+            if wget --timeout=30 -q "${{ env.ASSET_URL }}" -O "${{ env.APK_NAME }}" 2>/dev/null; then
+              FILE_SIZE=$(stat -c%s "${{ env.APK_NAME }}" 2>/dev/null || echo 0)
               if [ "$FILE_SIZE" -gt 1000 ]; then
                 echo "APK скачан успешно (${FILE_SIZE} байт)."
                 exit 0
               else
-                echo "Файл слишком маленький (${FILE_SIZE} байт), asset ещё не готов."
-                rm -f Nova.apk
+                echo "Файл слишком маленький, asset ещё не готов."
+                rm -f "${{ env.APK_NAME }}"
               fi
             else
-              echo "wget вернул ошибку, asset ещё недоступен."
+              echo "wget вернул ошибку."
             fi
-            if [ "$attempt" -lt 5 ]; then
-              echo "Ждём 15 секунд перед следующей попыткой..."
-              sleep 15
-            fi
+            [ "$attempt" -lt 5 ] && sleep 15
           done
-          echo "Не удалось скачать APK после 5 попыток." >&2
           exit 1
 
       - name: Calculate SHA256
         run: |
-          HASH=$(sha256sum Nova.apk | awk '{print $1}')
+          # Считаем хеш, используя переменную имени файла
+          HASH=$(sha256sum "${{ env.APK_NAME }}" | awk '{print $1}')
           echo "SHA256=$HASH" >> "$GITHUB_ENV"
 
       - name: Checkout updates repo
@@ -86,7 +88,7 @@ jobs:
           git config user.email "bot@nova.app"
           git add apk_version.json
           if git diff --cached --quiet; then
-            echo "apk_version.json не изменился, пропускаем коммит"
+            echo "Изменений нет"
           else
             git commit -m "Auto-update Android to version ${{ env.VERSION }}"
             git push

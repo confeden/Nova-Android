@@ -95,7 +95,7 @@ PY
 
       - name: Download APK asset (with retry)
         run: |
-          for attempt in 1 2 3 4 5; do
+          for attempt in 1 2 3 4 5 6 7 8; do
             echo "Попытка $attempt скачать APK..."
             if wget --timeout=30 -q "${{ env.ASSET_URL }}" -O Nova.apk 2>/dev/null; then
               FILE_SIZE=$(stat -c%s Nova.apk 2>/dev/null || echo 0)
@@ -109,12 +109,12 @@ PY
             else
               echo "wget вернул ошибку, asset ещё недоступен."
             fi
-            if [ "$attempt" -lt 5 ]; then
-              echo "Ждём 15 секунд перед следующей попыткой..."
-              sleep 15
+            if [ "$attempt" -lt 8 ]; then
+              echo "Ждём 20 секунд перед следующей попыткой..."
+              sleep 20
             fi
           done
-          echo "Не удалось скачать APK после 5 попыток." >&2
+          echo "Не удалось скачать APK после 8 попыток." >&2
           exit 1
 
       - name: Calculate SHA256

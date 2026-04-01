@@ -1,70 +1,125 @@
 name: Publish Android Update JSON
+
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Версия без префикса v (например, 1.9)"
+        description: "Версия без префикса v"
         required: false
         type: string
       asset_url:
-        description: "Полный URL до APK файла"
+        description: "Полный URL до APK asset"
         required: false
         type: string
   release:
     types: [published]
+
+permissions:
+  contents: read
 
 jobs:
   update-apk-json:
     runs-on: ubuntu-latest
     steps:
       - name: Resolve release info
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          resolve_asset_url() {
+            local tag_name="$1"
+            local version="$2"
+            local release_api="https://api.github.com/repos/${{ github.repository }}/releases/tags/${tag_name}"
+            local response
+            response=$(curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              "$release_api")
+
+            RELEASE_API_RESPONSE="$response" python - "$version" <<'PY'
+import json
+import os
+import sys
+
+version = sys.argv[1].strip()
+payload = json.loads(os.environ["RELEASE_API_RESPONSE"])
+assets = payload.get("assets", [])
+preferred_names = [
+    f"Nova_{version}.apk",
+    f"Nova-{version}.apk",
+    "Nova.apk",
+]
+
+for preferred_name in preferred_names:
+    for asset in assets:
+        if asset.get("name") == preferred_name and asset.get("browser_download_url"):
+            print(asset["browser_download_url"])
+            raise SystemExit(0)
+
+for asset in assets:
+    name = (asset.get("name") or "").lower()
+    url = asset.get("browser_download_url") or ""
+    if name.endswith(".apk") and url:
+        print(url)
+        raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+          }
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VERSION_INPUT="${{ github.event.inputs.version }}"
             ASSET_URL_INPUT="${{ github.event.inputs.asset_url }}"
-            if [ -z "$VERSION_INPUT" ] || [ -z "$ASSET_URL_INPUT" ]; then
-              echo "Для ручного запуска нужны version и asset_url" >&2
+            if [ -z "$VERSION_INPUT" ]; then
+              echo "Для ручного запуска нужен хотя бы version" >&2
               exit 1
             fi
-            # Извлекаем имя файла из URL для ручного запуска
-            FILENAME=$(basename "$ASSET_URL_INPUT")
+            if [ -z "$ASSET_URL_INPUT" ]; then
+              TAG_NAME="v$VERSION_INPUT"
+              ASSET_URL_INPUT=$(resolve_asset_url "$TAG_NAME" "$VERSION_INPUT") || {
+                echo "Не удалось автоматически найти APK asset для тега $TAG_NAME" >&2
+                exit 1
+              }
+            fi
             echo "VERSION=$VERSION_INPUT" >> "$GITHUB_ENV"
             echo "ASSET_URL=$ASSET_URL_INPUT" >> "$GITHUB_ENV"
-            echo "APK_NAME=$FILENAME" >> "$GITHUB_ENV"
           else
             TAG_NAME="${{ github.ref_name }}"
             CLEAN_VERSION="${TAG_NAME#v}"
-            FILENAME="Nova_${CLEAN_VERSION}.apk"
+            ASSET_URL=$(resolve_asset_url "$TAG_NAME" "$CLEAN_VERSION") || {
+              echo "Не удалось автоматически найти APK asset для тега $TAG_NAME" >&2
+              exit 1
+            }
             echo "VERSION=$CLEAN_VERSION" >> "$GITHUB_ENV"
-            echo "APK_NAME=$FILENAME" >> "$GITHUB_ENV"
-            echo "ASSET_URL=https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/${FILENAME}" >> "$GITHUB_ENV"
+            echo "ASSET_URL=$ASSET_URL" >> "$GITHUB_ENV"
           fi
 
       - name: Download APK asset (with retry)
         run: |
           for attempt in 1 2 3 4 5; do
-            echo "Попытка $attempt скачать ${{ env.APK_NAME }}..."
-            # Используем оригинальное имя файла для сохранения (-O)
-            if wget --timeout=30 -q "${{ env.ASSET_URL }}" -O "${{ env.APK_NAME }}" 2>/dev/null; then
-              FILE_SIZE=$(stat -c%s "${{ env.APK_NAME }}" 2>/dev/null || echo 0)
+            echo "Попытка $attempt скачать APK..."
+            if wget --timeout=30 -q "${{ env.ASSET_URL }}" -O Nova.apk 2>/dev/null; then
+              FILE_SIZE=$(stat -c%s Nova.apk 2>/dev/null || echo 0)
               if [ "$FILE_SIZE" -gt 1000 ]; then
                 echo "APK скачан успешно (${FILE_SIZE} байт)."
                 exit 0
               else
-                echo "Файл слишком маленький, asset ещё не готов."
-                rm -f "${{ env.APK_NAME }}"
+                echo "Файл слишком маленький (${FILE_SIZE} байт), asset ещё не готов."
+                rm -f Nova.apk
               fi
             else
-              echo "wget вернул ошибку."
+              echo "wget вернул ошибку, asset ещё недоступен."
             fi
-            [ "$attempt" -lt 5 ] && sleep 15
+            if [ "$attempt" -lt 5 ]; then
+              echo "Ждём 15 секунд перед следующей попыткой..."
+              sleep 15
+            fi
           done
+          echo "Не удалось скачать APK после 5 попыток." >&2
           exit 1
 
       - name: Calculate SHA256
         run: |
-          # Считаем хеш, используя переменную имени файла
-          HASH=$(sha256sum "${{ env.APK_NAME }}" | awk '{print $1}')
+          HASH=$(sha256sum Nova.apk | awk '{print $1}')
           echo "SHA256=$HASH" >> "$GITHUB_ENV"
 
       - name: Checkout updates repo
@@ -88,7 +143,7 @@ jobs:
           git config user.email "bot@nova.app"
           git add apk_version.json
           if git diff --cached --quiet; then
-            echo "Изменений нет"
+            echo "apk_version.json не изменился, пропускаем коммит"
           else
             git commit -m "Auto-update Android to version ${{ env.VERSION }}"
             git push

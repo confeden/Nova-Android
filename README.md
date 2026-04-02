@@ -34,7 +34,7 @@ Nova Android — приложение для обхода большинства
 
 
 # Создано с ❤️
-Благодаря https://github.com/Alexey71/opera-proxy у вас есть сервера Opera. Низкий ему поклон!
+Благодаря https://github.com/Alexey71/opera-proxy у вас есть официальные сервера Opera. Низкий ему поклон!
 
 Отзывы, сообщения об ошибках и предложения по улучшению пишите в группе Telegram: https://t.me/nova_txt
 

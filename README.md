@@ -38,7 +38,6 @@ Nova Android — приложение для обхода большинства
 Для работы с Opera-прокси используются компоненты из проекта
 opera-proxy-android-wrapper (SLY-F0X):  
 <https://github.com/SLY-F0X/opera-proxy-android-wrapper>  
-Лицензия: CC BY-NC-SA 4.0 / Modified MIT (Non-Commercial)
 
 Opera-proxy binary by Snawoot:  
 <https://github.com/Snawoot/opera-proxy> (MIT)

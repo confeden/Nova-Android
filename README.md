@@ -34,8 +34,22 @@ Nova Android — приложение для обхода большинства
 
 
 # Создано с ❤️
-Благодаря https://github.com/Alexey71/opera-proxy у вас есть официальные сервера Opera. Низкий ему поклон!
 
-Отзывы, сообщения об ошибках и предложения по улучшению пишите в группе Telegram: https://t.me/nova_txt
+Для работы с Opera-прокси используются компоненты из проекта
+opera-proxy-android-wrapper (SLY-F0X):  
+<https://github.com/SLY-F0X/opera-proxy-android-wrapper>  
+Лицензия: CC BY-NC-SA 4.0 / Modified MIT (Non-Commercial)
 
-благодарность (не обязательна!): https://confeden.github.io/Nova-donations/
+Opera-proxy binary by Snawoot:  
+<https://github.com/Snawoot/opera-proxy> (MIT)
+
+Tun2Proxy:  
+<https://github.com/tun2proxy/tun2proxy> (MIT)
+
+---
+
+Отзывы, сообщения об ошибках и предложения по улучшению пишите в группе Telegram:  
+<https://t.me/nova_txt>
+
+Благодарность (не обязательна!):  
+<https://confeden.github.io/Nova-donations/>

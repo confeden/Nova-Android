@@ -40,10 +40,10 @@ opera-proxy-android-wrapper (SLY-F0X):
 <https://github.com/SLY-F0X/opera-proxy-android-wrapper>  
 
 Opera-proxy binary by Snawoot:  
-<https://github.com/Snawoot/opera-proxy> (MIT)
+<https://github.com/Snawoot/opera-proxy>
 
 Tun2Proxy:  
-<https://github.com/tun2proxy/tun2proxy> (MIT)
+<https://github.com/tun2proxy/tun2proxy>
 
 ---
 

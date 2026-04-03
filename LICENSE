@@ -1,16 +1,16 @@
-PROPRIETARY END USER LICENSE AGREEMENT
+Proprietary End User License Agreement
 
 Copyright (c) 2026 Brent. All rights reserved.
 
 This Software is proprietary. It is licensed, not sold.
 
-1. PERMITTED USE
+1. Permitted Use
 You are granted a limited, non-exclusive, non-transferable, revocable license to download, install, and use the Software solely for your personal, lawful, non-commercial purposes.
 
 You may share the official download page or other official NovaAndroid release link so that other users can obtain the Software from the official source. No other distribution right is granted.
 
-2. RESTRICTIONS
-You shall NOT, and shall not permit any third party to:
+2. Restrictions
+You shall not, and shall not permit any third party to:
 a) copy, mirror, host, re-upload, republish, redistribute, sell, sublicense, rent, lease, lend, or otherwise provide the Software itself from any non-official source;
 b) reverse engineer, decompile, disassemble, decrypt, unpack, analyze, or otherwise attempt to derive or discover the source code, internal logic, algorithms, protocols, or other non-public aspects of the Software;
 c) modify, adapt, translate, patch, alter, or create derivative works, modified builds, repackaged versions, or unofficial distributions of the Software;
@@ -18,19 +18,38 @@ d) fork, publish, or distribute any source code, reconstructed source code, modi
 e) remove, alter, or obscure any copyright, trademark, attribution, or other proprietary notices contained in the Software;
 f) use the Nova name, branding, or related identifiers in a way that suggests endorsement, affiliation, or official status without prior written permission.
 
-3. SOURCE CODE AND INTERNAL MATERIALS
+3. Source Code and Internal Materials
 No right to access, receive, use, modify, publish, or redistribute the source code of the Software is granted under this license.
 
 If any source code, internal files, technical materials, or non-public builds are provided separately, they remain proprietary and confidential and may not be copied, disclosed, forked, modified, or used without prior written permission from NovaAndroid.
 
-4. OWNERSHIP
-All title, ownership rights, and intellectual property rights in and to the Software, including all updates, improvements, modifications, documentation, branding, and related materials, remain exclusively with NovaAndroid.
+4. Ownership
+All title, ownership rights, and intellectual property rights in and to the Software, including all updates, improvements, modifications, documentation, branding, and related materials, remain exclusively with NovaAndroid, except for third-party components listed in Section 8, which retain their original ownership and licensing terms.
 
-5. TERMINATION
+5. Termination
 This license is effective until terminated. Your rights under this license will terminate automatically and immediately without notice if you fail to comply with any term of this Agreement. Upon termination, you must cease all use of the Software and destroy all copies in your possession or control.
 
-6. DISCLAIMER OF WARRANTY
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NONINFRINGEMENT.
+6. Disclaimer of Warranty
+The Software is provided "as is", without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, title, and noninfringement.
 
-7. LIMITATION OF LIABILITY
-TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL NOVAANDROID OR ITS AUTHORS, DEVELOPERS, OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OF OR OTHER DEALINGS IN THE SOFTWARE.
+7. Limitation of Liability
+To the maximum extent permitted by applicable law, in no event shall NovaAndroid or its authors, developers, or copyright holders be liable for any claim, damages, or other liability, whether in an action of contract, tort, or otherwise, arising from, out of, or in connection with the Software or the use of or other dealings in the Software.
+
+8. Third-Party Components and Attribution
+This Software incorporates the following third-party components, each of which retains its original license and copyright:
+
+a) opera-proxy-android-wrapper by SLY-F0X
+   https://github.com/SLY-F0X/opera-proxy-android-wrapper
+   License: CC BY-NC-SA 4.0 / Modified MIT (Non-Commercial)
+   Copyright (c) 2026 SLY-F0X
+
+b) opera-proxy by Snawoot
+   https://github.com/Snawoot/opera-proxy
+   License: MIT
+
+c) Tun2Proxy
+   https://github.com/tun2proxy/tun2proxy
+   License: MIT
+
+The licensing terms of these third-party components apply solely to those components and do not extend to or modify the proprietary license governing the rest of the Software. Nothing in this Agreement restricts, limits, or overrides any rights granted to you under those third-party licenses with respect to those specific components.
+

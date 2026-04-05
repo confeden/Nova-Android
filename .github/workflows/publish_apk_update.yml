@@ -37,34 +37,34 @@ jobs:
               "$release_api")
 
             RELEASE_API_RESPONSE="$response" python - "$version" <<'PY'
-import json
-import os
-import sys
-
-version = sys.argv[1].strip()
-payload = json.loads(os.environ["RELEASE_API_RESPONSE"])
-assets = payload.get("assets", [])
-preferred_names = [
-    f"Nova_{version}.apk",
-    f"Nova-{version}.apk",
-    "Nova.apk",
-]
-
-for preferred_name in preferred_names:
-    for asset in assets:
-        if asset.get("name") == preferred_name and asset.get("browser_download_url"):
-            print(asset["browser_download_url"])
-            raise SystemExit(0)
-
-for asset in assets:
-    name = (asset.get("name") or "").lower()
-    url = asset.get("browser_download_url") or ""
-    if name.endswith(".apk") and url:
-        print(url)
-        raise SystemExit(0)
-
-raise SystemExit(1)
-PY
+          import json
+          import os
+          import sys
+          
+          version = sys.argv[1].strip()
+          payload = json.loads(os.environ["RELEASE_API_RESPONSE"])
+          assets = payload.get("assets", [])
+          preferred_names = [
+              f"Nova_{version}.apk",
+              f"Nova-{version}.apk",
+              "Nova.apk",
+          ]
+          
+          for preferred_name in preferred_names:
+              for asset in assets:
+                  if asset.get("name") == preferred_name and asset.get("browser_download_url"):
+                      print(asset["browser_download_url"])
+                      raise SystemExit(0)
+          
+          for asset in assets:
+              name = (asset.get("name") or "").lower()
+              url = asset.get("browser_download_url") or ""
+              if name.endswith(".apk") and url:
+                  print(url)
+                  raise SystemExit(0)
+          
+          raise SystemExit(1)
+          PY
           }
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -137,12 +137,12 @@ PY
         run: |
           cd updates_repo
           cat > apk_version.json <<EOF
-{
-  "version": "${{ env.VERSION }}",
-  "url": "${{ env.ASSET_URL }}",
-  "sha256": "${{ env.SHA256 }}"
-}
-EOF
+          {
+            "version": "${{ env.VERSION }}",
+            "url": "${{ env.ASSET_URL }}",
+            "sha256": "${{ env.SHA256 }}"
+          }
+          EOF
           git config user.name "Nova Android Update Bot"
           git config user.email "bot@nova.app"
           git add apk_version.json

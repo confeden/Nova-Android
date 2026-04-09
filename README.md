@@ -49,6 +49,3 @@ Tun2Proxy:
 
 Отзывы, сообщения об ошибках и предложения по улучшению пишите в группе Telegram:  
 <https://t.me/nova_txt>
-
-Благодарность (не обязательна!):  
-<https://confeden.github.io/Nova-donations/>

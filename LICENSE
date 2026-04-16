@@ -36,12 +36,11 @@ The Software is provided "as is", without warranty of any kind, express or impli
 To the maximum extent permitted by applicable law, in no event shall NovaAndroid or its authors, developers, or copyright holders be liable for any claim, damages, or other liability, whether in an action of contract, tort, or otherwise, arising from, out of, or in connection with the Software or the use of or other dealings in the Software.
 
 8. Third-Party Components and Attribution
-This Software incorporates the following third-party components, each of which retains its original license and copyright:
+This Software includes or interoperates with a limited number of third-party components:
 
 a) opera-proxy-android-wrapper by SLY-F0X
    https://github.com/SLY-F0X/opera-proxy-android-wrapper
    License: CC BY-NC-SA 4.0 / Modified MIT (Non-Commercial)
-   Copyright (c) 2026 SLY-F0X
 
 b) opera-proxy by Snawoot
    https://github.com/Snawoot/opera-proxy
@@ -51,5 +50,10 @@ c) Tun2Proxy
    https://github.com/tun2proxy/tun2proxy
    License: MIT
 
-The licensing terms of these third-party components apply solely to those components and do not extend to or modify the proprietary license governing the rest of the Software. Nothing in this Agreement restricts, limits, or overrides any rights granted to you under those third-party licenses with respect to those specific components.
+d) Flowseal/tg-ws-proxy
+   https://github.com/Flowseal/tg-ws-proxy
+   Used only as reference for a limited part of Telegram transparent relay interoperability.
+   License: MIT
+
+These third-party licenses apply only to the respective components or referenced parts. All other parts of the Software remain proprietary under this Agreement.
 

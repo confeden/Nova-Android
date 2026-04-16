@@ -50,9 +50,9 @@ c) Tun2Proxy
    https://github.com/tun2proxy/tun2proxy
    License: MIT
 
-d) Flowseal/tg-ws-proxy
+d) Flowseal
    https://github.com/Flowseal/tg-ws-proxy
-   Used only as reference for a limited part of Telegram transparent relay interoperability.
+   Used as reference for a limited part of Telegram transparent relay interoperability.
    License: MIT
 
 These third-party licenses apply only to the respective components or referenced parts. All other parts of the Software remain proprietary under this Agreement.

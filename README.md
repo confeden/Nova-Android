@@ -2,8 +2,8 @@
 
 Nova Android — приложение для обхода большинства ограничений трафика в России с упором на стабильность, автоматический подбор рабочих стратегий подключения и лёгкости использования. 
 
-<img width="270" alt="Screenshot_20260327-054316" src="https://github.com/user-attachments/assets/908eefeb-64d9-4fa3-8397-6772c991c741"/> 
-<img width="270" alt="Screenshot_20260327-061454" src="https://github.com/user-attachments/assets/7cc70942-26f1-4985-b269-a22b02f01117"/>
+<img width="270" alt="Screenshot_20260705-125634" src="https://github.com/user-attachments/assets/1bb9a28b-8bf8-4931-90ad-bdecf2904afa" />
+<img width="270" alt="Screenshot_20260705-125745" src="https://github.com/user-attachments/assets/bf236c91-7852-47d0-9d4e-46751cb3fc19" />
 
 Приложение ориентировано на реальные нестабильные сети, где условия могут меняться в процессе подключения: Nova умеет адаптироваться к смене сети, подбирать удачные конфигурации, использовать резервные маршруты и сохранять рабочие варианты для следующих запусков.
 

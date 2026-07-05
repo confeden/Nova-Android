@@ -26,7 +26,6 @@ Nova Android — приложение для обхода большинства
 
 - Android 8+ (могут быть баги на xiaomi/poco/one plus)
 
-В будущем возможно добавление поддержки ТВ-приставок
 
 ## Скачать Nova.apk
 
@@ -41,9 +40,6 @@ opera-proxy-android-wrapper (SLY-F0X):
 
 Opera-proxy binary by Snawoot:  
 <https://github.com/Snawoot/opera-proxy>
-
-Tun2Proxy:  
-<https://github.com/tun2proxy/tun2proxy>
 
 ---
 

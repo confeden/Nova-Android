@@ -34,11 +34,11 @@ Nova Android — приложение для обхода большинства
 # Создано с ❤️
 
 Для работы с Opera-прокси используются компоненты из проекта
-opera-proxy-android-wrapper (SLY-F0X):  
-[github.com/SLY-F0X](https://github.com/Alexey71/opera-proxy-android-wrapper)
+opera-proxy-android-wrapper (SLY-F0X): [github.com/SLY-F0X](https://github.com/Alexey71/opera-proxy-android-wrapper)
 
-Opera-proxy binary by Snawoot:  
-[github.com/Snawoot](https://github.com/Snawoot/opera-proxy)
+Opera-proxy binary by Snawoot: [github.com/Snawoot](https://github.com/Snawoot/opera-proxy)
+
+Tun2proxy: [github.com/tun2proxy](https://github.com/tun2proxy/tun2proxy)
 
 ---
 

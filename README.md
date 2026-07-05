@@ -2,8 +2,8 @@
 
 Nova Android — приложение для обхода большинства ограничений трафика в России с упором на стабильность, автоматический подбор рабочих стратегий подключения и лёгкости использования. 
 
-<img width="270" alt="Screenshot_20260705-125634" src="https://github.com/user-attachments/assets/1bb9a28b-8bf8-4931-90ad-bdecf2904afa" />
-<img width="270" alt="Screenshot_20260705-125745" src="https://github.com/user-attachments/assets/bf236c91-7852-47d0-9d4e-46751cb3fc19" />
+<img width="360" alt="Screenshot_20260705-125634" src="https://github.com/user-attachments/assets/1bb9a28b-8bf8-4931-90ad-bdecf2904afa" />
+<img width="360" alt="Screenshot_20260705-125745" src="https://github.com/user-attachments/assets/bf236c91-7852-47d0-9d4e-46751cb3fc19" />
 
 Приложение ориентировано на реальные нестабильные сети, где условия могут меняться в процессе подключения: Nova умеет адаптироваться к смене сети, подбирать удачные конфигурации, использовать резервные маршруты и сохранять рабочие варианты для следующих запусков.
 
@@ -36,12 +36,12 @@ Nova Android — приложение для обхода большинства
 
 Для работы с Opera-прокси используются компоненты из проекта
 opera-proxy-android-wrapper (SLY-F0X):  
-<https://github.com/SLY-F0X/opera-proxy-android-wrapper>  
+[github.com/SLY-F0X](https://github.com/Alexey71/opera-proxy-android-wrapper)
 
 Opera-proxy binary by Snawoot:  
-<https://github.com/Snawoot/opera-proxy>
+[github.com/Snawoot](https://github.com/Snawoot/opera-proxy)
 
 ---
 
 Отзывы, сообщения об ошибках и предложения по улучшению пишите в группе Telegram:  
-<https://t.me/nova_txt>
+[t.me/nova_txt](https://t.me/nova_txt)

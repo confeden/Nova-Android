@@ -1,59 +1,93 @@
-Proprietary End User License Agreement
+# Лицензия Nova Android
 
-Copyright (c) 2026 Brent. All rights reserved.
+Copyright (c) 2026 Brent (confeden).
 
-This Software is proprietary. It is licensed, not sold.
+Это **не** open source в понимании OSI: лицензия ограничивает круг допустимого
+использования. Исходный код открыт для изучения, самостоятельной сборки и доработки, но
+не для заработка и не для машинного обучения.
 
-1. Permitted Use
-You are granted a limited, non-exclusive, non-transferable, revocable license to download, install, and use the Software solely for your personal, lawful, non-commercial purposes.
+Далее «Программа» — исходный код этого репозитория и собранные из него приложения, за
+вычетом компонентов третьих лиц из раздела 6.
 
-You may share the official download page or other official NovaAndroid release link so that other users can obtain the Software from the official source. No other distribution right is granted.
+## 1. Что разрешено
 
-2. Restrictions
-You shall not, and shall not permit any third party to:
-a) copy, mirror, host, re-upload, republish, redistribute, sell, sublicense, rent, lease, lend, or otherwise provide the Software itself from any non-official source;
-b) reverse engineer, decompile, disassemble, decrypt, unpack, analyze, or otherwise attempt to derive or discover the source code, internal logic, algorithms, protocols, or other non-public aspects of the Software;
-c) modify, adapt, translate, patch, alter, or create derivative works, modified builds, repackaged versions, or unofficial distributions of the Software;
-d) fork, publish, or distribute any source code, reconstructed source code, modified code, or derivative implementation of the Software without prior written permission from NovaAndroid;
-e) remove, alter, or obscure any copyright, trademark, attribution, or other proprietary notices contained in the Software;
-f) use the Nova name, branding, or related identifiers in a way that suggests endorsement, affiliation, or official status without prior written permission.
+Безвозмездно и без дополнительных согласований разрешается:
 
-3. Source Code and Internal Materials
-No right to access, receive, use, modify, publish, or redistribute the source code of the Software is granted under this license.
+- изучать исходный код, включая любой анализ и обратную разработку;
+- собирать Программу и использовать её в личных, образовательных и исследовательских
+  целях;
+- изменять исходный код и распространять изменённые версии — при условии сохранения этой
+  лицензии, указания авторства и явного описания внесённых изменений;
+- использовать Программу внутри некоммерческих организаций для их собственных нужд.
 
-If any source code, internal files, technical materials, or non-public builds are provided separately, they remain proprietary and confidential and may not be copied, disclosed, forked, modified, or used without prior written permission from NovaAndroid.
+## 2. Запрет коммерческого использования
 
-4. Ownership
-All title, ownership rights, and intellectual property rights in and to the Software, including all updates, improvements, modifications, documentation, branding, and related materials, remain exclusively with NovaAndroid, except for third-party components listed in Section 8, which retain their original ownership and licensing terms.
+Запрещается любое использование Программы, прямо или косвенно направленное на извлечение
+прибыли. В частности, но не ограничиваясь:
 
-5. Termination
-This license is effective until terminated. Your rights under this license will terminate automatically and immediately without notice if you fail to comply with any term of this Agreement. Upon termination, you must cease all use of the Software and destroy all copies in your possession or control.
+- продажа Программы, доступа к ней или собранных из неё приложений;
+- платные подписки, абонентская плата, пожертвования в обмен на доступ или функции;
+- аренда, лизинг, предоставление как услуги (SaaS), возмездный хостинг для третьих лиц;
+- включение Программы или её частей в платные продукты и услуги;
+- монетизация рекламой, партнёрскими программами и телеметрией;
+- перепродажа под другим именем, в том числе после изменения кода.
 
-6. Disclaimer of Warranty
-The Software is provided "as is", without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, title, and noninfringement.
+Коммерческая лицензия может быть предоставлена отдельно, по письменному соглашению с
+правообладателем.
 
-7. Limitation of Liability
-To the maximum extent permitted by applicable law, in no event shall NovaAndroid or its authors, developers, or copyright holders be liable for any claim, damages, or other liability, whether in an action of contract, tort, or otherwise, arising from, out of, or in connection with the Software or the use of or other dealings in the Software.
+## 3. Запрет использования системами искусственного интеллекта
 
-8. Third-Party Components and Attribution
-This Software includes or interoperates with a limited number of third-party components:
+Запрещается использование Программы, её частей и производных работ в связи с системами
+машинного обучения и искусственного интеллекта, в любых целях. В частности:
 
-a) opera-proxy-android-wrapper by SLY-F0X
-   https://github.com/SLY-F0X/opera-proxy-android-wrapper
-   License: CC BY-NC-SA 4.0 / Modified MIT (Non-Commercial)
+- обучение, дообучение, тонкая настройка и дистилляция моделей;
+- включение в обучающие выборки, эталонные наборы и бенчмарки;
+- построение эмбеддингов, индексов и баз для поиска с дополнением генерации (RAG);
+- автоматизированный сбор кода (scraping, crawling) для перечисленных целей;
+- генерация производного кода средствами моделей на основе Программы.
 
-b) opera-proxy by Snawoot
-   https://github.com/Snawoot/opera-proxy
-   License: MIT
+Запрет действует независимо от того, выполняются ли эти действия человеком, организацией
+или автоматически.
 
-c) Tun2Proxy
-   https://github.com/tun2proxy/tun2proxy
-   License: MIT
+**Исключение.** Раздел 3 не распространяется на применение ИИ-инструментов
+правообладателем — либо любым лицом, действующим по его прямому поручению, — для
+разработки, сопровождения, тестирования, анализа и документирования самой Программы.
+Исключение существует затем, чтобы правообладатель мог свободно применять любые
+инструменты к собственному проекту.
 
-d) Flowseal
-   https://github.com/Flowseal/tg-ws-proxy
-   Used as reference for a limited part of Telegram transparent relay interoperability.
-   License: MIT
+## 4. Отказ от гарантий
 
-These third-party licenses apply only to the respective components or referenced parts. All other parts of the Software remain proprietary under this Agreement.
+Программа предоставляется «как есть», без каких-либо гарантий, явных или подразумеваемых,
+включая гарантии пригодности для конкретных целей и ненарушения прав третьих лиц.
 
+## 5. Ограничение ответственности
+
+Ни при каких обстоятельствах правообладатель не несёт ответственности за любые претензии,
+убытки и иные требования, возникшие из использования Программы. Ответственность за
+соблюдение применимого законодательства лежит на пользователе — см. раздел «Правовая
+оговорка» в [README.md](README.md).
+
+## 6. Компоненты третьих лиц
+
+Условия настоящей лицензии не распространяются на сторонние компоненты: они
+используются на условиях своих авторов, которые сохраняются в неизменном виде.
+
+| Компонент | Лицензия |
+| --- | --- |
+| [XTLS/Xray-core](https://github.com/XTLS/Xray-core) — каталог `tools/xray-core` | Mozilla Public License 2.0 |
+| [amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go) | MIT (WireGuard LLC) |
+| [warp-plus](https://github.com/bepass-org/warp-plus) | MIT |
+| [usque](https://github.com/Diniboy1123/usque) — клиент MASQUE для Cloudflare WARP | MIT |
+| [connect-ip-go](https://github.com/Diniboy1123/connect-ip-go) — CONNECT-IP поверх HTTP/3 | MIT |
+| [quic-go](https://github.com/quic-go/quic-go) | MIT |
+| [uTLS](https://github.com/refraction-networking/utls) | BSD-3-Clause |
+| [Flowseal/tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy) — слой совместимости прозрачного ретранслятора Telegram | MIT |
+| [opera-proxy](https://github.com/Snawoot/opera-proxy) (Snawoot) | MIT |
+| [opera-proxy-android-wrapper](https://github.com/SLY-F0X/opera-proxy-android-wrapper) (SLY-F0X) | MIT |
+| [tun2proxy](https://github.com/tun2proxy/tun2proxy) | MIT |
+| OkHttp, AndroidX, Material Components, Apache Commons Compress | Apache License 2.0 |
+| Bouncy Castle | MIT |
+| XZ for Java | Public Domain |
+
+Файлы Xray-core остаются под MPL-2.0. MPL — пофайловая лицензия: изменения именно в этих
+файлах должны публиковаться на её условиях. Настоящая лицензия их не заменяет.

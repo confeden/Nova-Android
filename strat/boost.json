@@ -1,0 +1,59 @@
+{
+    "boost_1": [
+        "--dpi-desync=fake",
+        "--dpi-desync-ttl=1"
+    ],
+    "boost_2": [
+        "--dpi-desync=fake",
+        "--dpi-desync-ttl=1",
+        "--dpi-desync-fooling=badseq"
+    ],
+    "boost_3": [
+        "--dpi-desync=fake",
+        "--dpi-desync-ttl=1",
+        "--dpi-desync-fooling=md5sig"
+    ],
+    "boost_4": [
+        "--dpi-desync=fake",
+        "--dpi-desync-ttl=2"
+    ],
+    "boost_5": [
+        "--dpi-desync=fake",
+        "--dpi-desync-ttl=2",
+        "--dpi-desync-fooling=badseq"
+    ],
+    "boost_6": [
+        "--dpi-desync=fake",
+        "--dpi-desync-ttl=2",
+        "--dpi-desync-fooling=md5sig"
+    ],
+    "boost_7": [
+        "--dpi-desync=fake",
+        "--dpi-desync-ttl=3"
+    ],
+    "boost_8": [
+        "--dpi-desync=fake",
+        "--dpi-desync-ttl=3",
+        "--dpi-desync-fooling=badseq"
+    ],
+    "boost_9": [
+        "--dpi-desync=fake",
+        "--dpi-desync-ttl=3",
+        "--dpi-desync-fooling=md5sig"
+    ],
+    "boost_10": [
+        "--dpi-desync=fake",
+        "--dpi-desync-ttl=4"
+    ],
+    "boost_11": [
+        "--dpi-desync=fake",
+        "--dpi-desync-ttl=4",
+        "--dpi-desync-fooling=badseq"
+    ],
+    "boost_12": [
+        "--dpi-desync=fake",
+        "--dpi-desync-ttl=4",
+        "--dpi-desync-fooling=md5sig"
+    ],
+    "version": "0.998"
+}

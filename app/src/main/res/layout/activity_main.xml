@@ -1,0 +1,281 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#04070D"
+    android:clipChildren="false"
+    android:clipToPadding="false"
+    tools:context=".MainActivity">
+
+    <com.example.nova.BackdropRevealImageView
+        android:id="@+id/iv_background_art"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="@null"
+        android:scaleType="centerCrop"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <com.example.nova.NovaNetworkBackgroundView
+        android:id="@+id/nova_background_animation"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="@null"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <com.example.nova.TronRingsView
+        android:id="@+id/tron_backdrop"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- Status Text -->
+    <com.example.nova.StrokeTextView
+        android:id="@+id/tvStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:text="НЕ ПОДКЛЮЧЕНО"
+        android:textColor="#C62828" 
+        android:textSize="16sp"
+        android:fontFamily="sans-serif-black"
+        android:textStyle="bold"
+        android:letterSpacing="0.082"
+        android:paddingTop="60dp"
+        android:paddingBottom="60dp"
+        app:layout_constraintBottom_toTopOf="@+id/tvAttemptProgress"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent" /> 
+
+    <!-- Пояснение, когда работает не тот транспорт, который выбрал пользователь -->
+    <TextView
+        android:id="@+id/tv_transport_notice"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="24dp"
+        android:layout_marginEnd="24dp"
+        android:layout_marginBottom="10dp"
+        android:ellipsize="end"
+        android:gravity="center"
+        android:maxLines="2"
+        android:saveEnabled="false"
+        android:text=""
+        android:textColor="#FFC46B"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        android:visibility="gone"
+        app:layout_constraintBottom_toTopOf="@+id/tvAttemptProgress"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <TextView
+        android:id="@+id/tvAttemptProgress"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="8dp"
+        android:text="1/1"
+        android:textColor="#C8D4FF"
+        android:textSize="13sp"
+        android:textStyle="bold"
+        android:visibility="invisible"
+        app:layout_constraintBottom_toTopOf="@+id/restricted_mobile_dots"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <com.example.nova.SlidingDotsIndicatorView
+        android:id="@+id/restricted_mobile_dots"
+        android:layout_width="74dp"
+        android:layout_height="11dp"
+        android:layout_marginBottom="12dp"
+        android:visibility="invisible"
+        app:layout_constraintBottom_toTopOf="@+id/btnConnect"
+        app:layout_constraintEnd_toEndOf="@+id/tvAttemptProgress"
+        app:layout_constraintStart_toStartOf="@+id/tvAttemptProgress" />
+
+    <!-- Main Button (Geometric Center) -->
+    <com.example.nova.GlowPillButton
+        android:id="@+id/btnConnect"
+        android:layout_width="236dp" 
+        android:layout_height="68dp"
+        android:text="ПОДКЛЮЧИТЬ"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:textColor="#000000"
+        android:fontFamily="sans-serif-black"
+        android:letterSpacing="0.02"
+        android:shadowColor="#80FFFFFF"
+        android:shadowDx="0"
+        android:shadowDy="0"
+        android:shadowRadius="12"
+        android:stateListAnimator="@null"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <com.example.nova.GlowPillButton
+        android:id="@+id/btnNextProfile"
+        android:layout_width="68dp"
+        android:layout_height="68dp"
+        android:text="&gt;"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:textColor="#000000"
+        android:fontFamily="sans-serif-black"
+        android:letterSpacing="0.02"
+        android:shadowColor="#80FFFFFF"
+        android:shadowDx="0"
+        android:shadowDy="0"
+        android:shadowRadius="12"
+        android:stateListAnimator="@null"
+        app:layout_constraintBottom_toBottomOf="@id/btnConnect"
+        app:layout_constraintTop_toTopOf="@id/btnConnect"
+        app:layout_constraintStart_toEndOf="@id/btnConnect"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <com.example.nova.StrokeTextView
+        android:id="@+id/btn_install_update"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="18dp"
+        android:background="@drawable/bg_update_install_button"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center"
+        android:minWidth="240dp"
+        android:paddingStart="22dp"
+        android:paddingTop="10dp"
+        android:paddingEnd="22dp"
+        android:paddingBottom="10dp"
+        android:text="Обновить приложение"
+        android:textColor="#13A10E"
+        android:textSize="15sp"
+        android:textStyle="bold"
+        android:visibility="gone"
+        app:layout_constraintEnd_toEndOf="@+id/btnConnect"
+        app:layout_constraintStart_toStartOf="@+id/btnConnect"
+        app:layout_constraintTop_toBottomOf="@+id/btnConnect" />
+
+    <!-- Latency Label (Above Graph, Right side) -->
+    <TextView
+        android:id="@+id/tv_internet_label"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:gravity="end"
+        android:lineSpacingExtra="2dp"
+        android:text="Ping:&#10;---"
+        android:textColor="#FFFFFF"
+        android:shadowColor="#000000"
+        android:shadowDx="2"
+        android:shadowDy="2"
+        android:shadowRadius="4"
+        android:textSize="14sp"
+        android:layout_marginTop="6dp"
+        app:layout_constraintTop_toTopOf="@+id/ll_ip_row"
+        app:layout_constraintEnd_toEndOf="@+id/graph_latency" />
+
+    <TextView
+        android:id="@+id/tv_country_badge"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:saveEnabled="false"
+        android:layout_marginBottom="6dp"
+        android:background="@drawable/bg_country_badge"
+        android:paddingStart="10dp"
+        android:paddingTop="6dp"
+        android:paddingEnd="10dp"
+        android:paddingBottom="6dp"
+        android:text="WARP: --"
+        android:textAllCaps="true"
+        android:textColor="#FFFFFF"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        android:visibility="gone"
+        app:layout_constraintBottom_toTopOf="@+id/tv_internet_label"
+        app:layout_constraintEnd_toEndOf="@+id/graph_latency" />
+
+    <!-- Settings Button (Gear Emoji) -->
+    <TextView
+        android:id="@+id/btn_settings"
+        android:layout_width="wrap_content"
+        android:layout_height="48dp"
+        android:clickable="true"
+        android:focusable="true"
+        android:minWidth="132dp"
+        android:text="⚙️ Настройки"
+        android:textColor="#FFFFFF"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        android:gravity="center"
+        android:background="@drawable/bg_settings_button"
+        android:paddingStart="18dp"
+        android:paddingEnd="18dp"
+        android:layout_marginBottom="10dp"
+        app:layout_constraintBottom_toTopOf="@+id/ll_ip_row"
+        app:layout_constraintStart_toStartOf="@+id/graph_latency"/>
+
+    <LinearLayout
+        android:id="@+id/ll_ip_row"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="2dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        app:layout_constraintBottom_toTopOf="@+id/graph_latency"
+        app:layout_constraintStart_toStartOf="@+id/graph_latency">
+
+        <TextView
+            android:id="@+id/tv_ip_address"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:saveEnabled="false"
+            android:background="@drawable/bg_ip_label"
+            android:gravity="start"
+            android:lineSpacingExtra="2dp"
+            android:maxLines="2"
+            android:minLines="2"
+            android:text="...&#10;..."
+            android:textColor="#50C878"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <!-- Latency Graph (Bottom) -->
+    <com.example.nova.LatencyGraphView
+        android:id="@+id/graph_latency"
+        android:layout_width="0dp"
+        android:layout_height="80dp"
+        android:layout_marginBottom="0dp"
+        android:layout_marginStart="24dp"
+        android:layout_marginEnd="24dp"
+        android:background="@drawable/bg_latency_graph"
+        app:layout_constraintBottom_toTopOf="@+id/tv_version"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <TextView
+        android:id="@+id/tv_version"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="6dp"
+        android:layout_marginBottom="2dp"
+        android:text="v1.12"
+        android:textColor="#50C878"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="@+id/graph_latency" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>

@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="utf-8"?>
+    <androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#121212"
+    android:padding="16dp">
+
+    <TextView
+        android:id="@+id/tv_title"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:fontFamily="sans-serif-medium"
+        android:text="Конфигурации"
+        android:textColor="#50C878"
+        android:textSize="24sp"
+        android:textStyle="bold"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <LinearLayout
+        android:id="@+id/row_actions"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="14dp"
+        android:orientation="vertical"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/tv_title">
+
+        <TextView
+            android:id="@+id/btn_create_new"
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:background="@drawable/bg_settings_action_dark"
+            android:clickable="true"
+            android:focusable="true"
+            android:fontFamily="sans-serif-medium"
+            android:gravity="center"
+            android:singleLine="true"
+            android:text="Сгенерировать новые"
+            android:textSize="16sp"
+            android:textColor="#FFFFFF"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/btn_paste_config"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="10dp"
+            android:background="@drawable/bg_settings_action_dark"
+            android:clickable="true"
+            android:focusable="true"
+            android:fontFamily="sans-serif-medium"
+            android:gravity="center"
+            android:singleLine="true"
+            android:text="Импортировать конфигурацию"
+            android:textColor="#FFFFFF" />
+
+        <TextView
+            android:id="@+id/btn_adapt_network"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="10dp"
+            android:background="@drawable/bg_settings_action_dark"
+            android:clickable="true"
+            android:focusable="true"
+            android:fontFamily="sans-serif-medium"
+            android:gravity="center"
+            android:singleLine="true"
+            android:text="Адаптация к условиям сети"
+            android:textColor="#FFFFFF" />
+
+        <TextView
+            android:id="@+id/btn_imported_only"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="10dp"
+            android:background="@drawable/bg_settings_action_dark"
+            android:clickable="true"
+            android:focusable="true"
+            android:fontFamily="sans-serif-medium"
+            android:gravity="center"
+            android:singleLine="true"
+            android:text="Встроенные конфигурации"
+            android:textColor="#FFFFFF" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/tv_discovery_status"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="14dp"
+        android:fontFamily="sans-serif-medium"
+        android:text="Готово к проверке"
+        android:textColor="#FFFFFF"
+        android:textSize="15sp"
+        android:textStyle="bold"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/row_actions" />
+
+    <TextView
+        android:id="@+id/tv_discovery_progress"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:fontFamily="sans-serif-medium"
+        android:text="Успешных: 0"
+        android:textColor="#50C878"
+        android:textSize="13sp"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/tv_discovery_status" />
+
+    <com.example.nova.WarpDiscoveryTrailView
+        android:id="@+id/view_discovery_trail"
+        android:layout_width="0dp"
+        android:layout_height="18dp"
+        android:layout_marginStart="12dp"
+        app:layout_constraintBottom_toBottomOf="@id/tv_discovery_progress"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toEndOf="@id/tv_discovery_progress"
+        app:layout_constraintTop_toTopOf="@id/tv_discovery_progress" />
+
+    <!--
+        Строка «пока ничего нет» стоит ПОД поиском, а не на его месте.
+
+        Дефект, который это чинит: и она, и поле поиска были привязаны к низу
+        tv_discovery_progress, то есть занимали одну и ту же точку и рисовались друг
+        поверх друга. С непустым списком это не видно, а с пустым — текст перекрывал поле
+        ввода.
+    -->
+    <TextView
+        android:id="@+id/tv_empty"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="18dp"
+        android:fontFamily="sans-serif"
+        android:text="Пока нет встроенных конфигураций."
+        android:textColor="#AAAAAA"
+        android:textSize="14sp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/et_config_search" />
+
+    <EditText
+        android:id="@+id/et_config_search"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:background="@drawable/bg_settings_item"
+        android:backgroundTint="#20FFFFFF"
+        android:hint="Поиск: хост, порт, режим"
+        android:imeOptions="actionSearch"
+        android:inputType="text"
+        android:maxLines="1"
+        android:minHeight="44dp"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:textColor="#FFFFFF"
+        android:textColorHint="#8899A0"
+        android:textSize="14sp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/tv_discovery_progress" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/rv_configs"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_marginTop="8dp"
+        android:clipToPadding="false"
+        android:paddingBottom="16dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/et_config_search" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>

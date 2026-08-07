@@ -1,0 +1,110 @@
+syntax = "proto3";
+
+package xray.app.router;
+option csharp_namespace = "Xray.App.Router";
+option go_package = "github.com/xtls/xray-core/app/router";
+option java_package = "com.xray.app.router";
+option java_multiple_files = true;
+
+import "common/serial/typed_message.proto";
+import "common/net/port.proto";
+import "common/net/network.proto";
+import "common/geodata/geodat.proto";
+
+message RoutingRule {
+  oneof target_tag {
+    // Tag of outbound that this rule is pointing to.
+    string tag = 1;
+
+    // Tag of routing balancer.
+    string balancing_tag = 12;
+  }
+
+  string rule_tag = 19;
+
+  // List of domains for target domain matching.
+  repeated xray.common.geodata.DomainRule domain = 2;
+
+  // List of IPs for target IP address matching.
+  repeated xray.common.geodata.IPRule ip = 10;
+
+  // List of ports for target port matching.
+  xray.common.net.PortList port_list = 14;
+
+  // List of networks for matching.
+  repeated xray.common.net.Network networks = 13;
+
+  // List of IPs for source IP address matching.
+  repeated xray.common.geodata.IPRule source_ip = 11;
+
+  // List of ports for source port matching.
+  xray.common.net.PortList source_port_list = 16;
+
+  repeated string user_email = 7;
+  repeated string inbound_tag = 8;
+  repeated string protocol = 9;
+
+  map<string, string> attributes = 15;
+
+  // List of IPs for local IP address matching.
+  repeated xray.common.geodata.IPRule local_ip = 17;
+
+  // List of ports for local port matching.
+  xray.common.net.PortList local_port_list = 18;
+
+  xray.common.net.PortList vless_route_list = 20;
+
+  repeated string process = 21;
+  WebhookConfig webhook = 22;
+}
+
+message WebhookConfig {
+  string url = 1;
+  uint32 deduplication = 2;
+  map<string, string> headers = 3;
+}
+
+message BalancingRule {
+  string tag = 1;
+  repeated string outbound_selector = 2;
+  string strategy = 3;
+  xray.common.serial.TypedMessage strategy_settings = 4;
+  string fallback_tag = 5;
+}
+
+message StrategyWeight {
+  bool regexp = 1;
+  string match = 2;
+  float value =3;
+}
+
+message StrategyLeastLoadConfig {
+  // weight settings
+  repeated StrategyWeight costs = 2;
+  // RTT baselines for selecting, int64 values of time.Duration
+  repeated int64 baselines = 3;
+  // expected nodes count to select
+  int32 expected = 4;
+  // max acceptable rtt, filter away high delay nodes. default 0
+  int64 maxRTT = 5;
+  // acceptable failure rate
+  float tolerance = 6;
+}
+
+message Config {
+  enum DomainStrategy {
+    // Use domain as is.
+    AsIs = 0;
+
+    reserved 1;
+
+    // Resolve to IP if the domain doesn't match any rules.
+    IpIfNonMatch = 2;
+
+    // Resolve to IP if any rule requires IP matching.
+    IpOnDemand = 3;
+  }
+  DomainStrategy domain_strategy = 1;
+  repeated RoutingRule rule = 2;
+  repeated BalancingRule balancing_rule = 3;
+}

@@ -1,0 +1,309 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#121212"
+    android:fillViewport="true"
+    android:padding="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/tv_title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Раздача через Nova"
+            android:textColor="#50C878"
+            android:textSize="24sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/btn_toggle_proxy"
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:layout_marginTop="14dp"
+            android:background="@drawable/bg_settings_action_green"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:text="Включить"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tv_proxy_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:text="Прокси выключен"
+            android:textColor="#FFFFFF"
+            android:textSize="15sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tv_proxy_summary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Доступен только при живом VPN. Протоколы: HTTP, HTTPS CONNECT, SOCKS5 CONNECT."
+            android:textColor="#AAAAAA"
+            android:textSize="12sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_settings_item"
+            android:backgroundTint="#20FFFFFF"
+            android:orientation="vertical"
+            android:padding="12dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Куда подключаться"
+                android:textColor="#50C878"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tv_gateway_lead"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Включите раздачу, чтобы увидеть адрес."
+                android:textColor="#FFFFFF"
+                android:textSize="14sp" />
+
+            <LinearLayout
+                android:id="@+id/container_gateway_endpoints"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:orientation="vertical" />
+
+            <TextView
+                android:id="@+id/tv_gateway_empty"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="Пока некуда: включите точку доступа, USB-модем или подключитесь к общей сети Wi-Fi."
+                android:textColor="#AAAAAA"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/tv_portal_url"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:clickable="true"
+                android:focusable="true"
+                android:text="Страница настройки: —"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:text="Откройте этот адрес в браузере подключённого устройства — там пошаговая инструкция для Windows, macOS, iOS, Android и Android TV."
+                android:textColor="#AAAAAA"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/tv_pac_url"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:clickable="true"
+                android:focusable="true"
+                android:text="PAC: —"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:text="Для полей «Автоматическая настройка прокси»."
+                android:textColor="#AAAAAA"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_settings_item"
+            android:backgroundTint="#20FFFFFF"
+            android:orientation="vertical"
+            android:padding="12dp">
+
+            <TextView
+                android:id="@+id/tv_host_port"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Хост: 127.0.0.1    Порт: 1370"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tv_username"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="Логин: ----"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp" />
+
+            <TextView
+                android:id="@+id/tv_password"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Пароль: ----"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp" />
+
+            <TextView
+                android:id="@+id/btn_regenerate_creds"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="14dp"
+                android:background="@drawable/bg_settings_action_green"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:text="Сменить логин и пароль"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btn_toggle_open_tethered"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/bg_settings_action_green"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:minHeight="48dp"
+                android:paddingTop="12dp"
+                android:paddingBottom="12dp"
+                android:text="Без пароля для клиентов раздачи: выкл"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tv_open_tethered_hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="Многие телевизоры и приставки не умеют вводить логин и пароль прокси. Послабление действует только для устройств, подключённых к раздаче самого телефона, и никогда — для общей сети Wi-Fi."
+                android:textColor="#AAAAAA"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/btn_toggle_allow_direct"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/bg_settings_action_green"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:minHeight="48dp"
+                android:paddingTop="12dp"
+                android:paddingBottom="12dp"
+                android:text="Без VPN выпускать напрямую: выкл"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tv_allow_direct_hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="Пока выключено, при отсутствии туннеля Nova честно отвечает клиенту ошибкой. Если включить, интернет у клиентов продолжит работать даже без VPN — но пойдёт открыто, со своим обычным адресом."
+                android:textColor="#AAAAAA"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_settings_item"
+            android:backgroundTint="#20FFFFFF"
+            android:orientation="vertical"
+            android:padding="12dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Что пойдёт мимо VPN"
+                android:textColor="#FFB347"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Прокси переносит только TCP. Мимо туннеля пойдут: онлайн-игры, звонки и видеосвязь (UDP); QUIC и HTTP/3; системные DNS-запросы программ, не использующих прокси; программы, игнорирующие системную настройку прокси — торренты, часть игр и утилит. Локальная сеть остаётся доступна напрямую намеренно.\n\nЧтобы через VPN шло совершенно всё, на самом устройстве нужен VPN-клиент. Раздача без root на это не способна ни у одного приложения — это ограничение Android."
+                android:textColor="#AAAAAA"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_settings_item"
+            android:backgroundTint="#20FFFFFF"
+            android:orientation="vertical"
+            android:padding="12dp">
+
+            <TextView
+                android:id="@+id/tv_unauthorized_counter"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Неудачных входов: 0"
+                android:textColor="#FF6B6B"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="Если Android позволяет, Nova покажет какое приложение пыталось использовать прокси без авторизации."
+                android:textColor="#AAAAAA"
+                android:textSize="12sp" />
+
+            <LinearLayout
+                android:id="@+id/container_unauthorized_attempts"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:orientation="vertical" />
+
+            <TextView
+                android:id="@+id/tv_unauthorized_empty"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Пока нет неудачных попыток."
+                android:textColor="#AAAAAA"
+                android:textSize="13sp" />
+        </LinearLayout>
+    </LinearLayout>
+</ScrollView>

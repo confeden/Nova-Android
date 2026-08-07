@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme. -->
+    <style name="Theme.Nova" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <!-- Primary brand color. -->
+        <item name="colorPrimary">#04070D</item>
+        <item name="colorPrimaryVariant">#04070D</item>
+        <item name="colorOnPrimary">@color/white</item>
+        <!-- Secondary brand color. -->
+        <item name="colorSecondary">#0D1118</item>
+        <item name="colorSecondaryVariant">#0D1118</item>
+        <item name="colorOnSecondary">@color/black</item>
+        <!-- Status bar color. -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowTranslucentStatus">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowContentTransitions">false</item>
+        <item name="android:windowEnterTransition">@null</item>
+        <item name="android:windowExitTransition">@null</item>
+        <item name="android:windowReenterTransition">@null</item>
+        <item name="android:windowReturnTransition">@null</item>
+        <item name="android:activityOpenEnterAnimation">@anim/no_anim</item>
+        <item name="android:activityOpenExitAnimation">@anim/no_anim</item>
+        <item name="android:activityCloseEnterAnimation">@anim/no_anim</item>
+        <item name="android:activityCloseExitAnimation">@anim/no_anim</item>
+    </style>
+    
+    <!-- Settings Dialog Theme - Liquid Glass Aesthetic -->
+    <style name="Theme.Nova.Settings" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowContentTransitions">false</item>
+        <item name="android:windowEnterTransition">@null</item>
+        <item name="android:windowExitTransition">@null</item>
+        <item name="android:windowReenterTransition">@null</item>
+        <item name="android:windowReturnTransition">@null</item>
+        <item name="android:windowBackground">@drawable/bg_liquid_glass_screen</item>
+        <item name="switchStyle">@style/LiquidGlassSwitch</item>
+        <item name="android:switchStyle">@style/LiquidGlassSwitch</item>
+        <item name="android:activityOpenEnterAnimation">@anim/no_anim</item>
+        <item name="android:activityOpenExitAnimation">@anim/no_anim</item>
+        <item name="android:activityCloseEnterAnimation">@anim/no_anim</item>
+        <item name="android:activityCloseExitAnimation">@anim/no_anim</item>
+    </style>
+
+    <style name="LiquidGlassSwitch" parent="Widget.MaterialComponents.CompoundButton.Switch">
+        <item name="thumbTint">@color/liquid_accent_green</item>
+        <item name="trackTint">#4032D74B</item>
+    </style>
+</resources>

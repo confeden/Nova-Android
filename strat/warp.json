@@ -1,0 +1,10 @@
+{
+    "warp": [
+        "--filter-udp=443",
+        "--ipset=ip/warp.txt",
+        "--dpi-desync=fake",
+        "--dpi-desync-repeats=6",
+        "--dpi-desync-fake-quic=fake/quic_initial_www_google_com.bin"
+    ],
+    "version": "0.998"
+}

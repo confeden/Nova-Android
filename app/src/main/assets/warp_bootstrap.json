@@ -1,0 +1,12 @@
+{
+  "private_key": "7NMyJemtPW8/EKQsBxAHjfhsPVOiNZfpG0VERGergeY=",
+  "public_key": "o4z6NjglNksBbiLm9upBM2Ruejiv9OnFSkXLwUfAsAE=",
+  "ipv4": "172.16.0.2",
+  "ipv6": "2606:4700:110:812c:a554:b442:26d4:1330",
+  "peer_pub": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+  "peer_endpoint": "162.159.195.9:500",
+  "last_success_port": 500,
+  "last_success_protocol": "warp-awg-exact",
+  "last_success_endpoint": "162.159.195.9",
+  "last_success_mode": "warp-awg-exact"
+}

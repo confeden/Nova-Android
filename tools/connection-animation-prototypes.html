@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nova connection animation prototypes</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #04070d;
+      --panel: rgba(12, 15, 24, .82);
+      --line: rgba(255, 255, 255, .12);
+      --green: #13a10e;
+      --text: #eef6f1;
+      --muted: #91a197;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", Arial, sans-serif;
+      overflow: hidden;
+    }
+    canvas {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+    }
+    .bar {
+      position: fixed;
+      left: 18px;
+      right: 18px;
+      top: 18px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      backdrop-filter: blur(10px);
+    }
+    .title {
+      margin-right: 8px;
+      font-size: 14px;
+      font-weight: 700;
+      color: #d8d7ff;
+      white-space: nowrap;
+    }
+    button {
+      height: 34px;
+      padding: 0 12px;
+      border: 1px solid rgba(124, 93, 176, .42);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, .055);
+      color: var(--text);
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button.active {
+      border-color: rgba(177, 139, 224, .72);
+      background: rgba(118, 79, 164, .24);
+      color: #f1e7ff;
+    }
+    .caption {
+      position: fixed;
+      left: 18px;
+      bottom: 18px;
+      max-width: 780px;
+      padding: 12px 14px;
+      background: rgba(12, 15, 24, .72);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+      backdrop-filter: blur(10px);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+  <div class="bar">
+    <div class="title">Новые варианты подключения</div>
+    <button data-variant="0" class="active">1. Yogurt Thin</button>
+    <button data-variant="1">2. Yogurt Mist</button>
+    <button data-variant="2">3. Yogurt Indigo</button>
+    <button data-variant="3">4. Yogurt Veil</button>
+    <button data-variant="4">5. Yogurt Night</button>
+  </div>
+  <div class="caption" id="caption"></div>
+
+  <script>
+    const canvas = document.getElementById('stage');
+    const ctx = canvas.getContext('2d', { alpha: false });
+    const caption = document.getElementById('caption');
+
+    const variants = [
+      {
+        name: 'Yogurt Thin',
+        caption: 'Самый близкий к Yogurt Haze, но без мерцания: очень тонкие молочно-фиолетовые волны, сильное затухание к краям.',
+        colors: [[116, 98, 152], [154, 130, 181], [204, 190, 220]],
+        ringAlpha: .20,
+        ringWidth: .34,
+        ringCount: 4,
+        speed: 116,
+        glow: .58,
+        constellation: .62,
+        edgePower: 2.45,
+        ellipse: .035
+      },
+      {
+        name: 'Yogurt Mist',
+        caption: 'Более туманный и бледный вариант: кольца почти невесомые, ближе к границе экрана быстро растворяются.',
+        colors: [[128, 110, 160], [168, 145, 190], [213, 199, 226]],
+        ringAlpha: .17,
+        ringWidth: .28,
+        ringCount: 5,
+        speed: 104,
+        glow: .50,
+        constellation: .52,
+        edgePower: 2.95,
+        ellipse: .045
+      },
+      {
+        name: 'Yogurt Indigo',
+        caption: 'Холоднее и ближе к индиго: волны тонкие, спокойные, созвездия проявляются немного контрастнее.',
+        colors: [[91, 86, 145], [130, 109, 176], [191, 177, 216]],
+        ringAlpha: .19,
+        ringWidth: .31,
+        ringCount: 4,
+        speed: 124,
+        glow: .46,
+        constellation: .72,
+        edgePower: 2.65,
+        ellipse: .025
+      },
+      {
+        name: 'Yogurt Veil',
+        caption: 'Самый мягкий слой: кольца выглядят как тонкая вуаль, созвездия подсвечиваются коротко и не отвлекают.',
+        colors: [[123, 105, 150], [151, 122, 173], [198, 180, 212]],
+        ringAlpha: .145,
+        ringWidth: .24,
+        ringCount: 5,
+        speed: 112,
+        glow: .42,
+        constellation: .48,
+        edgePower: 3.20,
+        ellipse: .055
+      },
+      {
+        name: 'Yogurt Night',
+        caption: 'Темнее и черничнее: минимальная яркость, самые незаметные края, созвездия видны как приглушённая глубина.',
+        colors: [[70, 68, 126], [104, 88, 154], [168, 148, 202]],
+        ringAlpha: .165,
+        ringWidth: .29,
+        ringCount: 4,
+        speed: 96,
+        glow: .34,
+        constellation: .56,
+        edgePower: 3.05,
+        ellipse: .035
+      }
+    ];
+
+    let variant = 0;
+    let w = 0;
+    let h = 0;
+    let dpr = 1;
+    let seed = 0x4e4f5641;
+    const stars = [];
+    const edges = [];
+
+    function rnd() {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return seed / 4294967296;
+    }
+
+    function resize() {
+      dpr = Math.min(window.devicePixelRatio || 1, 2);
+      w = window.innerWidth;
+      h = window.innerHeight;
+      canvas.width = Math.floor(w * dpr);
+      canvas.height = Math.floor(h * dpr);
+      canvas.style.width = w + 'px';
+      canvas.style.height = h + 'px';
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      rebuildSky();
+    }
+
+    function rebuildSky() {
+      seed = 0x4e4f5641;
+      stars.length = 0;
+      edges.length = 0;
+      const count = w < 740 ? 42 : 62;
+      for (let i = 0; i < count; i++) {
+        stars.push({
+          x: rnd() * w,
+          y: rnd() * h,
+          r: .65 + rnd() * 1.35,
+          phase: rnd() * Math.PI * 2,
+          drift: .12 + rnd() * .22
+        });
+      }
+      const max = Math.min(170, Math.max(118, Math.min(w, h) * .17));
+      for (let i = 0; i < stars.length; i++) {
+        const local = [];
+        const a = stars[i];
+        for (let j = i + 1; j < stars.length; j++) {
+          const b = stars[j];
+          const dist = Math.hypot(a.x - b.x, a.y - b.y);
+          if (dist < max) local.push({ j, dist });
+        }
+        local.sort((x, y) => x.dist - y.dist);
+        local.slice(0, 2).forEach(item => edges.push({ a: i, b: item.j, dist: item.dist }));
+      }
+    }
+
+    function background() {
+      const g = ctx.createLinearGradient(0, 0, w, h);
+      g.addColorStop(0, '#03060d');
+      g.addColorStop(.42, '#070914');
+      g.addColorStop(.76, '#0b0712');
+      g.addColorStop(1, '#05040a');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, w, h);
+    }
+
+    function edgeFade(radius, maxRadius) {
+      const normalized = radius / maxRadius;
+      const edgeStart = .44;
+      const edge = Math.max(0, (normalized - edgeStart) / (1 - edgeStart));
+      return Math.pow(1 - Math.min(1, edge), variants[variant].edgePower || 2.6);
+    }
+
+    function ringIntensity(distance, radius, width) {
+      const delta = Math.abs(distance - radius);
+      if (delta > width) return 0;
+      const x = 1 - delta / width;
+      return x * x * (3 - 2 * x);
+    }
+
+    function colorAt(config, index, alpha) {
+      const c = config.colors[index % config.colors.length];
+      return `rgba(${c[0]},${c[1]},${c[2]},${alpha})`;
+    }
+
+    function ringRadii(t, config, maxRadius) {
+      const spacing = maxRadius / config.ringCount;
+      const base = (t * config.speed) % spacing;
+      const radii = [];
+      for (let i = 0; i <= config.ringCount; i++) {
+        radii.push(base + i * spacing);
+      }
+      return radii;
+    }
+
+    function waveEnergyAt(x, y, t, config) {
+      const cx = w * .5;
+      const cy = h * .52;
+      const dx = x - cx;
+      const dy = (y - cy) * (1 + config.ellipse);
+      const distance = Math.hypot(dx, dy);
+      const maxRadius = Math.hypot(Math.max(cx, w - cx), Math.max(cy, h - cy)) + 72;
+      const width = Math.max(26, Math.min(w, h) * .055) * (config.ringWidth > 1.8 ? 1.22 : 1);
+      let energy = 0;
+      for (const radius of ringRadii(t, config, maxRadius)) {
+        energy = Math.max(energy, ringIntensity(distance, radius, width) * edgeFade(radius, maxRadius));
+      }
+      if (config.echo) {
+        for (const radius of ringRadii(t - .33, config, maxRadius)) {
+          energy = Math.max(energy, ringIntensity(distance, radius, width * 1.18) * edgeFade(radius, maxRadius) * .52);
+        }
+      }
+      return energy;
+    }
+
+    function drawRings(t, config) {
+      const cx = w * .5;
+      const cy = h * .52;
+      const maxRadius = Math.hypot(Math.max(cx, w - cx), Math.max(cy, h - cy)) + 72;
+      const radii = ringRadii(t, config, maxRadius);
+      const width = Math.max(26, Math.min(w, h) * .055);
+
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      for (let i = 0; i < radii.length; i++) {
+        const radius = radii[i];
+        const fade = edgeFade(radius, maxRadius);
+        if (fade <= 0) continue;
+        const alpha = config.ringAlpha * fade;
+        const c = config.colors[i % config.colors.length];
+        const bandWidth = Math.max(5, width * config.ringWidth);
+        const gradient = ctx.createRadialGradient(cx, cy, Math.max(0, radius - bandWidth), cx, cy, radius + bandWidth);
+        gradient.addColorStop(0, `rgba(${c[0]},${c[1]},${c[2]},0)`);
+        gradient.addColorStop(.46, `rgba(${c[0]},${c[1]},${c[2]},${alpha * .18})`);
+        gradient.addColorStop(.52, `rgba(${c[0]},${c[1]},${c[2]},${alpha})`);
+        gradient.addColorStop(.58, `rgba(${c[0]},${c[1]},${c[2]},${alpha * .14})`);
+        gradient.addColorStop(1, `rgba(${c[0]},${c[1]},${c[2]},0)`);
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius + bandWidth, 0, Math.PI * 2);
+        ctx.arc(cx, cy, Math.max(0, radius - bandWidth), 0, Math.PI * 2, true);
+        ctx.fill('evenodd');
+      }
+      ctx.restore();
+    }
+
+    function drawConstellations(t, config) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+
+      for (const edge of edges) {
+        const a = stars[edge.a];
+        const b = stars[edge.b];
+        const mx = (a.x + b.x) * .5;
+        const my = (a.y + b.y) * .5;
+        const e = waveEnergyAt(mx, my, t, config);
+        const idle = .018 + .018 * Math.sin(t * .7 + a.phase);
+        const alpha = Math.min(.34, idle + e * config.constellation * .36);
+        if (alpha <= .02) continue;
+        ctx.strokeStyle = colorAt(config, 2, alpha);
+        ctx.lineWidth = .85 + e * .65;
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
+
+      for (const s of stars) {
+        const e = waveEnergyAt(s.x, s.y, t, config);
+        const pulse = (Math.sin(t * .9 + s.phase) + 1) * .5;
+        const alpha = Math.min(.72, .14 + pulse * .08 + e * config.constellation * .52);
+        const radius = s.r * (1 + e * 1.9);
+        ctx.fillStyle = colorAt(config, e > .45 ? 2 : 1, alpha);
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, radius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.restore();
+    }
+
+    function drawCenter(t, config) {
+      const cx = w * .5;
+      const cy = h * .52;
+      const pulse = (Math.sin(t * 1.4) + 1) * .5;
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      const c = config.colors[1];
+      const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, 78 + pulse * 14);
+      gradient.addColorStop(0, `rgba(${c[0]},${c[1]},${c[2]},${.13 * config.glow})`);
+      gradient.addColorStop(.62, `rgba(${c[0]},${c[1]},${c[2]},${.045 * config.glow})`);
+      gradient.addColorStop(1, `rgba(${c[0]},${c[1]},${c[2]},0)`);
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 92 + pulse * 18, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    let last = performance.now();
+    function frame(now) {
+      const t = now / 1000;
+      const dt = Math.min(48, now - last) / 16.666;
+      last = now;
+      for (const s of stars) {
+        s.x += Math.sin(t * .18 + s.phase) * .006 * dt * s.drift;
+        s.y += Math.cos(t * .16 + s.phase) * .005 * dt * s.drift;
+      }
+      const config = variants[variant];
+      background();
+      drawCenter(t, config);
+      drawRings(t, config);
+      drawConstellations(t, config);
+      requestAnimationFrame(frame);
+    }
+
+    document.querySelectorAll('button[data-variant]').forEach(button => {
+      button.addEventListener('click', () => {
+        variant = Number(button.dataset.variant);
+        document.querySelectorAll('button[data-variant]').forEach(item => {
+          item.classList.toggle('active', item === button);
+        });
+        caption.textContent = variants[variant].caption;
+      });
+    });
+
+    caption.textContent = variants[0].caption;
+    window.addEventListener('resize', resize);
+    resize();
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>

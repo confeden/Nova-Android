@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="purple_200">#FFBB86FC</color>
+    <color name="purple_500">#FF6200EE</color>
+    <color name="purple_700">#FF3700B3</color>
+    <color name="teal_200">#FF03DAC5</color>
+    <color name="teal_700">#FF018786</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="primary_color">#6200EE</color>
+    <color name="primary_variant">#3700B3</color>
+    <color name="secondary_color">#03DAC6</color>
+
+    <!-- Liquid Glass Design System Palette -->
+    <color name="liquid_bg_start">#090817</color>
+    <color name="liquid_bg_center">#120D27</color>
+    <color name="liquid_bg_end">#1B1238</color>
+    <color name="liquid_glass_card_bg">#B8191234</color>
+    <color name="liquid_glass_card_stroke">#40A88DFF</color>
+    <color name="liquid_glass_field_bg">#70100B22</color>
+    <color name="liquid_glass_field_stroke">#306550A0</color>
+    <color name="liquid_accent_green">#32D74B</color>
+    <color name="liquid_accent_green_glow">#4032D74B</color>
+    <color name="liquid_text_primary">#FFFFFF</color>
+    <color name="liquid_text_secondary">#9DA2C3</color>
+</resources>

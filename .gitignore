@@ -1,0 +1,99 @@
+# Android стандартное
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build/
+/app/build/
+/captures
+.externalNativeBuild
+.cxx
+*.apk
+*.aab
+*.ap_
+*.dex
+.kotlin/
+
+# Внешние зависимости: это отдельные git-репозитории, подключённые через replace
+# в nova-core/go.mod. В индекс их класть нельзя — получились бы gitlink-записи без
+# .gitmodules. Как их получить, описано в инструкции по сборке.
+/tools/amneziawg-go/
+/tools/amneziawg-tools/
+/tools/warp-plus/
+/tools/amnezia-wg2-easy/
+/tools/oblivion/
+
+# Промежуточные сборки nova-core. В репозитории лежит только тот .aar, на который
+# ссылается app/build.gradle.kts; остальные варианты пересоздаёт gomobile, и вместе
+# они весят больше сотни мегабайт.
+/app/libs/nova-core-api24.aar
+/app/libs/nova-core-new.aar
+/app/libs/classes.jar
+/app/libs/*-sources.jar
+
+# Настройки редакторов
+/.continue/
+/.vscode/
+
+# Сторонний инструментарий и рабочие артефакты диагностики
+/tools/jadx-1.5.5/
+/tools/jadx-1.5.5.zip
+/tools/probe/
+/backups/
+/Microsoft/
+/.agents/
+
+# Gradle
+gradle-app.setting
+!gradle-wrapper.jar
+.gradletasker
+
+# Ядро Xray: 34 МБ на архитектуру, генерируется nova-xray/build.sh.
+# В репозитории лежат исходники (nova-xray/, tools/xray-core/), а не бинарники.
+app/src/main/jniLibs/*/libnovaxray.so
+app/src/main/jniLibs/*/libnovaxrayjni.so
+
+# Keystore (не коммитим сами ключи)
+*.jks
+*.keystore
+keystore.properties
+
+# Debug-артефакты из рабочей папки (UI дампы, логи, скриншоты)
+/*.xml
+/*.png
+/*.txt
+/*.log
+/*.html
+/*.py
+/*.sh
+/*.zip
+/*.json
+/anr_*.txt
+
+# Временные и рабочие папки
+/temp/
+/tmp/
+/tmp_*/
+/old/
+/nova-core/
+/nova-core.zip
+/redmi_anim/
+/redmi_anim2/
+/redmi_anim3/
+/build/
+
+# Прочие не-исходные файлы в корне
+/*.backup.xml
+/*.current.xml
+/*.modified.xml
+/*.reverted.xml
+/NovaAndroid.code-workspace
+/local.properties
+/build.py
+/setup_icon.py
+/convert_icon.py
+/analyze_packet.py
+/white_probe.sh
+/fake_b64.txt
+/masque_pc_bootstrap.json

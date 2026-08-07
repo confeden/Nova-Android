@@ -1,0 +1,90 @@
+# Live-tested on restricted mobile "white list" access (Pixel 4A, 2026-04-01)
+# Government / finance
+www.gosuslugi.ru
+zakupki.gov.ru
+www.nspk.ru
+edo.nalog.ru
+
+# Banks / payments
+go.sber.ru
+h.vtb.ru
+s.vtb.ru
+x.alfabank.ru
+13.alfabank.ru
+1.psbank.ru
+www.gazprombank.ru
+
+# Marketplaces / retail
+www.ozon.ru
+id.ozon.ru
+bank.wildberries.ru
+www.avito.ru
+help.domclick.ru
+bzn.domclick.ru
+promo.domclick.ru
+ca.magnit.ru
+id.magnit.ru
+hr.magnit.ru
+
+# Transport / navigation
+mp.rzd.ru
+gzd.rzd.ru
+ozd.rzd.ru
+m.tutu.ru
+m.2gis.ru
+
+# Ecosystems / media
+m.vk.com
+m.mail.ru
+m.yandex.ru
+www.dzen.ru
+d.rutube.ru
+m.kinopoisk.ru
+pay.ivi.ru
+www.rbc.ru
+m.rbc.ru
+
+# Telecom
+www.mts.ru
+i.megafon.ru
+s.beeline.ru
+s.tele2.ru
+f.tele2.ru
+f.t2.ru
+tc.t2.ru
+ndd.rostelecom.ru
+
+# Additional restricted-mobile allow-list candidates (2026-04-05)
+3475482542.mc.yandex.ru
+alfabank.ru
+alfabank.servicecdn.ru
+bfds.sberbank.ru
+chat3.vtb.ru
+cms-res-web.online.sberbank.ru
+cobrowsing.tbank.ru
+contract.gosuslugi.ru
+esa-res.online.sberbank.ru
+esia.gosuslugi.ru
+gosuslugi.ru
+gu-st.ru
+hrc.tbank.ru
+imgproxy.cdn-tinkoff.ru
+le.tbank.ru
+lk.gosuslugi.ru
+map.gosuslugi.ru
+mc.yandex.ru
+mddc.tinkoff.ru
+metrics.alfabank.ru
+novorossiya.gosuslugi.ru
+online.sberbank.ru
+partners.gosuslugi.ru
+pl-res.online.sberbank.ru
+pos.gosuslugi.ru
+sberbank.ru
+sfd.gosuslugi.ru
+sso-app4.vtb.ru
+statad.ru
+voter.gosuslugi.ru
+www.sberbank.ru
+www.vtb.ru
+zen-yabro-morda.mediascope.mc.yandex.ru

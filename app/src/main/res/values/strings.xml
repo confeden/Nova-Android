@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">Nova</string>
+    <string name="app_description">Nova by Brent (t.me/in322). WARP and Opera connectivity client with transport adaptation.</string>
+    <string name="app_author_name">Brent</string>
+    <string name="app_author_contact">t.me/in322</string>
+    <string name="app_copyright">Copyright (c) 2026 Brent</string>
+    <string name="start_vpn">Start Nova VPN</string>
+    <string name="stop_vpn">Stop Nova VPN</string>
+    <string name="vpn_channel_name">VPN Connection Status</string>
+</resources>

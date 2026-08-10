@@ -4636,6 +4636,15 @@ class ClientData(context: Context) {
             val normalizedPreferredSni = normalizeOptionalTrafficMaskHost(preferredSni)
                 .ifBlank { previous?.preferredSni.orEmpty() }
             val rawConfigToStore = when {
+                // Конфигурация встроенного профиля неприкосновенна. Она приходит из
+                // прошивки вместе с параметрами обфускации AWG (Jc/Jmin/Jmax, S1..S4,
+                // H1..H4, I1..I5), и переписывать её во время работы нечем: служба не
+                // знает о профиле ничего, чего не знала бы прошивка. Прежняя защита
+                // срабатывала, только когда источник записи отличался от bundled-seed,
+                // а при обычном подключении к встроенному профилю он ровно такой —
+                // поэтому профиль терял параметры при первом же подключении.
+                previous != null && isBundledSeed(previous) && previous.rawConfig.isNotBlank() ->
+                    previous.rawConfig
                 preserveBundledSeed -> previous?.rawConfig.orEmpty()
                 // Огрызок не должен вытеснять полную конфигурацию: встроенные профили
                 // везут свои AWG-параметры в том же поле rawConfig.
@@ -4776,6 +4785,15 @@ class ClientData(context: Context) {
 
             val candidateRawConfig = rawConfig?.trim().orEmpty()
             val rawConfigToStore = when {
+                // Конфигурация встроенного профиля неприкосновенна. Она приходит из
+                // прошивки вместе с параметрами обфускации AWG (Jc/Jmin/Jmax, S1..S4,
+                // H1..H4, I1..I5), и переписывать её во время работы нечем: служба не
+                // знает о профиле ничего, чего не знала бы прошивка. Прежняя защита
+                // срабатывала, только когда источник записи отличался от bundled-seed,
+                // а при обычном подключении к встроенному профилю он ровно такой —
+                // поэтому профиль терял параметры при первом же подключении.
+                previous != null && isBundledSeed(previous) && previous.rawConfig.isNotBlank() ->
+                    previous.rawConfig
                 // Огрызок не должен вытеснять полную конфигурацию: встроенные профили
                 // везут свои AWG-параметры в том же поле rawConfig.
                 previous != null &&
@@ -4925,6 +4943,15 @@ class ClientData(context: Context) {
             val normalizedResolvedEngine = normalizedEngine.ifBlank { previous.engine }
             val candidateRawConfig = rawConfig?.trim().orEmpty()
             val normalizedRawConfig = when {
+                // Конфигурация встроенного профиля неприкосновенна. Она приходит из
+                // прошивки вместе с параметрами обфускации AWG (Jc/Jmin/Jmax, S1..S4,
+                // H1..H4, I1..I5), и переписывать её во время работы нечем: служба не
+                // знает о профиле ничего, чего не знала бы прошивка. Прежняя защита
+                // срабатывала, только когда источник записи отличался от bundled-seed,
+                // а при обычном подключении к встроенному профилю он ровно такой —
+                // поэтому профиль терял параметры при первом же подключении.
+                previous != null && isBundledSeed(previous) && previous.rawConfig.isNotBlank() ->
+                    previous.rawConfig
                 // Полную конфигурацию не заменяем огрызком — независимо от того,
                 // импортирована она пользователем или пришла из прошивки. Раньше
                 // условие держалось на `userImported`, и встроенные профили теряли
@@ -5052,6 +5079,15 @@ class ClientData(context: Context) {
             Log.w("NovaAdapt", "recordWarpVerifiedQualityResult: mode=$normalizedMode host=$normalizedHost port=$port probeCount=$safeProbeCount pingSuccesses=$safePingSuccesses avgPing=${safeAvgPingMs}")
             val candidateRawConfig = rawConfig?.trim().orEmpty()
             val normalizedRawConfig = when {
+                // Конфигурация встроенного профиля неприкосновенна. Она приходит из
+                // прошивки вместе с параметрами обфускации AWG (Jc/Jmin/Jmax, S1..S4,
+                // H1..H4, I1..I5), и переписывать её во время работы нечем: служба не
+                // знает о профиле ничего, чего не знала бы прошивка. Прежняя защита
+                // срабатывала, только когда источник записи отличался от bundled-seed,
+                // а при обычном подключении к встроенному профилю он ровно такой —
+                // поэтому профиль терял параметры при первом же подключении.
+                previous != null && isBundledSeed(previous) && previous.rawConfig.isNotBlank() ->
+                    previous.rawConfig
                 // Огрызок не должен вытеснять полную конфигурацию: встроенные профили
                 // везут свои AWG-параметры в том же поле rawConfig.
                 previous != null &&
@@ -5160,6 +5196,15 @@ class ClientData(context: Context) {
                 ?: 480.0
             val candidateRawConfig = rawConfig?.trim().orEmpty()
             val normalizedRawConfig = when {
+                // Конфигурация встроенного профиля неприкосновенна. Она приходит из
+                // прошивки вместе с параметрами обфускации AWG (Jc/Jmin/Jmax, S1..S4,
+                // H1..H4, I1..I5), и переписывать её во время работы нечем: служба не
+                // знает о профиле ничего, чего не знала бы прошивка. Прежняя защита
+                // срабатывала, только когда источник записи отличался от bundled-seed,
+                // а при обычном подключении к встроенному профилю он ровно такой —
+                // поэтому профиль терял параметры при первом же подключении.
+                previous != null && isBundledSeed(previous) && previous.rawConfig.isNotBlank() ->
+                    previous.rawConfig
                 // Полную конфигурацию не заменяем огрызком — независимо от того,
                 // импортирована она пользователем или пришла из прошивки. Раньше
                 // условие держалось на `userImported`, и встроенные профили теряли

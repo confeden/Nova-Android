@@ -8953,7 +8953,16 @@ class NovaVpnService : OperaNativeVpnService() {
                 )
             } else {
                 currentAttemptOrdinal = (globalAttemptOffset + attemptIndex + 1).coerceAtLeast(1)
-                currentAttemptTotal = maxOf(currentAttemptTotal, currentAttemptOrdinal)
+                // Знаменатель берём из размера очереди, а не только из достигнутого
+                // номера. Пока его выводили как maxOf(текущий, порядковый), счётчик
+                // дёргался: завершающийся параллельный цикл обнуляет обе переменные
+                // (`currentAttemptOrdinal = 0; currentAttemptTotal = 0`), и следующая
+                // попытка показывала «4 из 4» вместо «4 из 50» — знаменатель полз
+                // следом за номером.
+                currentAttemptTotal = maxOf(
+                    maxOf(currentAttemptTotal, globalAttemptTotal),
+                    currentAttemptOrdinal,
+                )
             }
             clientData.rememberConnectAttemptTotal(currentAttemptTotal, currentBackendLabel, currentTransportLabel)
             publishWarpTrafficMaskHint(
@@ -19333,11 +19342,50 @@ class NovaVpnService : OperaNativeVpnService() {
         }
     }
 
+    /**
+     * Замер задержки с жёстким потолком на всю пробу.
+     *
+     * Потолок нужен из-за HTTP-запасного пути: `network.openConnection(URL)` идёт к
+     * имени, а `connectTimeout` в Java **не ограничивает разрешение имени**. На
+     * устройстве со строгим Private DNS резолв `cp.cloudflare.com` сразу после
+     * поднятия туннеля блокировал пробу на десятки секунд. В журнале это выглядело
+     * как `WARP quality [degraded]: … 1/1, avg=29911ms`: за двадцатисекундное окно
+     * успевала пройти одна проба вместо девятнадцати.
+     *
+     * Последствий было три сразу, и все выглядели как «плохая сеть»: пинг на экране
+     * показывал секунды вместо миллисекунд; окно удержания получало `spanMs` в
+     * единицы секунд и отбрасывалось как непоказательное; а качество уходило в
+     * `degraded` и дёргало мягкий реконнект, из-за чего счётчик профилей прыгал.
+     *
+     * Проба, не уложившаяся в потолок, считается неудачной. Это честно: если имя не
+     * резолвится за отведённое время, туннель в этот момент и правда непригоден.
+     */
     private fun measureWarpQualityLatency(
         network: android.net.Network?,
         timeoutMs: Int,
     ): Int {
         if (network == null) return -1
+        val executor = Executors.newSingleThreadExecutor()
+        val deadlineMs = (timeoutMs.toLong() * 2L).coerceAtLeast(1_200L)
+        return try {
+            val task = executor.submit<Int> { measureWarpQualityLatencyBlocking(network, timeoutMs) }
+            try {
+                task.get(deadlineMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+            } catch (_: java.util.concurrent.TimeoutException) {
+                task.cancel(true)
+                -1
+            }
+        } catch (_: Exception) {
+            -1
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    private fun measureWarpQualityLatencyBlocking(
+        network: android.net.Network,
+        timeoutMs: Int,
+    ): Int {
         val startedAt = SystemClock.elapsedRealtime()
         val tcpTargets = listOf(
             "1.1.1.1" to 443,

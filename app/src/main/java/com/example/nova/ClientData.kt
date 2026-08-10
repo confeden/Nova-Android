@@ -4637,7 +4637,9 @@ class ClientData(context: Context) {
                 .ifBlank { previous?.preferredSni.orEmpty() }
             val rawConfigToStore = when {
                 preserveBundledSeed -> previous?.rawConfig.orEmpty()
-                previous?.userImported == true &&
+                // Огрызок не должен вытеснять полную конфигурацию: встроенные профили
+                // везут свои AWG-параметры в том же поле rawConfig.
+                previous != null &&
                     previous.rawConfig.contains("[Interface]", ignoreCase = true) &&
                     !normalizedRawConfig.contains("[Interface]", ignoreCase = true) ->
                     previous.rawConfig
@@ -4774,7 +4776,9 @@ class ClientData(context: Context) {
 
             val candidateRawConfig = rawConfig?.trim().orEmpty()
             val rawConfigToStore = when {
-                previous?.userImported == true &&
+                // Огрызок не должен вытеснять полную конфигурацию: встроенные профили
+                // везут свои AWG-параметры в том же поле rawConfig.
+                previous != null &&
                     previous.rawConfig.contains("[Interface]", ignoreCase = true) &&
                     !candidateRawConfig.contains("[Interface]", ignoreCase = true) ->
                     previous.rawConfig
@@ -4921,8 +4925,14 @@ class ClientData(context: Context) {
             val normalizedResolvedEngine = normalizedEngine.ifBlank { previous.engine }
             val candidateRawConfig = rawConfig?.trim().orEmpty()
             val normalizedRawConfig = when {
-                previous.userImported &&
-                    previous.rawConfig.contains("[Interface]", ignoreCase = true) &&
+                // Полную конфигурацию не заменяем огрызком — независимо от того,
+                // импортирована она пользователем или пришла из прошивки. Раньше
+                // условие держалось на `userImported`, и встроенные профили теряли
+                // свои AWG-параметры (Jc/Jmin/Jmax, S1..S4, H1..H4, I1..I5) при первой
+                // же записи результата: на их место ложилось описание из пяти строк
+                // HOST/PORT/PROTOCOL/STRATEGY/SOURCE. Дальше профиль поднимался как
+                // обычный WireGuard, без обфускации, и рукопожатие уходило в таймаут.
+                previous.rawConfig.contains("[Interface]", ignoreCase = true) &&
                     !candidateRawConfig.contains("[Interface]", ignoreCase = true) ->
                     previous.rawConfig
                 candidateRawConfig.isNotBlank() -> candidateRawConfig
@@ -5042,7 +5052,9 @@ class ClientData(context: Context) {
             Log.w("NovaAdapt", "recordWarpVerifiedQualityResult: mode=$normalizedMode host=$normalizedHost port=$port probeCount=$safeProbeCount pingSuccesses=$safePingSuccesses avgPing=${safeAvgPingMs}")
             val candidateRawConfig = rawConfig?.trim().orEmpty()
             val normalizedRawConfig = when {
-                previous?.userImported == true &&
+                // Огрызок не должен вытеснять полную конфигурацию: встроенные профили
+                // везут свои AWG-параметры в том же поле rawConfig.
+                previous != null &&
                     previous.rawConfig.contains("[Interface]", ignoreCase = true) &&
                     !candidateRawConfig.contains("[Interface]", ignoreCase = true) ->
                     previous.rawConfig
@@ -5148,8 +5160,14 @@ class ClientData(context: Context) {
                 ?: 480.0
             val candidateRawConfig = rawConfig?.trim().orEmpty()
             val normalizedRawConfig = when {
-                previous.userImported &&
-                    previous.rawConfig.contains("[Interface]", ignoreCase = true) &&
+                // Полную конфигурацию не заменяем огрызком — независимо от того,
+                // импортирована она пользователем или пришла из прошивки. Раньше
+                // условие держалось на `userImported`, и встроенные профили теряли
+                // свои AWG-параметры (Jc/Jmin/Jmax, S1..S4, H1..H4, I1..I5) при первой
+                // же записи результата: на их место ложилось описание из пяти строк
+                // HOST/PORT/PROTOCOL/STRATEGY/SOURCE. Дальше профиль поднимался как
+                // обычный WireGuard, без обфускации, и рукопожатие уходило в таймаут.
+                previous.rawConfig.contains("[Interface]", ignoreCase = true) &&
                     !candidateRawConfig.contains("[Interface]", ignoreCase = true) ->
                     previous.rawConfig
                 candidateRawConfig.isNotBlank() -> candidateRawConfig

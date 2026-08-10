@@ -78,6 +78,25 @@ def main() -> None:
         raise SystemExit("export does not contain release_seed_items")
 
     seeds = [normalize_seed(item, index) for index, item in enumerate(release_items)]
+
+    # Заслон против уже случившейся порчи. Выгрузка с устройства содержит
+    # raw_config в том виде, в каком его оставила служба, а она умеет заменить
+    # полную конфигурацию описанием из пяти строк HOST/PORT/PROTOCOL/STRATEGY/
+    # SOURCE. Такой сид едет в релиз без параметров обфускации AWG, поднимается
+    # как обычный WireGuard и упирается в handshake_timeout. Один раз это уже
+    # уехало в ассет: 48 профилей из 50.
+    stripped = [
+        f"{seed['host']}:{seed['port']}"
+        for seed in seeds
+        if "[Interface]" not in seed["raw_config"]
+    ]
+    if stripped:
+        raise SystemExit(
+            "В выгрузке у "
+            f"{len(stripped)} из {len(seeds)} профилей raw_config без [Interface] — "
+            "параметры обфускации потеряны, такой ассет собирать нельзя. "
+            "Первые: " + ", ".join(stripped[:5])
+        )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(seeds, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

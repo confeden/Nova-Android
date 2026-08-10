@@ -477,6 +477,40 @@ Verified on a clean install: attempts with AWG extras **3 of 3** (was 2 of 10), 
 `handshake_timeout`, three «next profile» presses in a row connected on 987, 987, 945 — and `945` is
 one of the endpoints that used to fail.
 
+### 3e. Bundled profiles replaced from the owner's 78-file set (2026-08-10)
+
+The owner supplied 78 AWG `.conf` files (`E:/Downloads/awg`). All 78 carry the full `[Interface]`
+with every obfuscation parameter (12 keys: `Jc/Jmin/Jmax`, `S1..S4`, `H1..H4`, `I1`); 77 unique
+endpoints, 6 distinct private keys, one peer public key.
+
+All 77 were built into a temporary asset and walked by a full adaptation run on the device: 77/77,
+66 indicative hold windows. Ranking key, in order: hold grade → probe coverage → normalized silence →
+average ping. The top 50 came out as a clean cut — **all grade 3, all 19/19 coverage, silence
+1098–1110 ms** (that is the sampling floor, i.e. no silence at all), pings 38–52 ms. Position 51 is
+`8.39.214.9:500` — the node this roadmap has been calling unstable since 2026-08-09; it misses the
+cut on coverage (18/19). Positions 52+ are shaky or unmeasured.
+
+**The final asset is generated from the source `.conf` files, never from a device export.** That is
+the lesson from 3d: an export reflects what the service wrote, not what the firmware shipped.
+
+Verified on a clean install: connects on the **first** profile (`8.47.69.6:945`, `seed_order 0`);
+four «next profile» presses in a row → 6 attempts, **6 with AWG extras, 0 handshake_timeout,
+4 connections**.
+
+### Profile configs are now immutable (2026-08-10)
+
+Owner's requirement: nothing may rewrite a bundled profile automatically. A bundled seed's
+`rawConfig` is now preserved unconditionally in all five write paths (`upsertWarpVerifiedConfig`,
+`recordWarpVerifiedPreferredSni`, `recordWarpVerifiedRuntimeOutcome`,
+`recordWarpVerifiedQualityResult`, `recordWarpVerifiedDegradedQualityResult`). The previous guard
+existed but only fired when the write's source differed from `bundled-seed` — and on an ordinary
+connection to a bundled profile it is exactly `bundled-seed`, so the profile lost its parameters on
+the first connect.
+
+Audited the remaining `rawConfig =` assignments: JSON parsers (read), restore-from-asset
+(`ensureBundledVerifiedWarpSeeds`, the correct direction), manual configs, and the export-merge which
+already keeps `previous.rawConfig` for non-imported entries. No other mutation path remains.
+
 ### 4. Split tunneling in Opera mode
 
 The Nova package is **always** outside the VPN — `applyOperaSplitTunnelPolicy` excludes it in all three

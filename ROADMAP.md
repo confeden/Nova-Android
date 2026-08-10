@@ -413,6 +413,70 @@ substituted. AWG parameters (`Jc/Jmin/Jmax`, `S1..S4`, `H1..H4`, `I1`) are prese
 of the regenerated asset; `8.35.211.1:1701` from the «Сжали набор WARP endpoint-ов» line is a real
 asset entry, not an invented pair; each profile's `preferred_ports` holds exactly its own port.
 
+### Clean-install check (2026-08-10)
+
+Full uninstall + install of the release APK, VPN consent granted from scratch, no carried-over state:
+
+- **WARP:** connected at once on port 7559 — that is `seed_order 1`, the second profile of the new
+  bundled order. No cycle restarts.
+- **EU:** connected, exit in the Netherlands (`country=NL, backend=OPERA-EU`), survived a stop→start
+  cycle (`…247.29` then `…247.26`).
+
+**«Три точки вместо счётчика» is not a defect.** EU has no per-profile counter at all — Opera does
+not walk 50 bundled profiles, so the UI shows a three-dot progress indicator while the launch plans
+are tried. Reproduced on a healthy run that then connected normally. The real complaint behind it is
+«не подключается», and the counter is simply not the place to look for EU.
+
+**The owner's EU failure could not be reproduced** — the reinstall wiped the state that caused it.
+What was ruled out by reading the code: the masking-SNI removal did not touch the Opera path
+(`OperaProxyManager` takes its own `fakeSni` behind the `getTrafficMaskEnabled` gate, not from
+`resolveWarpTrafficMaskHosts`); the «cooldown as a ban» trap is guarded — when every API profile is
+cooling down the guard ignores cooldown and says so in the log; and a plan list that filters down to
+nothing logs `Ни один план запуска Opera не был выполнен`. If EU stalls again, those three lines are
+what to grep for.
+
+### 3d. Bundled AWG profiles lost their obfuscation parameters (closed 2026-08-10)
+
+Symptom: connection «edва живая» — the counter jitters, «next profile» walks a dozen entries without
+connecting, ping on screen shows seconds instead of milliseconds. Two independent causes, both found
+by counting log lines rather than guessing.
+
+**Cause 1 — the quality probe had no ceiling.** `measureWarpQualityLatency` budgets 900 ms, but its
+HTTP fallback goes through `network.openConnection(URL)`, and Java's `connectTimeout` **does not
+bound name resolution**. With strict Private DNS the resolve of `cp.cloudflare.com` blocked for tens
+of seconds: `WARP quality [degraded]: … 1/1, avg=29911ms` — one probe per 20 s window instead of
+nineteen. Three consequences that all look like «bad network»: ping on screen in seconds; the hold
+window gets `spanMs` of a few seconds and is discarded as non-indicative; quality goes `degraded` and
+kicks the soft reconnect, which is what made the counter jump. Fixed by a hard deadline around the
+whole probe (`timeoutMs × 2`, min 1.2 s); a probe that misses it counts as a failure, which is honest.
+Same node before/after: `4/4, avg=3967ms` → `20/20, avg=32ms`; hold window `3103 ms` (rejected) →
+`16546 ms`, silence 1045 ms; `Туннель стабилен: 1 перерукопожатий за 121 с, трафик 669/777 КБ`.
+
+**Cause 2 — the asset shipped without AWG parameters, and it was self-inflicted.** Only **2 of 10**
+attempts logged `AWG client extras`; the other eight came up as plain WireGuard and died on
+`handshake_timeout`. `resolveAwgInterfaceExtrasForAttempt` reads `Jc/Jmin/Jmax`, `S1..S4`, `H1..H4`,
+`I1..I5` out of the profile's own `rawConfig` — correct by design — but **48 of 50 profiles in the
+asset had no `[Interface]` at all**, only the five-line stub `HOST/PORT/PROTOCOL/STRATEGY/SOURCE`.
+
+The stub comes from `buildWarpConfigDescription`: on every recorded result the service replaced the
+profile's full config with it. The guard against that downgrade existed but was gated on
+`userImported`, so bundled seeds were unprotected. Regenerating the asset from a device export then
+baked the damage into the release — the export already carried stubs.
+
+Fixed in three places, all needed:
+
+1. The downgrade guard no longer looks at `userImported` — a config containing `[Interface]` is never
+   replaced by one that does not (`ClientData`, three sites).
+2. The asset was rebuilt keeping the **new order** from the clean adaptation run but taking each
+   profile's `raw_config` from the pre-regeneration asset: 45 restored, 49 of 50 now carry AWG
+   parameters (the 50th never had them).
+3. `tools/generate_warp_verified_seeds_from_export.py` now **refuses to write** an asset where any
+   `raw_config` lacks `[Interface]`, naming the offenders.
+
+Verified on a clean install: attempts with AWG extras **3 of 3** (was 2 of 10), zero
+`handshake_timeout`, three «next profile» presses in a row connected on 987, 987, 945 — and `945` is
+one of the endpoints that used to fail.
+
 ### 4. Split tunneling in Opera mode
 
 The Nova package is **always** outside the VPN — `applyOperaSplitTunnelPolicy` excludes it in all three

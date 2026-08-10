@@ -126,4 +126,72 @@ class ProfileRotationTest {
         assertEquals("a", ProfileRotation.next(list, "нет такого"))
         assertNull(ProfileRotation.next(emptyList(), "a"))
     }
+
+    /**
+     * Дефект, ради которого написаны эти проверки: удаление профиля VLESS не удаляло
+     * ничего. Карточка собиралась из отдельного хранилища, кнопка чистила хранилище
+     * WARP, счётчик оставался прежним — и выглядело это как «удаление не работает».
+     */
+    @Test
+    fun `удаление возвращает укороченный список`() {
+        val removal = ProfileRotation.remove(list, active = "a") { it == "b" }
+        assertEquals(listOf("a", "c", "d"), removal?.items)
+        // Активной была не удалённая запись — она и остаётся активной.
+        assertEquals("a", removal?.active)
+    }
+
+    @Test
+    fun `удаление активного профиля переносит активность на первый оставшийся`() {
+        val removal = ProfileRotation.remove(list, active = "a") { it == "a" }
+        assertEquals(listOf("b", "c", "d"), removal?.items)
+        assertEquals("b", removal?.active)
+    }
+
+    @Test
+    fun `удалять нечего — вызывающая сторона узнаёт об этом`() {
+        // Именно ради этого признака: молчаливое «удалили ноль» и читалось как
+        // сработавшее удаление.
+        assertNull(ProfileRotation.remove(list, active = "a") { it == "нет такого" })
+        assertNull(ProfileRotation.remove(emptyList<String>(), active = null) { true })
+    }
+
+    /**
+     * Дефект, ради которого написаны эти проверки: фоновая проверка адресов Opera
+     * заменяла список целиком и стирала порядок, выстроенный после двадцати секунд
+     * удержания. Проверенный адрес оказывался в середине, и следующий цикл начинал
+     * не с него — то есть подъём удачного способа наверх молча отменялся.
+     */
+    @Test
+    fun `свежий список не сбивает выстроенный порядок`() {
+        val known = listOf("b", "a", "c")
+        val fresh = listOf("a", "b", "c")
+        // Порядок известных сохраняется целиком, а не подменяется порядком ответа.
+        assertEquals(listOf("b", "a", "c"), ProfileRotation.mergeKeepingOrder(known, fresh))
+    }
+
+    @Test
+    fun `новые записи дописываются в конец`() {
+        val merged = ProfileRotation.mergeKeepingOrder(listOf("b", "a"), listOf("a", "b", "d", "e"))
+        assertEquals(listOf("b", "a", "d", "e"), merged)
+    }
+
+    @Test
+    fun `пропавшие из свежего списка записи отбрасываются`() {
+        // Их больше не предлагают: держать их в очереди — платить за них попытками.
+        assertEquals(listOf("a", "c"), ProfileRotation.mergeKeepingOrder(listOf("a", "b", "c"), listOf("c", "a")))
+    }
+
+    @Test
+    fun `пустой свежий список ничего не меняет`() {
+        // Неудачная проверка не должна опустошать накопленный список.
+        val known = listOf("a", "b")
+        assertEquals(known, ProfileRotation.mergeKeepingOrder(known, emptyList()))
+    }
+
+    @Test
+    fun `удаление последнего профиля оставляет пустой список без активного`() {
+        val removal = ProfileRotation.remove(listOf("a"), active = "a") { it == "a" }
+        assertEquals(emptyList<String>(), removal?.items)
+        assertNull(removal?.active)
+    }
 }

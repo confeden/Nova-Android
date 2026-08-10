@@ -2349,23 +2349,7 @@ class SettingsActivity : AppCompatActivity() {
 
             
 
-            // Color Logic: Green if Active, Grey if Not
-
-            if (isIgnored) {
-
-                switch.thumbTintList = green
-
-                switch.trackTintList = green
-
-            } else {
-
-                switch.thumbTintList = grey
-
-                switch.trackTintList = grey
-
-            }
-
-
+            applyLiquidSwitchTint(switch)
 
             switch.isEnabled = true
 
@@ -2373,9 +2357,7 @@ class SettingsActivity : AppCompatActivity() {
 
              switch.isChecked = true
 
-             switch.thumbTintList = green
-
-             switch.trackTintList = green
+             applyLiquidSwitchTint(switch)
 
              switch.isEnabled = false
 
@@ -2431,27 +2413,30 @@ class SettingsActivity : AppCompatActivity() {
 
     
 
+    /**
+     * Красит переключатель.
+     *
+     * Раньше бегунок и дорожка красились одним цветом, и переключатель выглядел
+     * сплошной заливкой: положение бегунка не читалось совсем, а состояние
+     * приходилось подписывать словом внутри. Теперь цвета приходят списками
+     * состояний — белый бегунок на зелёной дорожке во включённом положении и
+     * серый на тёмной в выключенном.
+     *
+     * [isChecked] больше не участвует в раскраске: список состояний берёт
+     * состояние у самого переключателя, поэтому цвет не может разъехаться с
+     * положением. Параметр оставлен, чтобы не трогать тринадцать мест вызова.
+     */
     private fun setupSwitchColor(switch: Switch, isChecked: Boolean) {
 
-        val green = android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#13A10E"))
+        applyLiquidSwitchTint(switch)
 
-        val grey = android.content.res.ColorStateList.valueOf(android.graphics.Color.GRAY)
+    }
 
-        
+    private fun applyLiquidSwitchTint(switch: Switch) {
 
-        if (isChecked) {
+        switch.thumbTintList = ContextCompat.getColorStateList(this, R.color.switch_thumb_tint_liquid)
 
-            switch.thumbTintList = green
-
-            switch.trackTintList = green
-
-        } else {
-
-            switch.thumbTintList = grey
-
-            switch.trackTintList = grey
-
-        }
+        switch.trackTintList = ContextCompat.getColorStateList(this, R.color.switch_track_tint_liquid)
 
     }
 

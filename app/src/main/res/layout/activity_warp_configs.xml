@@ -55,7 +55,7 @@
             android:fontFamily="sans-serif-medium"
             android:gravity="center"
             android:singleLine="true"
-            android:text="Импортировать конфигурацию"
+            android:text="Управление конфигурациями"
             android:textColor="#FFFFFF" />
 
         <TextView

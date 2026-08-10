@@ -38,7 +38,10 @@ def normalize_seed(item: dict, index: int) -> dict:
         "success_count": max(int(item.get("success_count", 1)), 1),
         "scope": item.get("scope") or "default",
         "seed_order": index,
-        "preferred_sni": item.get("preferred_sni") or "",
+        # Маскировочное имя в сид не попадает никогда. Раньше попадало: релиз
+        # 1.26 вёз ads.max.ru у 45 профилей из 50, то есть каждая свежая
+        # установка стартовала с подстановкой, которую никто не включал.
+        "preferred_sni": "",
         "source_file": f"pixel4a_export_rank_{index + 1:03d}",
         "host": item["host"],
         "port": int(item["port"]),

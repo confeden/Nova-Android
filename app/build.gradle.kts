@@ -5,8 +5,8 @@ plugins {
     alias(libs.plugins.jetbrains.kotlin.android)
 }
 
-val appVersionCode = 135
-val appVersionName = "1.25"
+val appVersionCode = 136
+val appVersionName = "1.26"
 
 val keystoreProperties = Properties()
 val keystorePropertiesFile = rootProject.file("keystore.properties")
@@ -38,9 +38,40 @@ val tgCfWsSecret: String = run {
         ?: ""
 }
 
+/**
+ * Пароль к своим релеям API SurfEasy — тем, через которые поднимается EU/US.
+ *
+ * SurfEasy отдаёт разный набор endpoint'ов в зависимости от того, откуда пришёл
+ * запрос discover, и набор для российских клиентов из России недостижим. Релей
+ * переносит в Швецию только вызовы API; сам туннель по-прежнему набирается с
+ * адреса пользователя.
+ *
+ * Хранится так же, как в Nova PC: сами адреса релеев лежат в исходниках (они не
+ * секрет), а пароль приходит из переменной окружения или из local.properties.
+ * Пусто — релеи не используются вовсе, и discover идёт напрямую; подставлять
+ * заглушку вместо пароля значило бы потратить попытку и получить 407, чтобы
+ * узнать то же самое.
+ */
+val operaRelayPassword: String = run {
+    System.getenv("NOVA_OPERA_RELAY_PASSWORD")?.trim()?.takeIf { it.isNotEmpty() }
+        ?: rootProject.file("local.properties")
+            .takeIf { it.exists() }
+            ?.let { file ->
+                Properties().apply { file.inputStream().use(::load) }
+                    .getProperty("novaOperaRelayPassword")
+                    ?.trim()
+            }
+            ?.takeIf { it.isNotEmpty() }
+        ?: ""
+}
+
+/** Значение уезжает в строковый литерал Kotlin, поэтому кавычки и слеши экранируем. */
+fun String.asBuildConfigString(): String =
+    "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
 android {
     namespace = "com.example.nova"
-    compileSdk = 34
+    compileSdk = 35
 
     buildFeatures {
         buildConfig = true
@@ -85,11 +116,13 @@ android {
                 signingConfig = signingConfigs.getByName("release")
             }
             buildConfigField("String", "TG_CF_WS_SECRET", "\"$tgCfWsSecret\"")
+            buildConfigField("String", "OPERA_RELAY_PASSWORD", operaRelayPassword.asBuildConfigString())
         }
         debug {
             // Для отладочных сборок пустой секрет допустим: подпись просто не
             // добавляется, и клиент работает по публичным доменам Cloudflare.
             buildConfigField("String", "TG_CF_WS_SECRET", "\"$tgCfWsSecret\"")
+            buildConfigField("String", "OPERA_RELAY_PASSWORD", operaRelayPassword.asBuildConfigString())
         }
     }
 
@@ -124,16 +157,58 @@ if (
     )
 }
 
+// Пустой секрет ломает сборку, но устаревший — нет, а вреда от него столько же:
+// APK выглядит рабочим и теряет nova-app.eu ровно тогда, когда воркер включает
+// обязательную проверку. Ровно это и случилось при смене секрета — ПК обновили,
+// Android остался на прежнем.
+//
+// Поэтому: если рядом лежит Nova PC, сверяемся с её общим файлом. Проверка
+// намеренно мягкая — при другой раскладке каталогов файла просто не будет, и
+// сборка продолжится, — но при найденном расхождении релиз не собирается.
+// Обойти осознанно: NOVA_SKIP_CF_SECRET_PARITY=1.
+//
+// Читается на этапе конфигурации, как и проверка выше, и по той же причине.
+if (
+    tgCfWsSecret.isNotEmpty() &&
+    System.getenv("NOVA_SKIP_CF_SECRET_PARITY") != "1" &&
+    gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
+) {
+    val shared = rootProject.file("../Nova PC/tgrelay/cf_ws.key")
+    if (shared.exists()) {
+        val expected = shared.readText().trim()
+        if (expected.isNotEmpty() && expected != tgCfWsSecret) {
+            throw GradleException(
+                "Секрет подписи WSS не совпадает с ${shared.path}.\n" +
+                    "  Android подписывался бы отозванным секретом и потерял бы nova-app.eu.\n" +
+                    "  Приведите novaTgCfSecret в local.properties к значению из общего файла.\n" +
+                    "  Осознанно пропустить: NOVA_SKIP_CF_SECRET_PARITY=1"
+            )
+        }
+    }
+}
+
+// Без релеев EU/US собирается и работает, но только там, где discover проходит
+// напрямую. Сборку не роняем — предупреждаем: молча уехать на прямой discover
+// значит вернуть ровно тот отказ, ради которого релеи и появились.
+if (operaRelayPassword.isEmpty()) {
+    logger.warn(
+        "Nova: не задан пароль релеев API SurfEasy (NOVA_OPERA_RELAY_PASSWORD или " +
+            "novaOperaRelayPassword в local.properties). Регионы EU/US будут искать endpoint'ы " +
+            "прямым discover, а из России этот набор недостижим. Значение лежит в " +
+            "awg/opera_relay.key проекта Nova PC."
+    )
+}
+
 dependencies {
-    implementation("org.apache.commons:commons-compress:1.26.0")
-    implementation("org.tukaani:xz:1.9")
+    implementation("org.apache.commons:commons-compress:1.27.1")
+    implementation("org.tukaani:xz:1.10")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
     implementation(libs.androidx.constraintlayout)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
-    implementation("androidx.work:work-runtime-ktx:2.9.1")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.80")
+    implementation("androidx.work:work-runtime-ktx:2.10.5")
     // Local .aar library from Go will be added here later
     implementation(files("libs/nova-core-api24-stripped.aar"))
     testImplementation("junit:junit:4.13.2")

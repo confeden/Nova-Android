@@ -61,6 +61,46 @@ object ProfileRotation {
         return result
     }
 
+    /**
+     * Складывает свежий список с уже известным, сохраняя выстроенный порядок.
+     *
+     * Свежий ответ отвечает на вопрос «что вообще есть», а накопленный порядок — на
+     * вопрос «с чего начинать». Прямая замена теряла второе: наверху известного
+     * списка стоит запись, поднятая туда после удачного удержания, а свежий ответ
+     * приходит в своём порядке и клал её в середину.
+     *
+     * Известные записи, которых в свежем ответе нет, отбрасываются: их больше не
+     * предлагают, и держать их в очереди — значит платить за них попытками.
+     */
+    fun <T> mergeKeepingOrder(known: List<T>, fresh: List<T>): List<T> {
+        if (fresh.isEmpty()) return known
+        val freshSet = fresh.toSet()
+        val kept = known.filter { it in freshSet }
+        val keptSet = kept.toSet()
+        return kept + fresh.filterNot { it in keptSet }
+    }
+
+    /** Что осталось от списка после удаления и какая запись стала активной. */
+    data class Removal<T>(val items: List<T>, val active: T?)
+
+    /**
+     * Убирает профиль из списка и решает, какой станет активным.
+     *
+     * Возвращает `null`, если удалять было нечего: по этому признаку вызывающая
+     * сторона решает, писать ли в хранилище и что показать пользователю. Молчаливое
+     * «удалили ноль записей» — это ровно тот случай, когда список остаётся прежним,
+     * а пользователь уверен, что удаление сработало.
+     *
+     * Активной могла быть как раз удалённая запись: тогда активной становится первая
+     * оставшаяся, иначе перебор начинался бы с профиля, которого в списке уже нет.
+     */
+    fun <T> remove(items: List<T>, active: T?, match: (T) -> Boolean): Removal<T>? {
+        val remaining = items.filterNot(match)
+        if (remaining.size == items.size) return null
+        val nextActive = active?.takeIf { it in remaining } ?: remaining.firstOrNull()
+        return Removal(remaining, nextActive)
+    }
+
     /** Следующий профиль за текущим, с закольцовыванием. */
     fun <T> next(items: List<T>, current: T?): T? {
         if (items.isEmpty()) return null

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Дорожка: включённая — фирменный зелёный, выключенная — тёмная подложка в общем
+    стиле экрана. Прозрачности здесь нет намеренно: белый бегунок должен лежать на
+    плотном фоне, иначе на светлых обоях он теряется.
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:color="#1AFFFFFF" android:state_enabled="false"/>
+    <item android:color="@color/liquid_accent_green" android:state_checked="true"/>
+    <item android:color="#33FFFFFF"/>
+</selector>

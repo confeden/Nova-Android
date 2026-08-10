@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Бегунок белый во включённом состоянии и приглушённо-серый в выключенном.
+
+    Белый, а не зелёный: зелёный бегунок на зелёной дорожке сливался в сплошное
+    пятно, и положение переключателя переставало читаться вовсе. Состояние должно
+    быть видно и по цвету, и по положению — тогда подпись «ВКЛ» внутри не нужна.
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:color="#5A6070" android:state_enabled="false"/>
+    <item android:color="#FFFFFF" android:state_checked="true"/>
+    <item android:color="#B8BED0"/>
+</selector>

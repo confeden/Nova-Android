@@ -6,7 +6,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	cryptorand "crypto/rand"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -25,8 +24,10 @@ import (
 
 	wgtun "github.com/amnezia-vpn/amneziawg-go/tun"
 	wgnetstack "github.com/amnezia-vpn/amneziawg-go/tun/netstack"
+	utls "github.com/refraction-networking/utls"
 
 	"nova-core/cfws"
+	"nova-core/tlsshape"
 )
 
 // SetTelegramWsSignatureSecret задаёт секрет подписи WSS для собственных
@@ -75,6 +76,15 @@ var telegramTransparentPacketDebugBudget atomic.Int64
 var telegramTransparentMediaDebugBudget atomic.Int64
 var telegramTransparentAcceptDebugBudget atomic.Int64
 var telegramTransparentBypassLogBudget atomic.Int64
+
+// telegramTransparentOwnZoneLogBudget — сколько раз объяснять, что маршрут через
+// свою зону не поднялся.
+//
+// Отход на чужой пул был молчаливым: `cfpool:` называет выбранный домен, но не
+// говорит, что своих в списке не осталось. Из-за этого пустой журнал читался как
+// «подстановка SNI прижилась», хотя своя зона не участвовала ни разу. Бюджет
+// маленький: строка нужна как факт, а не как поток.
+var telegramTransparentOwnZoneLogBudget atomic.Int64
 var transparentDirectRouteMu sync.RWMutex
 var telegramTransparentRouteCooldownMu sync.RWMutex
 var telegramTransparentFlowBypassMu sync.RWMutex
@@ -99,6 +109,7 @@ func init() {
 	telegramTransparentMediaDebugBudget.Store(96)
 	telegramTransparentAcceptDebugBudget.Store(48)
 	telegramTransparentBypassLogBudget.Store(32)
+	telegramTransparentOwnZoneLogBudget.Store(8)
 }
 
 func SetTelegramTransparentProxyConfig(enabled bool, profile string) {
@@ -118,6 +129,7 @@ func SetTelegramTransparentProxyConfig(enabled bool, profile string) {
 	telegramTransparentMediaDebugBudget.Store(128)
 	telegramTransparentAcceptDebugBudget.Store(64)
 	telegramTransparentBypassLogBudget.Store(48)
+	telegramTransparentOwnZoneLogBudget.Store(8)
 	log.Printf(
 		"Telegram transparent relay config updated: enabled=%v profile=%s",
 		enabled,
@@ -1252,13 +1264,16 @@ func wsConnectTransparent(ip string, domain string, path string, timeout time.Du
 	path = normalizeTransparentWSPath(path)
 	timeout = normalizeTransparentWSTimeout(timeout)
 
-	tlsConn, err := dialTransparentTLSEndpoint(ip, domain, timeout)
+	tlsConn, neutralSNIUsed, err := dialTransparentTLSEndpoint(ip, domain, timeout)
 	if err != nil {
 		return nil, err
 	}
 	reader, err := upgradeTransparentWebSocket(tlsConn, domain, path, timeout)
 	if err != nil {
 		_ = tlsConn.Close()
+		if neutralSNIUsed && upgradeRefusedTheName(err) {
+			noteNeutralSNIRejected(domain, err.Error())
+		}
 		return nil, err
 	}
 	return &transparentRawWebSocket{conn: tlsConn, bufReader: reader}, nil
@@ -1282,25 +1297,187 @@ func normalizeTransparentWSTimeout(timeout time.Duration) time.Duration {
 	return timeout
 }
 
-func dialTransparentTLSEndpoint(ip string, domain string, timeout time.Duration) (*tls.Conn, error) {
+// dialTransparentTLSEndpoint поднимает TLS к endpoint'у и сообщает, ушло ли в
+// SNI подставленное имя: от этого зависит, кого винить в последующем отказе.
+//
+// Маршрут едет в заголовке Host, который пишет upgradeTransparentWebSocket, —
+// имя домена здесь нужно только как ключ подстановки. См. cfws.NeutralSNI.
+func dialTransparentTLSEndpoint(ip string, domain string, timeout time.Duration) (*utls.UConn, bool, error) {
 	rawConn, err := protectedDialer(timeout).Dial("tcp", net.JoinHostPort(ip, "443"))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	setTcpNoDelay(rawConn)
 
-	tlsConn := tls.Client(rawConn, &tls.Config{
+	sni, neutralSNIUsed := cfws.NeutralSNI(domain)
+	profile := tlsshape.Current()
+	// Кэш сессий не заводим намеренно: возобновление добавляет к hello
+	// расширение PSK, то есть меняет ту самую форму, которую мы здесь задаём, а
+	// выигрыш почти нулевой — пул держит WebSocket открытыми, и новые
+	// рукопожатия случаются редко.
+	config := &utls.Config{
 		InsecureSkipVerify: true,
-		ServerName:         domain,
-		ClientSessionCache: tls.NewLRUClientSessionCache(64),
-	})
+		ServerName:         sni,
+	}
+	tlsConn, err := newTransparentUTLSClient(rawConn, config, profile)
+	if err != nil {
+		_ = rawConn.Close()
+		return nil, neutralSNIUsed, err
+	}
 	_ = tlsConn.SetDeadline(time.Now().Add(timeout))
 	if err := tlsConn.Handshake(); err != nil {
 		_ = tlsConn.Close()
-		return nil, err
+		if handshakeWentUnanswered(err) {
+			noteTelegramHandshakeIgnored(domain, profile, neutralSNIUsed, err)
+		}
+		return nil, neutralSNIUsed, err
 	}
 	_ = tlsConn.SetDeadline(time.Time{})
+	logTransparentTLSShapeOnce(profile, sni, neutralSNIUsed, tlsConn.ConnectionState())
+	return tlsConn, neutralSNIUsed, nil
+}
+
+// newTransparentUTLSClient собирает клиента с формой hello профиля.
+//
+// Форма задаётся спецификацией, а не идентификатором пресета: только так можно
+// свести ALPN к http/1.1, не переписывая остальные расширения (см.
+// telegramTLSSpec). Если спецификацию собрать не удалось, берём пресет, у
+// которого ALPN нет вовсе, — потерять маршрут Telegram из-за таблицы форм было
+// бы несоразмерно.
+func newTransparentUTLSClient(
+	rawConn net.Conn,
+	config *utls.Config,
+	profile tlsshape.Profile,
+) (*utls.UConn, error) {
+	spec, err := tlsshape.Spec(profile.HelloID)
+	if err != nil {
+		log.Printf(
+			"Telegram transparent relay: cannot build the %s ClientHello spec (%v). "+
+				"Falling back to the %s preset.",
+			profile.Label,
+			err,
+			tlsshape.FallbackLabel,
+		)
+		return utls.UClient(rawConn, config, tlsshape.FallbackHelloID), nil
+	}
+	tlsConn := utls.UClient(rawConn, config, utls.HelloCustom)
+	if err := tlsConn.ApplyPreset(&spec); err != nil {
+		// rawConn закрывает вызывающий: у него он и остаётся, пока клиент не
+		// собран. Закрыть здесь значит закрыть его дважды.
+		return nil, fmt.Errorf("apply %s ClientHello spec: %w", profile.Label, err)
+	}
 	return tlsConn, nil
+}
+
+// transparentTLSShapeLogged — первое удачное рукопожатие называет форму вслух.
+//
+// Без этой строки правка формы неотличима от её отсутствия: пока ничего не
+// сломалось, журнал молчит, и проверить на устройстве, какой ClientHello ушёл
+// в сеть, нечем.
+var transparentTLSShapeLogged atomic.Bool
+
+func logTransparentTLSShapeOnce(profile tlsshape.Profile, sni string, neutralSNIUsed bool, state utls.ConnectionState) {
+	if !transparentTLSShapeLogged.CompareAndSwap(false, true) {
+		return
+	}
+	log.Printf(
+		"Telegram transparent relay: TLS shape=%s sni=%s (substituted=%v) "+
+			"version=%#04x alpn=%q",
+		profile.Label,
+		sni,
+		neutralSNIUsed,
+		state.Version,
+		state.NegotiatedProtocol,
+	)
+}
+
+// noteTelegramHandshakeIgnored — реакция на единственную фазу, где под
+// подозрением сразу оба наших рычага: подставленное имя и форма hello.
+//
+// Различить их по одной попытке нельзя, поэтому убираем оба: ходы дешёвые и
+// обратимые, а следующая попытка уйдёт литеральным именем в другой форме. Со
+// временем рычаги расходятся сами — имя возвращается через пятнадцать минут,
+// форма меняется на каждом новом отказе.
+func noteTelegramHandshakeIgnored(
+	domain string,
+	profile tlsshape.Profile,
+	neutralSNIUsed bool,
+	cause error,
+) {
+	if neutralSNIUsed {
+		noteNeutralSNIRejected(domain, cause.Error())
+	}
+	if next := tlsshape.Rotate(); next != "" {
+		log.Printf(
+			"Telegram transparent relay: handshake ignored with the %s ClientHello "+
+				"(%s: %v). Switching the TLS shape to %s.",
+			profile.Label,
+			domain,
+			cause,
+			next,
+		)
+	}
+}
+
+// handshakeWentUnanswered — единственное окно, в котором подставленное имя ещё
+// под подозрением: TCP уже поднялся, ClientHello ушёл, ответа нет.
+//
+// Отказы до отправки hello видит Dial, а после завершённого рукопожатия имя
+// уже принято — само рукопожатие и есть доказательство. Откатываться на них
+// значило бы отдавать реальный выигрыш за постороннюю помеху.
+func handshakeWentUnanswered(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// upgradeRefusedTheName: 403 и 421 — то, что край CDN отвечает, когда не
+// принимает имя, которое ему дали, для запрошенного хоста. Остальные статусы
+// приходят уже из-за самого маршрута и к SNI отношения не имеют.
+func upgradeRefusedTheName(err error) bool {
+	var upgradeErr *transparentUpgradeError
+	if !errors.As(err, &upgradeErr) {
+		return false
+	}
+	return upgradeErr.statusCode == 403 || upgradeErr.statusCode == 421
+}
+
+// noteOwnZoneRouteFailure говорит вслух, что маршрут через нашу зону не поднялся.
+//
+// Своя зона — это подпись WSS и нейтральный SNI; без неё релей работает, но на
+// чужих воркерах общего пула, где ни того ни другого нет. Отход штатный (план
+// воркера бесплатный, 200 000 запросов в сутки, и квота кончается), но он должен
+// быть виден: иначе «нет отказов» читается как «всё работает», хотя проверяемый
+// путь просто не проходили.
+func noteOwnZoneRouteFailure(domain string, cause error) {
+	if !cfws.IsOwnedHost(domain) {
+		return
+	}
+	if telegramTransparentOwnZoneLogBudget.Add(-1) < 0 {
+		return
+	}
+	log.Printf(
+		"Telegram transparent relay: own-zone route %s is unusable (%v). "+
+			"Falling back to the shared pool — WSS signature and neutral SNI are not in play there.",
+		domain,
+		cause,
+	)
+}
+
+func noteNeutralSNIRejected(domain string, reason string) {
+	if cfws.NoteNeutralSNIRejected(domain) {
+		log.Printf(
+			"Telegram transparent relay: neutral SNI refused for %s (%s). "+
+				"Falling back to the literal route name for 15m.",
+			domain,
+			reason,
+		)
+	}
 }
 
 func upgradeTransparentWebSocket(conn net.Conn, domain string, path string, timeout time.Duration) (*bufio.Reader, error) {
@@ -1361,10 +1538,22 @@ func verifyTransparentUpgradeResponse(conn net.Conn, reader *bufio.Reader, timeo
 	if err != nil {
 		return err
 	}
-	if transparentUpgradeStatusCode(statusLine) != 101 {
-		return fmt.Errorf("websocket upgrade failed: %s", statusLine)
+	if code := transparentUpgradeStatusCode(statusLine); code != 101 {
+		return &transparentUpgradeError{statusCode: code, statusLine: statusLine}
 	}
 	return nil
+}
+
+// transparentUpgradeError несёт статус отказа наверх: по строке его пришлось бы
+// разбирать заново, а решение об откате нейтрального SNI смотрит именно на
+// код.
+type transparentUpgradeError struct {
+	statusCode int
+	statusLine string
+}
+
+func (e *transparentUpgradeError) Error() string {
+	return fmt.Sprintf("websocket upgrade failed: %s", e.statusLine)
 }
 
 func consumeTransparentUpgradeResponse(reader *bufio.Reader) (string, error) {
@@ -2087,6 +2276,7 @@ func connectTransparentCF(dc int, isMedia bool) (*transparentRawWebSocket, strin
 			ws, err := wsConnectTransparent(wsDomain, wsDomain, "/apiws", 5*time.Second)
 			if err != nil {
 				telegramTransparentRouteRememberFailure(cooldownKey(current), 35*time.Second)
+				noteOwnZoneRouteFailure(wsDomain, err)
 				results <- result{}
 				return
 			}

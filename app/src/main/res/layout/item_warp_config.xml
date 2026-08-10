@@ -44,7 +44,7 @@
                 android:layout_height="wrap_content"
                 android:ellipsize="end"
                 android:fontFamily="sans-serif"
-                android:maxLines="1"
+                android:maxLines="2"
                 android:textColor="#50C878"
                 android:textSize="11sp" />
         </LinearLayout>
@@ -99,17 +99,18 @@
              и на пульте Android TV фокус застревает в нём, не доходя до кнопок.
              Для копирования есть отдельная кнопка. -->
 
-        <LinearLayout
+        <!-- Перенос на вторую строку, когда кнопки не помещаются: в сумме им нужно
+             около 412dp, а узкие экраны у́же — «Копировать» обрезалась. -->
+        <com.example.nova.FlowLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
+            android:layout_marginTop="8dp">
 
             <TextView
                 android:id="@+id/btn_move_top"
                 android:layout_width="44dp"
                 android:layout_height="40dp"
+                android:layout_marginTop="4dp"
                 android:background="@drawable/bg_settings_action_dark"
                 android:clickable="true"
                 android:contentDescription="В начало списка"
@@ -123,6 +124,7 @@
                 android:id="@+id/btn_move_up"
                 android:layout_width="44dp"
                 android:layout_height="40dp"
+                android:layout_marginTop="4dp"
                 android:layout_marginStart="6dp"
                 android:background="@drawable/bg_settings_action_dark"
                 android:clickable="true"
@@ -137,6 +139,7 @@
                 android:id="@+id/btn_move_down"
                 android:layout_width="44dp"
                 android:layout_height="40dp"
+                android:layout_marginTop="4dp"
                 android:layout_marginStart="6dp"
                 android:background="@drawable/bg_settings_action_dark"
                 android:clickable="true"
@@ -151,6 +154,7 @@
                 android:id="@+id/btn_move_bottom"
                 android:layout_width="44dp"
                 android:layout_height="40dp"
+                android:layout_marginTop="4dp"
                 android:layout_marginStart="6dp"
                 android:background="@drawable/bg_settings_action_dark"
                 android:clickable="true"
@@ -161,15 +165,11 @@
                 android:textColor="#FFFFFF"
                 android:textSize="16sp" />
 
-            <View
-                android:layout_width="0dp"
-                android:layout_height="1dp"
-                android:layout_weight="1" />
-
             <TextView
                 android:id="@+id/btn_delete_config"
                 android:layout_width="wrap_content"
                 android:layout_height="40dp"
+                android:layout_marginTop="4dp"
                 android:layout_marginStart="6dp"
                 android:background="@drawable/bg_settings_action_dark"
                 android:clickable="true"
@@ -184,6 +184,7 @@
                 android:id="@+id/btn_copy_config"
                 android:layout_width="wrap_content"
                 android:layout_height="40dp"
+                android:layout_marginTop="4dp"
                 android:layout_marginStart="6dp"
                 android:background="@drawable/bg_settings_action_dark"
                 android:clickable="true"
@@ -193,7 +194,7 @@
                 android:minWidth="110dp"
                 android:text="Копировать"
                 android:textColor="#FFFFFF" />
-        </LinearLayout>
+        </com.example.nova.FlowLayout>
     </LinearLayout>
 
 </LinearLayout>

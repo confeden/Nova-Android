@@ -66,6 +66,8 @@ class WarpConfigsActivity : AppCompatActivity() {
         val importedAwg: Int = 0,
         val importedVless: Int = 0,
         val warning: String? = null,
+        /** Идентификаторы добавленных записей: по первой из них экран прокручивается. */
+        val newIds: List<String> = emptyList(),
     )
 
     private data class ArchiveTextEntry(
@@ -124,6 +126,9 @@ class WarpConfigsActivity : AppCompatActivity() {
     private var displayedDiscoveryTotal = 0
     private var lastLoadedConfigs: List<WarpVerifiedConfig> = emptyList()
     private var configSearchQuery: String = ""
+
+    /** Запись, к которой надо прокрутить список при ближайшей отрисовке. */
+    private var pendingRevealConfigId: String? = null
     private val snapshotHandler = Handler(Looper.getMainLooper())
     private val snapshotPoller = object : Runnable {
         override fun run() {
@@ -221,6 +226,9 @@ class WarpConfigsActivity : AppCompatActivity() {
             return visibleConfigs.sortedWith(
                 compareByDescending<WarpVerifiedConfig> { it.promotedAt }
                     .thenByDescending { clientData.getWarpVerifiedQualityTier(it) }
+                    // Порядок карточек обязан совпадать с порядком перебора, иначе
+                    // экран показывает одно, а служба подключается по другому.
+                    .thenByDescending { clientData.warpConfigHoldGrade(it) }
                     .thenByDescending { clientData.getWarpVerifiedEffectiveQualityScore(it) }
                     .thenByDescending { clientData.getWarpVerifiedPriorityScore(it) }
                     .thenByDescending { clientData.getWarpVerifiedEffectivePingSuccesses(it) }
@@ -241,6 +249,9 @@ class WarpConfigsActivity : AppCompatActivity() {
             .sortedWith(
                 compareByDescending<WarpVerifiedConfig> { it.promotedAt }
                     .thenByDescending { clientData.getWarpVerifiedQualityTier(it) }
+                    // Порядок карточек обязан совпадать с порядком перебора, иначе
+                    // экран показывает одно, а служба подключается по другому.
+                    .thenByDescending { clientData.warpConfigHoldGrade(it) }
                     .thenByDescending { clientData.getWarpVerifiedEffectiveQualityScore(it) }
                     .thenByDescending { clientData.getWarpVerifiedPriorityScore(it) }
                     .thenByDescending { clientData.getWarpVerifiedEffectivePingSuccesses(it) }
@@ -295,6 +306,36 @@ class WarpConfigsActivity : AppCompatActivity() {
         } else {
             adapter.updateItems(items, metadata, bestAvgPing)
         }
+        consumePendingReveal(items)
+    }
+
+    /**
+     * Показывает только что импортированную запись.
+     *
+     * Дефект, ради которого это появилось: профиль добавлялся в конец списка на две
+     * с лишним сотни строк, а поиск мог его и вовсе отфильтровать. Приложение честно
+     * писало «импортировано», в списке при этом визуально не менялось ничего, и
+     * выглядело это как несработавший импорт. Поэтому поиск сбрасываем, список
+     * переключаем на импортированные и прокручиваем к новой записи.
+     */
+    private fun revealImportedConfigs(result: ImportResult) {
+        pendingRevealConfigId = result.newIds.firstOrNull()
+        if (pendingRevealConfigId != null && configSearchQuery.isNotBlank()) {
+            configSearchQuery = ""
+            runCatching { findViewById<android.widget.EditText>(R.id.et_config_search).setText("") }
+        }
+        clientData.setImportedWarpOnlyModeEnabled(true)
+        updateImportedOnlyUi()
+        renderConfigs()
+    }
+
+    /** Прокручивает список к записи, если она в нём есть. Признак одноразовый. */
+    private fun consumePendingReveal(items: List<WarpVerifiedConfig>) {
+        val target = pendingRevealConfigId ?: return
+        val index = items.indexOfFirst { it.id == target }
+        if (index < 0) return
+        pendingRevealConfigId = null
+        rvConfigs.post { runCatching { rvConfigs.scrollToPosition(index) } }
     }
 
     private fun applySearchFilter(items: List<WarpVerifiedConfig>): List<WarpVerifiedConfig> {
@@ -819,30 +860,149 @@ class WarpConfigsActivity : AppCompatActivity() {
 
     private fun showImportExportDialog() {
         val subscription = clientData.getVlessSubscription()
-        val items = buildList {
-            add("Вставить из буфера обмена")
-            add("Вставить из файла")
-            add("Вставить из архива (zip/rar/7z)")
-            add("Вставить из URL-подписки")
-            if (subscription != null) add("Обновить подписку сейчас")
-            add("Экспортировать текущую")
-            add("Экспортировать все")
-        }.toTypedArray()
-        val refreshIndex = if (subscription != null) 4 else -1
+        val importedCount = clientData.countImportedConfigs()
+        // Пункты и действия держим одной парой, а не считаем индексы по месту: список
+        // меняется в зависимости от подписки, и арифметика по `lastIndex` ломалась бы
+        // при каждом новом пункте.
+        val entries = buildList<Pair<String, () -> Unit>> {
+            add("Вставить из буфера обмена" to ::showPasteDialog)
+            add("Вставить из файла" to {
+                importFileLauncher.launch(arrayOf("text/plain", "application/octet-stream", "*/*"))
+            })
+            add("Вставить из архива (zip/rar/7z)" to {
+                importArchiveLauncher.launch(
+                    arrayOf(
+                        "application/zip",
+                        "application/x-7z-compressed",
+                        "application/vnd.rar",
+                        "application/x-rar-compressed",
+                        "application/octet-stream",
+                        "*/*",
+                    )
+                )
+            })
+            add("Вставить из URL-подписки" to ::showImportUrlDialog)
+            if (subscription != null) {
+                add("Управление подпиской" to { showSubscriptionDialog(subscription) })
+            }
+            add("Экспортировать текущую" to ::shareCurrentConfig)
+            add("Экспортировать все" to ::shareAllConfigs)
+            if (importedCount > 0) {
+                add("Удалить все импортированные ($importedCount)" to ::showClearImportedDialog)
+            }
+        }
         AlertDialog.Builder(this)
             // Именно customTitle, а не setMessage: заданное сообщение занимает место
             // списка, и пункты меню просто не показываются — остаётся одна «Отмена».
             .setCustomTitle(buildImportDialogTitle(subscription))
-            .setItems(items) { _, which ->
-                when {
-                    which == 0 -> showPasteDialog()
-                    which == 1 -> importFileLauncher.launch(arrayOf("text/plain", "application/octet-stream", "*/*"))
-                    which == 2 -> importArchiveLauncher.launch(arrayOf("application/zip", "application/x-7z-compressed", "application/vnd.rar", "application/x-rar-compressed", "application/octet-stream", "*/*"))
-                    which == 3 -> showImportUrlDialog()
-                    which == refreshIndex -> importConfigsFromUrl(subscription!!.url)
-                    which == items.lastIndex - 1 -> shareCurrentConfig()
-                    else -> shareAllConfigs()
-                }
+            .setItems(entries.map { it.first }.toTypedArray()) { _, which ->
+                entries.getOrNull(which)?.second?.invoke()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    /**
+     * Стирание всего импортированного.
+     *
+     * Спрашиваем подтверждение и называем число: подписка на сотни профилей
+     * восстанавливается только повторной загрузкой, а импортированные вручную
+     * конфигурации — вообще ничем.
+     */
+    private fun showClearImportedDialog() {
+        val total = clientData.countImportedConfigs()
+        if (total <= 0) {
+            Toast.makeText(this, "Импортированных конфигураций нет", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val subscription = clientData.getVlessSubscription()
+        val subscriptionNote = if (subscription != null) {
+            "\n\nПодписка останется подключённой: при следующем обновлении её профили " +
+                "загрузятся заново. Чтобы этого не было, удалите и саму подписку."
+        } else {
+            ""
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Удалить все импортированные?")
+            .setMessage("Будет удалено записей: $total. Встроенные профили останутся.$subscriptionNote")
+            .setPositiveButton("Удалить") { _, _ ->
+                val removed = clientData.clearImportedConfigs()
+                renderConfigs()
+                Toast.makeText(this, "Удалено записей: $removed", Toast.LENGTH_LONG).show()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    /** Управление подпиской: состояние, обновление, интервал и удаление. */
+    private fun showSubscriptionDialog(subscription: VlessSubscriptionState) {
+        val intervalLabel = "раз в ${subscription.updateIntervalHours.takeIf { it > 0 } ?: 12} ч"
+        val entries = listOf<Pair<String, () -> Unit>>(
+            "Обновить сейчас" to { importConfigsFromUrl(subscription.url) },
+            "Интервал обновления: $intervalLabel" to { showSubscriptionIntervalDialog(subscription) },
+            "Скопировать адрес" to {
+                getSystemService(ClipboardManager::class.java)
+                    ?.setPrimaryClip(ClipData.newPlainText("nova-subscription", subscription.url))
+                Toast.makeText(this, "Адрес подписки скопирован", Toast.LENGTH_SHORT).show()
+            },
+            "Удалить подписку" to { showDeleteSubscriptionDialog(subscription) },
+        )
+        AlertDialog.Builder(this)
+            .setCustomTitle(buildImportDialogTitle(subscription))
+            .setItems(entries.map { it.first }.toTypedArray()) { _, which ->
+                entries.getOrNull(which)?.second?.invoke()
+            }
+            .setNegativeButton("Закрыть", null)
+            .show()
+    }
+
+    private fun showSubscriptionIntervalDialog(subscription: VlessSubscriptionState) {
+        // Пункта «выключить» здесь нет намеренно: подписка без расписания — это
+        // удалённая подписка, для этого есть отдельное действие.
+        val options = listOf(
+            3 to "Раз в 3 ч",
+            6 to "Раз в 6 ч",
+            12 to "Раз в 12 ч (по умолчанию)",
+            24 to "Раз в сутки",
+            168 to "Раз в неделю",
+        )
+        val defaultIndex = options.indexOfFirst { it.first == 12 }
+        val current = options
+            .indexOfFirst { it.first == subscription.updateIntervalHours }
+            .takeIf { it >= 0 } ?: defaultIndex
+        AlertDialog.Builder(this)
+            .setTitle("Интервал обновления подписки")
+            .setSingleChoiceItems(options.map { it.second }.toTypedArray(), current) { dialog, which ->
+                val hours = options[which].first
+                clientData.saveVlessSubscription(subscription.copy(updateIntervalHours = hours))
+                VlessSubscriptionManager.syncSchedule(this)
+                dialog.dismiss()
+                Toast.makeText(this, "Интервал обновления: ${options[which].second}", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun showDeleteSubscriptionDialog(subscription: VlessSubscriptionState) {
+        val profileCount = clientData.getVlessProfileLinks().size
+        AlertDialog.Builder(this)
+            .setTitle("Удалить подписку?")
+            .setMessage(
+                "Автообновление прекратится. Загруженные профили ($profileCount) можно " +
+                    "оставить в списке — они продолжат работать, пока живы сами узлы."
+            )
+            .setPositiveButton("Удалить с профилями") { _, _ ->
+                clientData.clearVlessSubscription()
+                clientData.clearVlessProfileLinks()
+                VlessSubscriptionManager.syncSchedule(this)
+                renderConfigs()
+                Toast.makeText(this, "Подписка и её профили удалены", Toast.LENGTH_LONG).show()
+            }
+            .setNeutralButton("Оставить профили") { _, _ ->
+                clientData.clearVlessSubscription()
+                VlessSubscriptionManager.syncSchedule(this)
+                renderConfigs()
+                Toast.makeText(this, "Подписка удалена, профили остались", Toast.LENGTH_LONG).show()
             }
             .setNegativeButton("Отмена", null)
             .show()
@@ -1039,10 +1199,12 @@ class WarpConfigsActivity : AppCompatActivity() {
             .setPositiveButton("Сохранить") { _, _ ->
                 val result = importConfigsFromText(input.text?.toString().orEmpty())
                 if (result.imported > 0) {
-                    clientData.setImportedWarpOnlyModeEnabled(true)
-                    updateImportedOnlyUi()
-                    renderConfigs()
-                    Toast.makeText(this, "Импортировано: ${result.imported}", Toast.LENGTH_SHORT).show()
+                    revealImportedConfigs(result)
+                    Toast.makeText(
+                        this,
+                        "Импортировано: ${result.imported}. Показываю в списке импортированных.",
+                        Toast.LENGTH_LONG,
+                    ).show()
                 } else if (!result.warning.isNullOrBlank()) {
                     Toast.makeText(this, result.warning, Toast.LENGTH_LONG).show()
                 }
@@ -1161,9 +1323,7 @@ class WarpConfigsActivity : AppCompatActivity() {
 
     private fun finishUrlImport(result: ImportResult, sourceHost: String) {
         if (result.imported > 0) {
-            clientData.setImportedWarpOnlyModeEnabled(true)
-            updateImportedOnlyUi()
-            renderConfigs()
+            revealImportedConfigs(result)
             // Источник в сообщении не для красоты: если в поле остался адрес по
             // умолчанию, только он и объясняет, откуда взялись чужие профили.
             val suffix = if (sourceHost.isNotBlank()) " с $sourceHost" else ""
@@ -1321,6 +1481,11 @@ class WarpConfigsActivity : AppCompatActivity() {
         if (normalized.isBlank()) return ImportResult(0)
         var imported = 0
         var warning: String? = null
+        // Идентификаторы того, что действительно добавилось: по ним экран потом
+        // показывает новую запись. Без этого профиль уезжал в конец списка на
+        // двести с лишним строк, и «импортировано» выглядело как «ничего не
+        // произошло».
+        val newIds = mutableListOf<String>()
 
         normalized.lineSequence()
             .map { it.trim() }
@@ -1365,56 +1530,41 @@ class WarpConfigsActivity : AppCompatActivity() {
             .map { it.trim() }
             .filter { it.isNotBlank() && it.contains("HOST=", ignoreCase = true) }
 
-        for (block in hostBlocks) {
-            val converted = convertHostBlockToImportedConfig(block)
-            if (converted != null && clientData.addUserImportedWarpConfig(
-                    rawConfig = converted.rawConfig,
-                    engine = converted.engine,
-                    mode = converted.mode,
-                    host = converted.host,
-                    port = converted.port,
-                    preferredSni = converted.preferredSni,
-                ) != null
-            ) {
+        fun rememberImported(converted: ParsedUserWarpConfig?) {
+            val draft = converted ?: return
+            clientData.addUserImportedWarpConfig(
+                rawConfig = draft.rawConfig,
+                engine = draft.engine,
+                mode = draft.mode,
+                host = draft.host,
+                port = draft.port,
+                preferredSni = draft.preferredSni,
+            )?.let { added ->
+                newIds += added.id
                 imported += 1
             }
+        }
+
+        for (block in hostBlocks) {
+            rememberImported(convertHostBlockToImportedConfig(block))
         }
 
         parseClassicWireGuardBlocks(normalized).forEach { block ->
-            val converted = convertClassicWireGuardBlockToImportedConfig(block)
-            if (converted != null && clientData.addUserImportedWarpConfig(
-                    rawConfig = converted.rawConfig,
-                    engine = converted.engine,
-                    mode = converted.mode,
-                    host = converted.host,
-                    port = converted.port,
-                    preferredSni = converted.preferredSni,
-                ) != null
-            ) {
-                imported += 1
-            }
+            rememberImported(convertClassicWireGuardBlockToImportedConfig(block))
         }
 
-        parseClashWarpConfigs(normalized).forEach { converted ->
-            if (clientData.addUserImportedWarpConfig(
-                    rawConfig = converted.rawConfig,
-                    engine = converted.engine,
-                    mode = converted.mode,
-                    host = converted.host,
-                    port = converted.port,
-                    preferredSni = converted.preferredSni,
-                ) != null
-            ) {
-                imported += 1
-            }
-        }
+        parseClashWarpConfigs(normalized).forEach(::rememberImported)
 
         val vlessLinks = normalized.lineSequence()
             .map { it.trim() }
             .filter { it.startsWith("vless://", ignoreCase = true) }
             .filter { VlessConfig.parse(it) != null }
             .toList()
-        val importedVless = clientData.addVlessProfileLinks(vlessLinks)
+        val addedVlessLinks = clientData.addVlessProfileLinks(vlessLinks)
+        val importedVless = addedVlessLinks.size
+        newIds += addedVlessLinks.mapNotNull { link ->
+            VlessConfig.parse(link)?.identity?.let { "${ClientData.VLESS_CONFIG_ID_PREFIX}$it" }
+        }
         if (vlessLinks.isNotEmpty() && importedVless == 0 && imported == 0 && warning.isNullOrBlank()) {
             warning = if (clientData.getVlessProfileLinks().size >= ClientData.MAX_VLESS_PROFILES) {
                 "Достигнут предел ${ClientData.MAX_VLESS_PROFILES} профилей VLESS."
@@ -1428,6 +1578,7 @@ class WarpConfigsActivity : AppCompatActivity() {
             importedAwg = imported,
             importedVless = importedVless,
             warning = warning?.takeIf { imported + importedVless == 0 },
+            newIds = newIds,
         )
     }
 

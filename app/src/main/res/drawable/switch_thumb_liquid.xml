@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Бегунок переключателя.
+
+    Размер задан явно, а не отдан библиотеке: после обновления appcompat до 1.7.0
+    и material до 1.12.0 переключатели приехали мелкими и с подписью «ВКЛ» внутри.
+    Свои размеры и своя форма делают внешний вид независимым от того, что решит
+    следующая версия библиотеки.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <size
+        android:width="24dp"
+        android:height="24dp"/>
+    <solid android:color="#FFFFFF"/>
+</shape>

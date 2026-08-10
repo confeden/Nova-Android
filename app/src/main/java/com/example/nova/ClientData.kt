@@ -236,6 +236,38 @@ data class WarpVerifiedConfig(
     val qualityAvgPingMs: Double = 0.0,
     val qualityLastCheckedAt: Long = 0L,
     val qualityFailureCount: Int = 0,
+    /**
+     * Учёт перерукопожатий на живой сессии этого узла.
+     *
+     * Замер 2026-08-10: два узла в одной сети и на одной сборке дали 2,0–2,5 и
+     * 0,5–1,0 перерукопожатия в минуту, причём спокойный нёс больше трафика.
+     * Параметры AWG у всех встроенных профилей одинаковые — значит частота
+     * пересборки сессии описывает путь до узла, а пинг и факт подключения её не
+     * видят: узел, не удерживающий сессию, до сих пор считался хорошим.
+     */
+    val churnWindows: Int = 0,
+    val churnRekeys: Int = 0,
+    /**
+     * Удержание сессии, замеренное в коротком окне адаптации.
+     *
+     * Отдельно от churn намеренно: у churn шкала двухминутного окна под
+     * пользовательским трафиком (здоровье — одно перерукопожатие на окно), и
+     * записать туда двадцатисекундный замер значило бы выдать катастрофу за
+     * норму. Здесь копится тишина обратного потока в миллисекундах и рядом с
+     * ней знаменатель — сколько времени замер реально шёл. Подробности и
+     * физика — в [SessionHoldMetric].
+     */
+    val holdWindows: Int = 0,
+    val holdStallMs: Long = 0L,
+    val holdSpanMs: Long = 0L,
+    /**
+     * Собственная отметка времени замера удержания.
+     *
+     * Не `qualityLastCheckedAt`: та управляет свежестью пинговых слагаемых, и
+     * подъём её из чужого замера тихо продлевал бы жизнь устаревшему пингу,
+     * которого никто не перемерял.
+     */
+    val holdCheckedAt: Long = 0L,
     val preferredSni: String = "",
     val preferredPorts: List<WarpPortStat> = emptyList(),
 )
@@ -253,6 +285,7 @@ class ClientData(context: Context) {
     private val vlessProfilesFile = AtomicFile(File(appContext.filesDir, "vless_profiles.json"))
     private val transportLatencyFile = AtomicFile(File(appContext.filesDir, "transport_latency.json"))
     private val vlessSubscriptionFile = AtomicFile(File(appContext.filesDir, "vless_subscription.json"))
+    private val operaStateFile = AtomicFile(File(appContext.filesDir, "opera_state.json"))
     private val warpVerifiedExportFile = File(
         appContext.getExternalFilesDir(null) ?: appContext.filesDir,
         WARP_VERIFIED_EXPORT_FILE_NAME,
@@ -284,6 +317,7 @@ class ClientData(context: Context) {
         if (runtimeSeedInitDone.compareAndSet(false, true)) {
             ensureBundledVerifiedWarpSeeds()
             mergeWarpVerifiedExportSnapshotIntoPrefs()
+            purgeStoredWarpPreferredSniOnce()
             pruneGeneratedBuiltInWarpConfigs()
             // compactWarpVerifiedConfigsIfNeeded()
             if (!isVpnRuntimeProcess()) {
@@ -464,12 +498,14 @@ class ClientData(context: Context) {
 
 
     fun promoteWarpVerifiedConfig(id: String) {
-        val configs = getWarpVerifiedConfigs().toMutableList()
-        val index = configs.indexOfFirst { it.id == id }
-        if (index != -1) {
-            val item = configs[index]
-            configs[index] = item.copy(promotedAt = System.currentTimeMillis())
-            saveWarpVerifiedConfigs(configs)
+        synchronized(warpVerifiedConfigsLock) {
+            val configs = getWarpVerifiedConfigs().toMutableList()
+            val index = configs.indexOfFirst { it.id == id }
+            if (index != -1) {
+                val item = configs[index]
+                configs[index] = item.copy(promotedAt = System.currentTimeMillis())
+                saveWarpVerifiedConfigs(configs)
+            }
         }
     }
 
@@ -1223,23 +1259,25 @@ class ClientData(context: Context) {
     }
 
     /** Добавляет ссылки, пропуская дубликаты. Возвращает число реально добавленных. */
-    fun addVlessProfileLinks(links: List<String>): Int {
-        if (links.isEmpty()) return 0
+    /** @return ссылки, которых в списке ещё не было и которые действительно добавлены. */
+    fun addVlessProfileLinks(links: List<String>): List<String> {
+        if (links.isEmpty()) return emptyList()
         val existing = getVlessProfileLinks()
         // Ключ — набор параметров профиля, а не сама строка: провайдеры
         // перенумеровывают узлы в имени при каждой публикации, и по строке одна и та
         // же запись выглядела бы новой.
         val seen = existing.mapNotNullTo(HashSet()) { VlessConfig.parse(it)?.identity }
         val merged = existing.toMutableList()
-        var added = 0
+        val added = mutableListOf<String>()
         for (link in links) {
             if (merged.size >= MAX_VLESS_PROFILES) break
             val identity = VlessConfig.parse(link)?.identity ?: continue
             if (!seen.add(identity)) continue
-            merged += link.trim()
-            added += 1
+            val normalizedLink = link.trim()
+            merged += normalizedLink
+            added += normalizedLink
         }
-        if (added == 0) return 0
+        if (added.isEmpty()) return emptyList()
         val activeLink = getVlessConfigLink().ifBlank { merged.firstOrNull().orEmpty() }
         writeVlessStore(merged, activeLink)
         return added
@@ -1386,11 +1424,10 @@ class ClientData(context: Context) {
      * список для подключения строится из `getWarpVerifiedConfigs`, а не отсюда.
      */
     fun getVlessProfilesAsConfigs(): List<WarpVerifiedConfig> {
-        val activeLink = getVlessConfigLink()
         return getVlessProfileLinks().mapIndexedNotNull { index, link ->
             val config = VlessConfig.parse(link) ?: return@mapIndexedNotNull null
             WarpVerifiedConfig(
-                id = "vless|${config.identity}",
+                id = "$VLESS_CONFIG_ID_PREFIX${config.identity}",
                 engine = "vless",
                 // Протокол в названии режима: в списке импортированных рядом стоят
                 // профили разных протоколов, и «WS» само по себе не говорит, чей он.
@@ -1403,7 +1440,12 @@ class ClientData(context: Context) {
                 lastVerifiedAt = 0L,
                 seedOrder = index,
                 successCount = 0,
-                manual = link == activeLink,
+                // Пометка «ручная» здесь означала бы «выбранный сейчас профиль», а
+                // экран прячет ручные записи из обоих списков — и встроенных, и
+                // импортированных. Активный профиль из-за этого пропадал совсем:
+                // импортируешь одну ссылку в пустой список, она сразу становится
+                // активной и никуда не попадает. Снаружи — «импорт не сработал».
+                manual = false,
                 userImported = true,
             )
         }
@@ -1415,6 +1457,68 @@ class ClientData(context: Context) {
             .remove("vless_profile_links")
             .remove("vless_config_link")
             .commit()
+    }
+
+    /**
+     * Удаляет карточку из списка конфигураций — там, где она на самом деле лежит.
+     *
+     * Дефект, ради которого это появилось: кнопка удаления звала только
+     * [removeWarpVerifiedConfig], а профили VLESS в хранилище WARP не лежат — они
+     * собираются на лету из `vless_profiles.json` с идентификатором `vless|…`.
+     * Фильтр по такому id не находил ничего, удалять было нечего, и после
+     * перерисовки профиль возвращался на место. Снаружи это выглядело так, будто
+     * удаление не сработало вовсе: счётчик оставался прежним.
+     *
+     * @return true, если запись действительно исчезла.
+     */
+    fun removeImportedConfig(id: String): Boolean {
+        val normalized = id.trim()
+        if (normalized.isEmpty()) return false
+        if (normalized.startsWith(VLESS_CONFIG_ID_PREFIX)) {
+            return removeVlessProfileByIdentity(normalized.removePrefix(VLESS_CONFIG_ID_PREFIX))
+        }
+        val before = getWarpVerifiedConfigs().map { it.id }.toSet()
+        if (normalized !in before) return false
+        removeWarpVerifiedConfig(normalized)
+        return true
+    }
+
+    /** Убирает профиль VLESS по его identity и, если нужно, переносит активную ссылку. */
+    fun removeVlessProfileByIdentity(identity: String): Boolean {
+        val target = identity.trim()
+        if (target.isEmpty()) return false
+        val removal = ProfileRotation.remove(
+            items = getVlessProfileLinks(),
+            active = getVlessConfigLink().takeIf { it.isNotBlank() },
+        ) { link -> VlessConfig.parse(link)?.identity == target } ?: return false
+        writeVlessStore(removal.items, removal.active.orEmpty())
+        return true
+    }
+
+    /** Сколько всего конфигураций пользователь принёс сам: импортированные плюс VLESS. */
+    fun countImportedConfigs(): Int =
+        getWarpVerifiedConfigs().count { it.userImported } + getVlessProfileLinks().size
+
+    /**
+     * Стирает всё, что пользователь импортировал сам: конфигурации WARP/AWG с
+     * пометкой `userImported` и все профили VLESS. Встроенные профили не трогает —
+     * без них не останется вообще ничего, чем подключаться.
+     *
+     * @return сколько записей удалено.
+     */
+    fun clearImportedConfigs(): Int {
+        synchronized(warpVerifiedConfigsLock) {
+            val configs = getWarpVerifiedConfigs()
+            val importedIds = configs.filter { it.userImported }.mapTo(mutableSetOf()) { it.id }
+            if (importedIds.isNotEmpty()) {
+                saveWarpVerifiedConfigs(configs.filterNot { it.id in importedIds })
+            }
+            val vlessCount = getVlessProfileLinks().size
+            if (vlessCount > 0) {
+                clearVlessProfileLinks()
+            }
+            return importedIds.size + vlessCount
+        }
     }
 
     /** true, если выбран VLESS и для него есть разбираемая ссылка. */
@@ -1779,8 +1883,59 @@ class ClientData(context: Context) {
         }
     }
 
+    /**
+     * Состояние перебора Opera живёт в отдельном файле, а не в `SharedPreferences`.
+     *
+     * Служба работает в процессе `:vpn`, экран — в основном. Настройки в `MODE_PRIVATE`
+     * кешируются каждым процессом целиком и не перечитываются, а любой `commit()`
+     * сбрасывает на диск всю копию карты. Основной процесс на «Стоп» пишет сразу
+     * несколько ключей и вместе с ними возвращает свой старый снимок, откатывая всё,
+     * что за сеанс записал `:vpn`.
+     *
+     * Ровно это и происходило: endpoint, только что удержавший туннель двадцать
+     * секунд, исчезал из кэша к следующему циклу — не по остыванию, а потому что файл
+     * настроек откатывался к состоянию до подключения. Вместе с ним терялись и
+     * поднятый наверх способ запуска, и выбранный профиль API, то есть перебор каждый
+     * раз начинался с нуля.
+     *
+     * Всё читаем-меняем-пишем под общим замком: внутри `:vpn` сюда одновременно пишут
+     * поток цикла подключения, колбэк tun2proxy и фоновые потоки recovery и prewarm.
+     */
+    private fun readOperaStateLocked(): JSONObject {
+        val file = operaStateFile.baseFile
+        val stamp = if (file.exists()) file.lastModified() to file.length() else 0L to 0L
+        cachedOperaState?.let { cached ->
+            if (cachedOperaStateStamp == stamp) return cached
+        }
+        val parsed = readAtomicJson(operaStateFile) ?: JSONObject()
+        cachedOperaState = parsed
+        cachedOperaStateStamp = stamp
+        return parsed
+    }
+
+    private fun <T> withOperaState(block: (JSONObject) -> T): T =
+        synchronized(operaStateLock) { block(readOperaStateLocked()) }
+
+    private fun editOperaState(block: (JSONObject) -> Unit) {
+        synchronized(operaStateLock) {
+            val state = readOperaStateLocked()
+            block(state)
+            writeAtomicRaw(operaStateFile, state.toString())
+            cachedOperaState = state
+            val file = operaStateFile.baseFile
+            cachedOperaStateStamp = if (file.exists()) file.lastModified() to file.length() else 0L to 0L
+        }
+    }
+
+    private fun operaStateString(key: String): String = withOperaState { it.optString(key) }
+
+    private fun operaStateLong(key: String): Long = withOperaState { it.optLong(key, 0L) }
+
     fun getOperaPinnedEndpoints(country: String): List<String> {
-        val raw = prefs.getString(operaPinnedEndpointsKey(country), null).orEmpty()
+        val key = operaPinnedEndpointsKey(country)
+        // Установка, обновившаяся со старой версии, читает список из настроек один раз:
+        // выбрасывать уже проверенные адреса ради переезда хранилища незачем.
+        val raw = operaStateString(key).ifBlank { prefs.getString(key, null).orEmpty() }
         if (raw.isBlank()) return emptyList()
         return try {
             val array = JSONArray(raw)
@@ -1801,17 +1956,48 @@ class ClientData(context: Context) {
             .filter { it.isNotBlank() }
             .distinct()
             .take(16)
-        prefs.edit().apply {
+        val key = operaPinnedEndpointsKey(country)
+        editOperaState { state ->
             if (normalized.isEmpty()) {
-                remove(operaPinnedEndpointsKey(country))
+                state.remove(key)
             } else {
-                putString(
-                    operaPinnedEndpointsKey(country),
-                    JSONArray().apply { normalized.forEach(::put) }.toString(),
-                )
+                state.put(key, JSONArray().apply { normalized.forEach(::put) }.toString())
             }
-            commit()
         }
+        // Легаси-копию убираем, чтобы кэш не жил в двух местах и старое значение не
+        // всплыло обратно при откате настроек соседним процессом.
+        if (prefs.contains(key)) {
+            prefs.edit().remove(key).commit()
+        }
+    }
+
+    /**
+     * Складывает свежий ответ discover с уже известным списком, не теряя порядка.
+     *
+     * Прямая перезапись стирала выстроенный порядок: наверху списка стоит адрес,
+     * поднятый туда после двадцати секунд удержания, а фоновая проверка через WARP
+     * возвращала свой набор в порядке ответа API и клала его поверх. Проверенный
+     * адрес оказывался в середине, и следующий цикл начинал не с него.
+     *
+     * Адреса, которых в свежем ответе нет, убираем: их больше не выдают, и держать их
+     * в очереди — значит платить за них попытками.
+     */
+    /**
+     * @return список, оказавшийся в кэше после слияния. Возвращаем его, чтобы
+     * вызывающий мог показать результат в журнале: строка «Есть кэш Opera
+     * endpoints» печатает первые два адреса, не попавшие в остывание, и по ней
+     * слияние от замены не отличить.
+     */
+    fun mergeDiscoveredOperaPinnedEndpoints(country: String, discovered: List<String>): List<String> {
+        val fresh = discovered
+            .map(::normalizeOperaEndpoint)
+            .filter { it.isNotBlank() }
+            .distinct()
+        val known = getOperaPinnedEndpoints(country)
+        if (fresh.isEmpty()) return known
+        val merged = ProfileRotation.mergeKeepingOrder(known, fresh)
+        saveOperaPinnedEndpoints(country = country, endpoints = merged)
+        return getOperaPinnedEndpoints(country)
     }
 
     fun promoteOperaPinnedEndpoint(country: String, endpoint: String) {
@@ -1843,12 +2029,8 @@ class ClientData(context: Context) {
         val normalizedCountry = normalizeOperaRegionCode(country)
         val normalizedEndpoint = normalizeOperaEndpoint(endpoint)
         if (normalizedCountry.isBlank() || normalizedEndpoint.isBlank()) return
-        prefs.edit()
-            .putLong(
-                operaPinnedEndpointFailureKey(normalizedCountry, normalizedEndpoint),
-                nowMs + cooldownMs.coerceAtLeast(15_000L),
-            )
-            .commit()
+        val key = operaPinnedEndpointFailureKey(normalizedCountry, normalizedEndpoint)
+        editOperaState { it.put(key, nowMs + cooldownMs.coerceAtLeast(15_000L)) }
     }
 
     fun isOperaPinnedEndpointCoolingDown(
@@ -1860,28 +2042,25 @@ class ClientData(context: Context) {
         val normalizedEndpoint = normalizeOperaEndpoint(endpoint)
         if (normalizedCountry.isBlank() || normalizedEndpoint.isBlank()) return false
         val key = operaPinnedEndpointFailureKey(normalizedCountry, normalizedEndpoint)
-        val until = prefs.getLong(key, 0L)
+        val until = operaStateLong(key)
         if (until <= 0L) return false
         if (until <= nowMs) {
-            prefs.edit().remove(key).apply()
+            // Протухшие отметки убираем сразу: иначе файл разрастался бы при ротации.
+            editOperaState { it.remove(key) }
             return false
         }
         return true
     }
 
     fun getPreferredOperaApiProfile(country: String): String {
-        return prefs.getString(operaApiProfileKey(country), "").orEmpty()
+        return operaStateString(operaApiProfileKey(country))
     }
 
     fun setPreferredOperaApiProfile(country: String, profileId: String?) {
         val normalized = normalizeOperaApiProfileId(profileId)
-        prefs.edit().apply {
-            if (normalized.isBlank()) {
-                remove(operaApiProfileKey(country))
-            } else {
-                putString(operaApiProfileKey(country), normalized)
-            }
-            commit()
+        val key = operaApiProfileKey(country)
+        editOperaState { state ->
+            if (normalized.isBlank()) state.remove(key) else state.put(key, normalized)
         }
     }
 
@@ -1894,17 +2073,14 @@ class ClientData(context: Context) {
         val normalizedCountry = normalizeOperaRegionCode(country)
         val normalizedProfile = normalizeOperaApiProfileId(profileId)
         if (normalizedCountry.isBlank() || normalizedProfile.isBlank()) return
-        prefs.edit()
-            .putLong(
-                operaApiProfileFailureKey(normalizedCountry, normalizedProfile),
-                nowMs + cooldownMs.coerceAtLeast(10_000L),
-            )
-            .apply {
-                if (getPreferredOperaApiProfile(normalizedCountry) == normalizedProfile) {
-                    remove(operaApiProfileKey(normalizedCountry))
-                }
+        val failureKey = operaApiProfileFailureKey(normalizedCountry, normalizedProfile)
+        val preferredKey = operaApiProfileKey(normalizedCountry)
+        editOperaState { state ->
+            state.put(failureKey, nowMs + cooldownMs.coerceAtLeast(10_000L))
+            if (state.optString(preferredKey) == normalizedProfile) {
+                state.remove(preferredKey)
             }
-            .commit()
+        }
     }
 
     fun isOperaApiProfileCoolingDown(
@@ -1916,10 +2092,10 @@ class ClientData(context: Context) {
         val normalizedProfile = normalizeOperaApiProfileId(profileId)
         if (normalizedCountry.isBlank() || normalizedProfile.isBlank()) return false
         val key = operaApiProfileFailureKey(normalizedCountry, normalizedProfile)
-        val until = prefs.getLong(key, 0L)
+        val until = operaStateLong(key)
         if (until <= 0L) return false
         if (until <= nowMs) {
-            prefs.edit().remove(key).apply()
+            editOperaState { it.remove(key) }
             return false
         }
         return true
@@ -2014,7 +2190,49 @@ class ClientData(context: Context) {
                 lastFailureAt = nowMs,
             )
         }
-        prefs.edit().putString(key, encodeOperaLaunchPlanStats(next)).commit()
+        editOperaState { it.put(key, encodeOperaLaunchPlanStats(next)) }
+    }
+
+    /**
+     * Помечает способ запуска Opera как удержавшийся.
+     *
+     * То же правило, что у встроенных профилей ([promoteWarpVerifiedConfig]): наверх
+     * очереди поднимается не то, что «когда-то подключилось», а то, что продержалось
+     * двадцать секунд. Статистика попыток на это неспособна — она одинаково считает
+     * успехом и рабочий узел, и тот, что поднял локальный порт и сразу отвалился.
+     */
+    fun promoteOperaLaunchPlan(
+        country: String,
+        fakeSni: String?,
+        endpoint: String?,
+        apiProfileId: String?,
+        nowMs: Long = System.currentTimeMillis(),
+    ) {
+        val key = operaLaunchPlanPromotionKey(country, fakeSni, endpoint, apiProfileId)
+        if (key.isBlank()) return
+        editOperaState { it.put(key, nowMs) }
+    }
+
+    /** Когда этот способ запуска в последний раз удержался. Ноль — ни разу. */
+    fun getOperaLaunchPlanPromotedAt(
+        country: String,
+        fakeSni: String?,
+        endpoint: String?,
+        apiProfileId: String?,
+    ): Long {
+        val key = operaLaunchPlanPromotionKey(country, fakeSni, endpoint, apiProfileId)
+        if (key.isBlank()) return 0L
+        return operaStateLong(key)
+    }
+
+    private fun operaLaunchPlanPromotionKey(
+        country: String,
+        fakeSni: String?,
+        endpoint: String?,
+        apiProfileId: String?,
+    ): String {
+        val base = operaLaunchPlanKey(country, fakeSni, endpoint, apiProfileId)
+        return if (base.isBlank()) "" else "${base}|promoted_at"
     }
 
     fun getOperaLaunchPlanScore(
@@ -2058,7 +2276,7 @@ class ClientData(context: Context) {
                 lastFailureAt = nowMs,
             )
         }
-        prefs.edit().putString(key, encodeOperaRegistrationPlanStats(next)).commit()
+        editOperaState { it.put(key, encodeOperaRegistrationPlanStats(next)) }
     }
 
     fun getOperaRegistrationPlanScore(
@@ -2443,6 +2661,42 @@ class ClientData(context: Context) {
                 selectedApps.any(MessengerObfsPolicy::isMessengerPackage)
             2 -> installedMessengerPackages.any { it !in selectedApps }
             else -> true
+        }
+    }
+
+    /**
+     * Называет причину, по которой [shouldPreferMessengerWarpProfiles] сказала «нет».
+     *
+     * Условие одно, но складывается из двух разных обстоятельств, и лечатся они
+     * противоположным образом: мессенджера нет на устройстве или он не попал в
+     * раздельное туннелирование. Без разбора обе выглядят как «не работает», и
+     * один прогон на это уже потрачен.
+     */
+    fun describeMessengerWarpProfilesRefusal(): String {
+        val installedMessengerPackages = getInstalledMessengerPackages()
+        if (installedMessengerPackages.isEmpty()) {
+            return "на устройстве нет ни одного известного мессенджера"
+        }
+        return "мессенджеры (${installedMessengerPackages.size}) не попали в раздельное " +
+            "туннелирование (режим ${getSplitMode()})"
+    }
+
+    /**
+     * Отладочный ключ: убрать junk-пакеты AWG (`Jc`, `Jmin`, `Jmax`, `I1..I5`) из
+     * конфигурации туннеля.
+     *
+     * Нужен, чтобы разделить причины нестабильности WARP (проблема 5 в ROADMAP):
+     * на одном и том же узле снять окно замера с junk и без него. Ставится через
+     * adb, в интерфейсе не показывается — это инструмент опыта, а не настройка.
+     */
+    fun isAwgJunkDisabled(): Boolean = operaStateString(AWG_JUNK_DISABLED_KEY) == "1"
+
+    fun setAwgJunkDisabled(disabled: Boolean) {
+        // В файл, а не в SharedPreferences: ключ пишет экран, а читает служба из
+        // процесса `:vpn`, и там у настроек свой кэш — переключатель бы просто не
+        // доехал. На этом уже обжигались, см. ROADMAP.
+        editOperaState { state ->
+            if (disabled) state.put(AWG_JUNK_DISABLED_KEY, "1") else state.remove(AWG_JUNK_DISABLED_KEY)
         }
     }
 
@@ -3393,6 +3647,148 @@ class ClientData(context: Context) {
         return bestEffectiveWarpPortStat(item)?.failureCount ?: 0
     }
 
+    /**
+     * Среднее число перерукопожатий за окно замера. −1, если данных ещё нет.
+     *
+     * Здоровая сессия WireGuard меняет ключ раз в две минуты — при двухминутном
+     * окне это 1. Всё, что заметно выше, означает потерянный обратный поток.
+     */
+    fun warpConfigChurnPerWindow(item: WarpVerifiedConfig): Double {
+        if (item.churnWindows < WARP_CHURN_MIN_WINDOWS) return -1.0
+        return item.churnRekeys.toDouble() / item.churnWindows.toDouble()
+    }
+
+    /**
+     * Копит замер перерукопожатий для узла.
+     *
+     * Зовётся только по показательным окнам — тем, где через туннель реально шёл
+     * трафик. Молчащее окно даёт ноль само по себе и оценку бы завысило.
+     */
+    fun recordWarpConfigChurn(
+        host: String,
+        port: Int,
+        rekeys: Int,
+        nowMs: Long = System.currentTimeMillis(),
+    ) {
+        synchronized(warpVerifiedConfigsLock) {
+            val normalizedHost = host.trim().removePrefix("[").removeSuffix("]")
+            if (normalizedHost.isBlank() || port !in 1..65535 || rekeys < 0) return
+            val existing = getWarpVerifiedConfigs().associateBy { it.id }.toMutableMap()
+            var touched = false
+            existing.entries.forEach { entry ->
+                val item = entry.value
+                val sameHost = item.host.trim().removePrefix("[").removeSuffix("]")
+                    .equals(normalizedHost, ignoreCase = true)
+                if (!sameHost || item.port != port) return@forEach
+                touched = true
+                // Окно старения: держим порядка WARP_CHURN_MAX_WINDOWS последних
+                // замеров. Без него узел, испортившийся месяц назад, не отмоется
+                // никогда, а сеть у телефона меняется чаще.
+                // `qualityLastCheckedAt` здесь намеренно не двигается. Раньше двигался —
+                // и тихо продлевал жизнь пинговому замеру, которого никто не перемерял:
+                // эта отметка задаёт свежесть сразу трёх качественных слагаемых и через
+                // `isWarpVerifiedConfigDegraded` попадает в ранний ключ сортировки.
+                // Замер удержания о пинге не знает ничего и подтверждать его не вправе.
+                entry.setValue(
+                    if (item.churnWindows >= WARP_CHURN_MAX_WINDOWS) {
+                        item.copy(
+                            churnWindows = item.churnWindows / 2 + 1,
+                            churnRekeys = item.churnRekeys / 2 + rekeys,
+                        )
+                    } else {
+                        item.copy(
+                            churnWindows = item.churnWindows + 1,
+                            churnRekeys = item.churnRekeys + rekeys,
+                        )
+                    }
+                )
+            }
+            if (!touched) return
+            saveWarpVerifiedConfigs(existing.values.toList())
+        }
+    }
+
+    /**
+     * Тишина обратного потока узла, приведённая к общей длительности окна.
+     * −1, если замера нет. Подробности — в [SessionHoldMetric].
+     */
+    fun warpConfigHoldStallMs(item: WarpVerifiedConfig): Double {
+        return SessionHoldMetric.normalizedStallMs(
+            windows = item.holdWindows,
+            stallMs = item.holdStallMs,
+            spanMs = item.holdSpanMs,
+        )
+    }
+
+    /**
+     * Грубая оценка удержания узла — то, что участвует в порядке перебора.
+     *
+     * Именно грубая: одно окно на профиль за прогон адаптации — это одно
+     * наблюдение, и точная сортировка по нему выдала бы за свойство узла то, в
+     * какую минуту прогона он попал.
+     */
+    fun warpConfigHoldGrade(
+        item: WarpVerifiedConfig,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Int {
+        return SessionHoldMetric.grade(
+            windows = item.holdWindows,
+            stallMs = item.holdStallMs,
+            spanMs = item.holdSpanMs,
+            checkedAtMs = item.holdCheckedAt,
+            nowMs = nowMs,
+        )
+    }
+
+    /**
+     * Копит замер удержания для узла.
+     *
+     * Адресуется парой host+port, без учёта режима, — как и churn: тишина
+     * обратного потока описывает путь до узла, а не форму пакетов клиента.
+     * Замер 2026-08-10 это и показал: параметры AWG у всех девяноста шести
+     * встроенных профилей одинаковые, а поведение узлов разное.
+     *
+     * Зовётся только по показательным окнам, см. [SessionHoldMetric.Window].
+     */
+    fun recordWarpConfigHoldWindow(
+        host: String,
+        port: Int,
+        window: SessionHoldMetric.Window,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Boolean {
+        synchronized(warpVerifiedConfigsLock) {
+            val normalizedHost = host.trim().removePrefix("[").removeSuffix("]")
+            if (normalizedHost.isBlank() || port !in 1..65535) return false
+            if (!window.representative) return false
+            val existing = getWarpVerifiedConfigs().associateBy { it.id }.toMutableMap()
+            var touched = false
+            existing.entries.forEach { entry ->
+                val item = entry.value
+                val sameHost = item.host.trim().removePrefix("[").removeSuffix("]")
+                    .equals(normalizedHost, ignoreCase = true)
+                if (!sameHost || item.port != port) return@forEach
+                touched = true
+                val accumulated = SessionHoldMetric.accumulate(
+                    previousWindows = item.holdWindows,
+                    previousStallMs = item.holdStallMs,
+                    previousSpanMs = item.holdSpanMs,
+                    window = window,
+                )
+                entry.setValue(
+                    item.copy(
+                        holdWindows = accumulated.windows,
+                        holdStallMs = accumulated.stallMs,
+                        holdSpanMs = accumulated.spanMs,
+                        holdCheckedAt = maxOf(item.holdCheckedAt, nowMs),
+                    )
+                )
+            }
+            if (!touched) return false
+            saveWarpVerifiedConfigs(existing.values.toList())
+            return true
+        }
+    }
+
     private fun effectiveWarpQualityLastCheckedAt(item: WarpVerifiedConfig): Long {
         return maxOf(item.qualityLastCheckedAt, bestEffectiveWarpPortStat(item)?.lastCheckedAt ?: 0L)
     }
@@ -3447,6 +3843,13 @@ class ClientData(context: Context) {
                 compareByDescending<WarpVerifiedConfig> { !it.manual }
                     .thenByDescending { it.promotedAt }
                     .thenByDescending { getWarpVerifiedQualityTier(it, nowMs) }
+                    // Удержание идёт выше пинга, и это не вкусовщина. Пинг у узла,
+                    // теряющего обратный поток, нормальный — на нём и держалась
+                    // ошибка, ради которой замер заведён. А ниже — числовая оценка,
+                    // до которой сравнение почти никогда не доходит: пинг Double и
+                    // различается у всех, поэтому слагаемое в оценке само по себе
+                    // порядок не меняет.
+                    .thenByDescending { warpConfigHoldGrade(it, nowMs) }
                     .thenByDescending { isExactFreshWarpVerifiedLastSuccessMatch(it, nowMs) }
                     .thenByDescending { effectiveWarpQualityPingSuccesses(it) }
                     .thenBy {
@@ -3713,6 +4116,62 @@ class ClientData(context: Context) {
             qualityFailureCount = maxOf(persisted.qualityFailureCount, exported.qualityFailureCount),
             preferredSni = persisted.preferredSni.ifBlank { exported.preferredSni },
             preferredPorts = mergeWarpPortStats(persisted, exported),
+        ).withMergedHoldAndChurn(persisted, exported)
+    }
+
+    /**
+     * Сводит накопительные замеры двух копий записи.
+     *
+     * Отдельной функцией, потому что здесь нельзя брать `maxOf` по каждому полю
+     * по отдельности: пара «сколько окон» и «сколько в них насчитано» имеет
+     * смысл только целиком. Двенадцать окон одной стороны с сорока событиями
+     * другой дают выдуманное частное, которого не наблюдал никто.
+     *
+     * Сторона выбирается по числу окон — то есть по объёму замера, а не по
+     * свежести отметки: свежая, но одноразовая проверка не должна затирать
+     * накопленное.
+     */
+    /**
+     * Переносит накопленные замеры со старой записи на пересобранную.
+     *
+     * Точка ровно одна, и это главное в ней. Пока каждое место пересборки
+     * перечисляло счётчики само, добавление нового поля означало найти все такие
+     * места — а компилятор молчит, потому что у полей есть значения по умолчанию и
+     * пропущенный аргумент остаётся валидным кодом. Так уже терялся churn в двух
+     * функциях и удержание — ещё в трёх: замер писался, в журнале было «записали»,
+     * а в выгрузке стоял ноль. Новое поле теперь достаточно дописать сюда.
+     *
+     * Переносятся только накопительные величины — те, что копятся окнами и не
+     * относятся к текущей попытке. Качество и пинг сюда не входят: их каждая
+     * запись перевычисляет осознанно.
+     */
+    private fun WarpVerifiedConfig.carryMeasurementsFrom(
+        previous: WarpVerifiedConfig?,
+    ): WarpVerifiedConfig {
+        if (previous == null) return this
+        return copy(
+            churnWindows = previous.churnWindows,
+            churnRekeys = previous.churnRekeys,
+            holdWindows = previous.holdWindows,
+            holdStallMs = previous.holdStallMs,
+            holdSpanMs = previous.holdSpanMs,
+            holdCheckedAt = previous.holdCheckedAt,
+        )
+    }
+
+    private fun WarpVerifiedConfig.withMergedHoldAndChurn(
+        persisted: WarpVerifiedConfig,
+        exported: WarpVerifiedConfig,
+    ): WarpVerifiedConfig {
+        val churnSource = if (exported.churnWindows > persisted.churnWindows) exported else persisted
+        val holdSource = if (exported.holdWindows > persisted.holdWindows) exported else persisted
+        return copy(
+            churnWindows = churnSource.churnWindows,
+            churnRekeys = churnSource.churnRekeys,
+            holdWindows = holdSource.holdWindows,
+            holdStallMs = holdSource.holdStallMs,
+            holdSpanMs = holdSource.holdSpanMs,
+            holdCheckedAt = holdSource.holdCheckedAt,
         )
     }
 
@@ -3771,6 +4230,12 @@ class ClientData(context: Context) {
                             qualityAvgPingMs = json.optDouble("quality_avg_ping_ms", 0.0).takeIf { it.isFinite() } ?: 0.0,
                             qualityLastCheckedAt = json.optLong("quality_last_checked_at", 0L),
                             qualityFailureCount = json.optInt("quality_failure_count", 0).coerceAtLeast(0),
+                            churnWindows = json.optInt("churn_windows", 0).coerceAtLeast(0),
+                            churnRekeys = json.optInt("churn_rekeys", 0).coerceAtLeast(0),
+                            holdWindows = json.optInt("hold_windows", 0).coerceAtLeast(0),
+                            holdStallMs = json.optLong("hold_stall_ms", 0L).coerceAtLeast(0L),
+                            holdSpanMs = json.optLong("hold_span_ms", 0L).coerceAtLeast(0L),
+                            holdCheckedAt = json.optLong("hold_checked_at", 0L).coerceAtLeast(0L),
                             preferredSni = normalizeOptionalTrafficMaskHost(json.optString("preferred_sni")),
                             preferredPorts = parseWarpPortStats(json, port),
                         )
@@ -3882,6 +4347,12 @@ class ClientData(context: Context) {
                             qualityAvgPingMs = json.optDouble("quality_avg_ping_ms", 0.0).takeIf { it.isFinite() } ?: 0.0,
                             qualityLastCheckedAt = json.optLong("quality_last_checked_at", 0L),
                             qualityFailureCount = json.optInt("quality_failure_count", 0).coerceAtLeast(0),
+                            churnWindows = json.optInt("churn_windows", 0).coerceAtLeast(0),
+                            churnRekeys = json.optInt("churn_rekeys", 0).coerceAtLeast(0),
+                            holdWindows = json.optInt("hold_windows", 0).coerceAtLeast(0),
+                            holdStallMs = json.optLong("hold_stall_ms", 0L).coerceAtLeast(0L),
+                            holdSpanMs = json.optLong("hold_span_ms", 0L).coerceAtLeast(0L),
+                            holdCheckedAt = json.optLong("hold_checked_at", 0L).coerceAtLeast(0L),
                             preferredSni = normalizeOptionalTrafficMaskHost(json.optString("preferred_sni")),
                             preferredPorts = parseWarpPortStats(json, port),
                         )
@@ -3949,74 +4420,78 @@ class ClientData(context: Context) {
     }
 
     private fun mergeWarpVerifiedExportSnapshotIntoPrefs() {
-        val exported = getWarpVerifiedExportSnapshot()
-            .filter { !it.manual && it.rawConfig.isNotBlank() }
-        if (exported.isEmpty()) return
-        val existing = getWarpVerifiedConfigs().associateBy { it.id }.toMutableMap()
-        var changed = false
-        for (item in exported) {
-            val previous = existing[item.id]
-            val merged = when {
-                previous == null -> item
-                item.userImported && !previous.userImported -> item.copy(
-                    successCount = maxOf(item.successCount, previous.successCount),
-                    lastVerifiedAt = maxOf(item.lastVerifiedAt, previous.lastVerifiedAt),
-                    createdAt = minOf(item.createdAt.takeIf { it > 0L } ?: previous.createdAt, previous.createdAt),
-                    qualityProbeCount = maxOf(item.qualityProbeCount, previous.qualityProbeCount),
-                    qualityPingSuccesses = maxOf(item.qualityPingSuccesses, previous.qualityPingSuccesses),
-                    qualityAvgPingMs = mergeWarpQualityAverage(previous, item),
-                    qualityLastCheckedAt = maxOf(item.qualityLastCheckedAt, previous.qualityLastCheckedAt),
-                    qualityFailureCount = minOf(item.qualityFailureCount, previous.qualityFailureCount),
-                    preferredSni = chooseWarpPreferredSni(previous, item),
-                    preferredPorts = mergeWarpPortStats(previous, item),
-                )
-                item.lastVerifiedAt > previous.lastVerifiedAt || item.successCount > previous.successCount ->
-                    previous.copy(
-                        engine = item.engine.ifBlank { previous.engine },
-                        mode = item.mode.ifBlank { previous.mode },
-                        host = item.host.ifBlank { previous.host },
-                        port = item.port.takeIf { it in 1..65535 } ?: previous.port,
-                        endpointSource = item.endpointSource.ifBlank { previous.endpointSource },
-                        rawConfig = if (item.userImported || previous.rawConfig.isBlank()) item.rawConfig else previous.rawConfig,
-                        lastVerifiedAt = maxOf(item.lastVerifiedAt, previous.lastVerifiedAt),
+        synchronized(warpVerifiedConfigsLock) {
+            val exported = getWarpVerifiedExportSnapshot()
+                .filter { !it.manual && it.rawConfig.isNotBlank() }
+            if (exported.isEmpty()) return
+            val existing = getWarpVerifiedConfigs().associateBy { it.id }.toMutableMap()
+            var changed = false
+            for (item in exported) {
+                val previous = existing[item.id]
+                val merged = when {
+                    previous == null -> item
+                    item.userImported && !previous.userImported -> item.copy(
                         successCount = maxOf(item.successCount, previous.successCount),
-                        userImported = item.userImported || previous.userImported,
-                        qualityProbeCount = chooseRecentWarpQualityInt(previous, item) { it.qualityProbeCount },
-                        qualityPingSuccesses = chooseRecentWarpQualityInt(previous, item) { it.qualityPingSuccesses },
-                        qualityAvgPingMs = chooseRecentWarpQualityDouble(previous, item) { it.qualityAvgPingMs },
+                        lastVerifiedAt = maxOf(item.lastVerifiedAt, previous.lastVerifiedAt),
+                        createdAt = minOf(item.createdAt.takeIf { it > 0L } ?: previous.createdAt, previous.createdAt),
+                        qualityProbeCount = maxOf(item.qualityProbeCount, previous.qualityProbeCount),
+                        qualityPingSuccesses = maxOf(item.qualityPingSuccesses, previous.qualityPingSuccesses),
+                        qualityAvgPingMs = mergeWarpQualityAverage(previous, item),
                         qualityLastCheckedAt = maxOf(item.qualityLastCheckedAt, previous.qualityLastCheckedAt),
-                        qualityFailureCount = chooseRecentWarpQualityInt(previous, item) { it.qualityFailureCount },
+                        qualityFailureCount = minOf(item.qualityFailureCount, previous.qualityFailureCount),
                         preferredSni = chooseWarpPreferredSni(previous, item),
                         preferredPorts = mergeWarpPortStats(previous, item),
-                    )
-                else -> previous
+                    ).withMergedHoldAndChurn(previous, item)
+                    item.lastVerifiedAt > previous.lastVerifiedAt || item.successCount > previous.successCount ->
+                        previous.copy(
+                            engine = item.engine.ifBlank { previous.engine },
+                            mode = item.mode.ifBlank { previous.mode },
+                            host = item.host.ifBlank { previous.host },
+                            port = item.port.takeIf { it in 1..65535 } ?: previous.port,
+                            endpointSource = item.endpointSource.ifBlank { previous.endpointSource },
+                            rawConfig = if (item.userImported || previous.rawConfig.isBlank()) item.rawConfig else previous.rawConfig,
+                            lastVerifiedAt = maxOf(item.lastVerifiedAt, previous.lastVerifiedAt),
+                            successCount = maxOf(item.successCount, previous.successCount),
+                            userImported = item.userImported || previous.userImported,
+                            qualityProbeCount = chooseRecentWarpQualityInt(previous, item) { it.qualityProbeCount },
+                            qualityPingSuccesses = chooseRecentWarpQualityInt(previous, item) { it.qualityPingSuccesses },
+                            qualityAvgPingMs = chooseRecentWarpQualityDouble(previous, item) { it.qualityAvgPingMs },
+                            qualityLastCheckedAt = maxOf(item.qualityLastCheckedAt, previous.qualityLastCheckedAt),
+                            qualityFailureCount = chooseRecentWarpQualityInt(previous, item) { it.qualityFailureCount },
+                            preferredSni = chooseWarpPreferredSni(previous, item),
+                            preferredPorts = mergeWarpPortStats(previous, item),
+                        ).withMergedHoldAndChurn(previous, item)
+                    else -> previous
+                }
+                if (merged != previous) {
+                    existing[item.id] = merged
+                    changed = true
+                }
             }
-            if (merged != previous) {
-                existing[item.id] = merged
-                changed = true
+            if (changed) {
+                saveWarpVerifiedConfigs(existing.values.toList())
             }
-        }
-        if (changed) {
-            saveWarpVerifiedConfigs(existing.values.toList())
         }
     }
 
     private fun pruneGeneratedBuiltInWarpConfigs() {
-        val rawCount = runCatching {
-            val raw = prefs.getString("warp_verified_configs", null).orEmpty()
-            if (raw.isBlank()) 0 else JSONObject("""{"items":$raw}""").optJSONArray("items")?.length() ?: 0
-        }.getOrDefault(0)
-        val current = getWarpVerifiedConfigs()
-        val pruned = current.filter {
-            it.manual || it.userImported || isBundledSeed(it)
-        }
-        val removed = current - pruned.toSet()
-        if (removed.isNotEmpty()) {
-            Log.w("NovaAdapt", "pruneGeneratedBuiltInWarpConfigs: removing ${removed.size} generated configs: " +
-                removed.joinToString("; ") { "${it.mode}@${it.host}:${it.port} src=${it.endpointSource} seedOrder=${it.seedOrder}" })
-        }
-        if (rawCount != pruned.size || pruned.size != current.size) {
-            saveWarpVerifiedConfigs(pruned)
+        synchronized(warpVerifiedConfigsLock) {
+            val rawCount = runCatching {
+                val raw = prefs.getString("warp_verified_configs", null).orEmpty()
+                if (raw.isBlank()) 0 else JSONObject("""{"items":$raw}""").optJSONArray("items")?.length() ?: 0
+            }.getOrDefault(0)
+            val current = getWarpVerifiedConfigs()
+            val pruned = current.filter {
+                it.manual || it.userImported || isBundledSeed(it)
+            }
+            val removed = current - pruned.toSet()
+            if (removed.isNotEmpty()) {
+                Log.w("NovaAdapt", "pruneGeneratedBuiltInWarpConfigs: removing ${removed.size} generated configs: " +
+                    removed.joinToString("; ") { "${it.mode}@${it.host}:${it.port} src=${it.endpointSource} seedOrder=${it.seedOrder}" })
+            }
+            if (rawCount != pruned.size || pruned.size != current.size) {
+                saveWarpVerifiedConfigs(pruned)
+            }
         }
     }
 
@@ -4123,9 +4598,11 @@ class ClientData(context: Context) {
     }
 
     fun removeWarpVerifiedConfig(id: String) {
-        if (id.isBlank()) return
-        val filtered = getWarpVerifiedConfigs().filterNot { it.id == id }
-        saveWarpVerifiedConfigs(filtered)
+        synchronized(warpVerifiedConfigsLock) {
+            if (id.isBlank()) return
+            val filtered = getWarpVerifiedConfigs().filterNot { it.id == id }
+            saveWarpVerifiedConfigs(filtered)
+        }
     }
 
     fun upsertWarpVerifiedConfig(
@@ -4141,59 +4618,61 @@ class ClientData(context: Context) {
         preferredSni: String? = null,
         nowMs: Long = System.currentTimeMillis(),
     ) {
-        if (port !in 1..65535) return
-        val normalizedMode = mode.trim()
-        val normalizedHost = host.trim().removePrefix("[").removeSuffix("]")
-        val normalizedEndpointSource = endpointSource.trim()
-        if (normalizedMode.isBlank() || normalizedHost.isBlank() || rawConfig.isBlank()) return
-        if (!isAllowedWarpVerifiedMode(normalizedMode)) return
-        if (!isPersistableWarpVerifiedConfig(engine, normalizedHost, manual, userImported, normalizedEndpointSource)) return
-        val normalizedScope = inferWarpVerifiedScope(normalizedMode, scope)
-        val configId = buildWarpConfigId(normalizedMode, normalizedHost, port, normalizedScope)
-        val existing = getWarpVerifiedConfigs().associateBy { it.id }.toMutableMap()
-        val previous = existing[configId]
-        val preserveBundledSeed = previous?.let(::isBundledSeed) == true &&
-            !normalizedEndpointSource.equals("bundled-seed", ignoreCase = true)
-        val normalizedRawConfig = rawConfig.trim()
-        val normalizedPreferredSni = normalizeOptionalTrafficMaskHost(preferredSni)
-            .ifBlank { previous?.preferredSni.orEmpty() }
-        val rawConfigToStore = when {
-            preserveBundledSeed -> previous?.rawConfig.orEmpty()
-            previous?.userImported == true &&
-                previous.rawConfig.contains("[Interface]", ignoreCase = true) &&
-                !normalizedRawConfig.contains("[Interface]", ignoreCase = true) ->
-                previous.rawConfig
-            else -> normalizedRawConfig
-        }
-        existing[configId] = WarpVerifiedConfig(
-            id = configId,
-            engine = engine.trim().ifBlank { "wireguard" },
-            mode = normalizedMode,
-            host = normalizedHost,
-            port = port,
-            endpointSource = if (preserveBundledSeed) previous?.endpointSource.orEmpty() else normalizedEndpointSource,
-            rawConfig = rawConfigToStore,
-            createdAt = previous?.createdAt ?: nowMs,
-            seedOrder = previous?.seedOrder ?: Int.MAX_VALUE,
-            lastVerifiedAt = nowMs,
-            successCount = (previous?.successCount ?: 0) + if (manual) 0 else 1,
-            scope = normalizedScope,
-            manual = manual,
-            userImported = userImported || previous?.userImported == true,
-            qualityProbeCount = previous?.qualityProbeCount ?: 0,
-            qualityPingSuccesses = previous?.qualityPingSuccesses ?: 0,
-            qualityAvgPingMs = previous?.qualityAvgPingMs ?: 0.0,
-            qualityLastCheckedAt = previous?.qualityLastCheckedAt ?: 0L,
-            qualityFailureCount = previous?.qualityFailureCount ?: 0,
-            preferredSni = normalizedPreferredSni,
-            preferredPorts = updateWarpPortStats(
-                previous?.preferredPorts.orEmpty(),
+        synchronized(warpVerifiedConfigsLock) {
+            if (port !in 1..65535) return
+            val normalizedMode = mode.trim()
+            val normalizedHost = host.trim().removePrefix("[").removeSuffix("]")
+            val normalizedEndpointSource = endpointSource.trim()
+            if (normalizedMode.isBlank() || normalizedHost.isBlank() || rawConfig.isBlank()) return
+            if (!isAllowedWarpVerifiedMode(normalizedMode)) return
+            if (!isPersistableWarpVerifiedConfig(engine, normalizedHost, manual, userImported, normalizedEndpointSource)) return
+            val normalizedScope = inferWarpVerifiedScope(normalizedMode, scope)
+            val configId = buildWarpConfigId(normalizedMode, normalizedHost, port, normalizedScope)
+            val existing = getWarpVerifiedConfigs().associateBy { it.id }.toMutableMap()
+            val previous = existing[configId]
+            val preserveBundledSeed = previous?.let(::isBundledSeed) == true &&
+                !normalizedEndpointSource.equals("bundled-seed", ignoreCase = true)
+            val normalizedRawConfig = rawConfig.trim()
+            val normalizedPreferredSni = normalizeOptionalTrafficMaskHost(preferredSni)
+                .ifBlank { previous?.preferredSni.orEmpty() }
+            val rawConfigToStore = when {
+                preserveBundledSeed -> previous?.rawConfig.orEmpty()
+                previous?.userImported == true &&
+                    previous.rawConfig.contains("[Interface]", ignoreCase = true) &&
+                    !normalizedRawConfig.contains("[Interface]", ignoreCase = true) ->
+                    previous.rawConfig
+                else -> normalizedRawConfig
+            }
+            existing[configId] = WarpVerifiedConfig(
+                id = configId,
+                engine = engine.trim().ifBlank { "wireguard" },
+                mode = normalizedMode,
+                host = normalizedHost,
                 port = port,
-                success = true,
-                nowMs = nowMs,
-            ),
-        )
-        saveWarpVerifiedConfigs(existing.values.toList())
+                endpointSource = if (preserveBundledSeed) previous?.endpointSource.orEmpty() else normalizedEndpointSource,
+                rawConfig = rawConfigToStore,
+                createdAt = previous?.createdAt ?: nowMs,
+                seedOrder = previous?.seedOrder ?: Int.MAX_VALUE,
+                lastVerifiedAt = nowMs,
+                successCount = (previous?.successCount ?: 0) + if (manual) 0 else 1,
+                scope = normalizedScope,
+                manual = manual,
+                userImported = userImported || previous?.userImported == true,
+                qualityProbeCount = previous?.qualityProbeCount ?: 0,
+                qualityPingSuccesses = previous?.qualityPingSuccesses ?: 0,
+                qualityAvgPingMs = previous?.qualityAvgPingMs ?: 0.0,
+                qualityLastCheckedAt = previous?.qualityLastCheckedAt ?: 0L,
+                qualityFailureCount = previous?.qualityFailureCount ?: 0,
+                preferredSni = normalizedPreferredSni,
+                preferredPorts = updateWarpPortStats(
+                    previous?.preferredPorts.orEmpty(),
+                    port = port,
+                    success = true,
+                    nowMs = nowMs,
+                ),
+            ).carryMeasurementsFrom(previous)
+            saveWarpVerifiedConfigs(existing.values.toList())
+        }
     }
 
     fun addUserImportedWarpConfig(
@@ -4206,55 +4685,57 @@ class ClientData(context: Context) {
         preferredSni: String? = null,
         nowMs: Long = System.currentTimeMillis(),
     ): WarpVerifiedConfig? {
-        if (port !in 1..65535) return null
-        val normalizedMode = mode.trim()
-        val normalizedHost = host.trim().removePrefix("[").removeSuffix("]")
-        val normalizedRaw = rawConfig.trim()
-        if (normalizedMode.isBlank() || normalizedHost.isBlank() || normalizedRaw.isBlank()) return null
-        if (!isAllowedWarpVerifiedMode(normalizedMode)) return null
-        if (!isAllowedVerifiedWarpEndpoint(engine, normalizedHost, manual = false, userImported = true)) return null
-        val normalizedScope = inferWarpVerifiedScope(normalizedMode, scope)
-        val configId = buildUserImportedWarpConfigId(
-            mode = normalizedMode,
-            host = normalizedHost,
-            port = port,
-            scope = normalizedScope,
-            rawConfig = normalizedRaw,
-        )
-        val existing = getWarpVerifiedConfigs().associateBy { it.id }.toMutableMap()
-        val previous = existing[configId]
-        val normalizedPreferredSni = normalizeOptionalTrafficMaskHost(preferredSni)
-            .ifBlank { previous?.preferredSni.orEmpty() }
-        val config = WarpVerifiedConfig(
-            id = configId,
-            engine = engine.trim().ifBlank { "wireguard" },
-            mode = normalizedMode,
-            host = normalizedHost,
-            port = port,
-            endpointSource = previous?.endpointSource?.ifBlank { "verified-config" } ?: "verified-config",
-            rawConfig = normalizedRaw,
-            createdAt = previous?.createdAt ?: nowMs,
-            lastVerifiedAt = nowMs,
-            successCount = previous?.successCount?.coerceAtLeast(1) ?: 1,
-            scope = normalizedScope,
-            manual = false,
-            userImported = true,
-            qualityProbeCount = previous?.qualityProbeCount ?: 0,
-            qualityPingSuccesses = previous?.qualityPingSuccesses ?: 0,
-            qualityAvgPingMs = previous?.qualityAvgPingMs ?: 0.0,
-            qualityLastCheckedAt = previous?.qualityLastCheckedAt ?: 0L,
-            qualityFailureCount = previous?.qualityFailureCount ?: 0,
-            preferredSni = normalizedPreferredSni,
-            preferredPorts = updateWarpPortStats(
-                previous?.preferredPorts.orEmpty(),
+        synchronized(warpVerifiedConfigsLock) {
+            if (port !in 1..65535) return null
+            val normalizedMode = mode.trim()
+            val normalizedHost = host.trim().removePrefix("[").removeSuffix("]")
+            val normalizedRaw = rawConfig.trim()
+            if (normalizedMode.isBlank() || normalizedHost.isBlank() || normalizedRaw.isBlank()) return null
+            if (!isAllowedWarpVerifiedMode(normalizedMode)) return null
+            if (!isAllowedVerifiedWarpEndpoint(engine, normalizedHost, manual = false, userImported = true)) return null
+            val normalizedScope = inferWarpVerifiedScope(normalizedMode, scope)
+            val configId = buildUserImportedWarpConfigId(
+                mode = normalizedMode,
+                host = normalizedHost,
                 port = port,
-                success = true,
-                nowMs = nowMs,
-            ),
-        )
-        existing[configId] = config
-        saveWarpVerifiedConfigs(existing.values.toList())
-        return config
+                scope = normalizedScope,
+                rawConfig = normalizedRaw,
+            )
+            val existing = getWarpVerifiedConfigs().associateBy { it.id }.toMutableMap()
+            val previous = existing[configId]
+            val normalizedPreferredSni = normalizeOptionalTrafficMaskHost(preferredSni)
+                .ifBlank { previous?.preferredSni.orEmpty() }
+            val config = WarpVerifiedConfig(
+                id = configId,
+                engine = engine.trim().ifBlank { "wireguard" },
+                mode = normalizedMode,
+                host = normalizedHost,
+                port = port,
+                endpointSource = previous?.endpointSource?.ifBlank { "verified-config" } ?: "verified-config",
+                rawConfig = normalizedRaw,
+                createdAt = previous?.createdAt ?: nowMs,
+                lastVerifiedAt = nowMs,
+                successCount = previous?.successCount?.coerceAtLeast(1) ?: 1,
+                scope = normalizedScope,
+                manual = false,
+                userImported = true,
+                qualityProbeCount = previous?.qualityProbeCount ?: 0,
+                qualityPingSuccesses = previous?.qualityPingSuccesses ?: 0,
+                qualityAvgPingMs = previous?.qualityAvgPingMs ?: 0.0,
+                qualityLastCheckedAt = previous?.qualityLastCheckedAt ?: 0L,
+                qualityFailureCount = previous?.qualityFailureCount ?: 0,
+                preferredSni = normalizedPreferredSni,
+                preferredPorts = updateWarpPortStats(
+                    previous?.preferredPorts.orEmpty(),
+                    port = port,
+                    success = true,
+                    nowMs = nowMs,
+                ),
+            ).carryMeasurementsFrom(previous)
+            existing[configId] = config
+            saveWarpVerifiedConfigs(existing.values.toList())
+            return config
+        }
     }
 
     fun recordWarpVerifiedPreferredSni(
@@ -4268,73 +4749,113 @@ class ClientData(context: Context) {
         scope: String = STRATEGY_SCOPE_DEFAULT,
         nowMs: Long = System.currentTimeMillis(),
     ) {
-        if (port !in 1..65535) return
-        val normalizedPreferredSni = normalizeOptionalTrafficMaskHost(preferredSni)
-        if (normalizedPreferredSni.isBlank()) return
-        val normalizedMode = mode.trim()
-        val normalizedHost = host.trim().removePrefix("[").removeSuffix("]")
-        if (normalizedMode.isBlank() || normalizedHost.isBlank()) return
-        if (!isAllowedWarpVerifiedMode(normalizedMode)) return
-        val normalizedEngine = engine.trim().ifBlank { "wireguard" }
-        val normalizedScope = inferWarpVerifiedScope(normalizedMode, scope)
-        val configId = buildWarpConfigId(normalizedMode, normalizedHost, port, normalizedScope)
-        val existing = getWarpVerifiedConfigs().associateBy { it.id }.toMutableMap()
-        val previous = existing[configId]
-        val source = endpointSource.trim().ifBlank { previous?.endpointSource ?: "runtime-sni" }
-        if (!isPersistableWarpVerifiedConfig(
-                normalizedEngine,
-                normalizedHost,
-                previous?.manual ?: false,
-                previous?.userImported ?: false,
-                source,
-            )
-        ) return
+        synchronized(warpVerifiedConfigsLock) {
+            if (port !in 1..65535) return
+            val normalizedPreferredSni = normalizeOptionalTrafficMaskHost(preferredSni)
+            if (normalizedPreferredSni.isBlank()) return
+            val normalizedMode = mode.trim()
+            val normalizedHost = host.trim().removePrefix("[").removeSuffix("]")
+            if (normalizedMode.isBlank() || normalizedHost.isBlank()) return
+            if (!isAllowedWarpVerifiedMode(normalizedMode)) return
+            val normalizedEngine = engine.trim().ifBlank { "wireguard" }
+            val normalizedScope = inferWarpVerifiedScope(normalizedMode, scope)
+            val configId = buildWarpConfigId(normalizedMode, normalizedHost, port, normalizedScope)
+            val existing = getWarpVerifiedConfigs().associateBy { it.id }.toMutableMap()
+            val previous = existing[configId]
+            val source = endpointSource.trim().ifBlank { previous?.endpointSource ?: "runtime-sni" }
+            if (!isPersistableWarpVerifiedConfig(
+                    normalizedEngine,
+                    normalizedHost,
+                    previous?.manual ?: false,
+                    previous?.userImported ?: false,
+                    source,
+                )
+            ) return
 
-        val candidateRawConfig = rawConfig?.trim().orEmpty()
-        val rawConfigToStore = when {
-            previous?.userImported == true &&
-                previous.rawConfig.contains("[Interface]", ignoreCase = true) &&
-                !candidateRawConfig.contains("[Interface]", ignoreCase = true) ->
-                previous.rawConfig
-            candidateRawConfig.isNotBlank() -> candidateRawConfig
-            else -> previous?.rawConfig.orEmpty().ifBlank {
-                buildString {
-                    appendLine("HOST=$normalizedHost")
-                    appendLine("PORT=$port")
-                    appendLine("PROTOCOL=${normalizedEngine.uppercase()}")
-                    appendLine("STRATEGY=$normalizedMode")
-                    appendLine("SOURCE=$source")
-                    appendLine("PREFERRED_SNI=$normalizedPreferredSni")
-                }.trim()
+            val candidateRawConfig = rawConfig?.trim().orEmpty()
+            val rawConfigToStore = when {
+                previous?.userImported == true &&
+                    previous.rawConfig.contains("[Interface]", ignoreCase = true) &&
+                    !candidateRawConfig.contains("[Interface]", ignoreCase = true) ->
+                    previous.rawConfig
+                candidateRawConfig.isNotBlank() -> candidateRawConfig
+                else -> previous?.rawConfig.orEmpty().ifBlank {
+                    buildString {
+                        appendLine("HOST=$normalizedHost")
+                        appendLine("PORT=$port")
+                        appendLine("PROTOCOL=${normalizedEngine.uppercase()}")
+                        appendLine("STRATEGY=$normalizedMode")
+                        appendLine("SOURCE=$source")
+                        appendLine("PREFERRED_SNI=$normalizedPreferredSni")
+                    }.trim()
+                }
             }
-        }
-        if (rawConfigToStore.isBlank()) return
+            if (rawConfigToStore.isBlank()) return
 
-        existing[configId] = WarpVerifiedConfig(
-            id = configId,
-            engine = previous?.engine?.ifBlank { normalizedEngine } ?: normalizedEngine,
-            mode = normalizedMode,
-            host = normalizedHost,
-            port = port,
-            endpointSource = source,
-            rawConfig = rawConfigToStore,
-            createdAt = previous?.createdAt ?: nowMs,
-            lastVerifiedAt = maxOf(previous?.lastVerifiedAt ?: 0L, nowMs),
-            promotedAt = previous?.promotedAt ?: 0L,
-            seedOrder = previous?.seedOrder ?: Int.MAX_VALUE,
-            successCount = previous?.successCount ?: 1,
-            scope = normalizedScope,
-            manual = previous?.manual ?: false,
-            userImported = previous?.userImported ?: false,
-            qualityProbeCount = previous?.qualityProbeCount ?: 0,
-            qualityPingSuccesses = previous?.qualityPingSuccesses ?: 0,
-            qualityAvgPingMs = previous?.qualityAvgPingMs ?: 0.0,
-            qualityLastCheckedAt = previous?.qualityLastCheckedAt ?: 0L,
-            qualityFailureCount = previous?.qualityFailureCount ?: 0,
-            preferredSni = normalizedPreferredSni,
-            preferredPorts = previous?.preferredPorts.orEmpty(),
-        )
-        saveWarpVerifiedConfigs(existing.values.toList())
+            existing[configId] = WarpVerifiedConfig(
+                id = configId,
+                engine = previous?.engine?.ifBlank { normalizedEngine } ?: normalizedEngine,
+                mode = normalizedMode,
+                host = normalizedHost,
+                port = port,
+                endpointSource = source,
+                rawConfig = rawConfigToStore,
+                createdAt = previous?.createdAt ?: nowMs,
+                lastVerifiedAt = maxOf(previous?.lastVerifiedAt ?: 0L, nowMs),
+                promotedAt = previous?.promotedAt ?: 0L,
+                seedOrder = previous?.seedOrder ?: Int.MAX_VALUE,
+                successCount = previous?.successCount ?: 1,
+                scope = normalizedScope,
+                manual = previous?.manual ?: false,
+                userImported = previous?.userImported ?: false,
+                qualityProbeCount = previous?.qualityProbeCount ?: 0,
+                qualityPingSuccesses = previous?.qualityPingSuccesses ?: 0,
+                qualityAvgPingMs = previous?.qualityAvgPingMs ?: 0.0,
+                qualityLastCheckedAt = previous?.qualityLastCheckedAt ?: 0L,
+                qualityFailureCount = previous?.qualityFailureCount ?: 0,
+                preferredSni = normalizedPreferredSni,
+                preferredPorts = previous?.preferredPorts.orEmpty(),
+            ).carryMeasurementsFrom(previous)
+            saveWarpVerifiedConfigs(existing.values.toList())
+        }
+    }
+
+    /**
+     * Разовая чистка сохранённых маскировочных имён.
+     *
+     * Подстановка выключена (см. `resolveWarpTrafficMaskHosts`), но у устройств,
+     * которые уже прошли адаптацию, имя лежит в профилях. Без чистки оно осталось
+     * бы там навсегда: писать его больше некому, а стирается оно только по факту
+     * отказа рукопожатия — то есть ценой пяти минут перебора на каждом старте.
+     *
+     * Возвращает, сколько записей вычищено, — чтобы отказ был виден в журнале.
+     */
+    /**
+     * Чистит маскировочные имена, оставшиеся от сборок с подстановкой.
+     *
+     * Один раз на установку: ключ ставится независимо от того, нашлось ли что
+     * чистить, иначе чистка ходила бы по всему списку при каждом запуске службы.
+     */
+    private fun purgeStoredWarpPreferredSniOnce() {
+        if (prefs.getBoolean(WARP_PREFERRED_SNI_PURGED_KEY, false)) return
+        val cleared = runCatching { clearAllWarpVerifiedPreferredSni() }.getOrDefault(0)
+        prefs.edit().putBoolean(WARP_PREFERRED_SNI_PURGED_KEY, true).commit()
+        if (cleared > 0) {
+            LogManager.log(
+                "Убраны сохранённые маскировочные имена у $cleared профилей WARP: " +
+                    "подстановка SNI выключена, а имя без чистки осталось бы жить в профилях."
+            )
+        }
+    }
+
+    fun clearAllWarpVerifiedPreferredSni(): Int {
+        synchronized(warpVerifiedConfigsLock) {
+            val existing = getWarpVerifiedConfigs()
+            val stale = existing.count { it.preferredSni.isNotBlank() }
+            if (stale == 0) return 0
+            saveWarpVerifiedConfigs(existing.map { it.copy(preferredSni = "") })
+            return stale
+        }
     }
 
     fun clearWarpVerifiedPreferredSni(
@@ -4344,20 +4865,22 @@ class ClientData(context: Context) {
         port: Int,
         scope: String = STRATEGY_SCOPE_DEFAULT,
     ) {
-        if (port !in 1..65535) return
-        val normalizedMode = mode.trim()
-        val normalizedHost = host.trim().removePrefix("[").removeSuffix("]")
-        if (normalizedMode.isBlank() || normalizedHost.isBlank()) return
-        if (!isAllowedWarpVerifiedMode(normalizedMode)) return
-        val normalizedEngine = engine.trim().ifBlank { "wireguard" }
-        val normalizedScope = inferWarpVerifiedScope(normalizedMode, scope)
-        val configId = buildWarpConfigId(normalizedMode, normalizedHost, port, normalizedScope)
-        val existing = getWarpVerifiedConfigs().associateBy { it.id }.toMutableMap()
-        val previous = existing[configId] ?: return
-        if (!isPersistableWarpVerifiedConfig(normalizedEngine, normalizedHost, previous.manual, previous.userImported, previous.endpointSource)) return
-        if (previous.preferredSni.isBlank()) return
-        existing[configId] = previous.copy(preferredSni = "")
-        saveWarpVerifiedConfigs(existing.values.toList())
+        synchronized(warpVerifiedConfigsLock) {
+            if (port !in 1..65535) return
+            val normalizedMode = mode.trim()
+            val normalizedHost = host.trim().removePrefix("[").removeSuffix("]")
+            if (normalizedMode.isBlank() || normalizedHost.isBlank()) return
+            if (!isAllowedWarpVerifiedMode(normalizedMode)) return
+            val normalizedEngine = engine.trim().ifBlank { "wireguard" }
+            val normalizedScope = inferWarpVerifiedScope(normalizedMode, scope)
+            val configId = buildWarpConfigId(normalizedMode, normalizedHost, port, normalizedScope)
+            val existing = getWarpVerifiedConfigs().associateBy { it.id }.toMutableMap()
+            val previous = existing[configId] ?: return
+            if (!isPersistableWarpVerifiedConfig(normalizedEngine, normalizedHost, previous.manual, previous.userImported, previous.endpointSource)) return
+            if (previous.preferredSni.isBlank()) return
+            existing[configId] = previous.copy(preferredSni = "")
+            saveWarpVerifiedConfigs(existing.values.toList())
+        }
     }
 
     fun recordWarpVerifiedRuntimeOutcome(
@@ -4371,110 +4894,110 @@ class ClientData(context: Context) {
         scope: String = STRATEGY_SCOPE_DEFAULT,
         nowMs: Long = System.currentTimeMillis(),
     ) {
-        if (port !in 1..65535) return
-        val normalizedMode = mode.trim()
-        val normalizedHost = host.trim().removePrefix("[").removeSuffix("]")
-        if (normalizedMode.isBlank() || normalizedHost.isBlank()) return
-        if (!isAllowedWarpVerifiedMode(normalizedMode)) return
-        val normalizedEngine = engine.trim().ifBlank { "wireguard" }
-        val existing = getWarpVerifiedConfigs().associateBy { it.id }.toMutableMap()
-        val normalizedScope = inferWarpVerifiedScope(normalizedMode, scope)
-        val configId = buildWarpConfigId(normalizedMode, normalizedHost, port, normalizedScope)
-        val previous = existing[configId]
-        val normalizedSource = endpointSource.trim().ifBlank { previous?.endpointSource ?: "runtime-success" }
-        Log.w("NovaAdapt", "recordWarpVerifiedRuntimeOutcome: mode=$normalizedMode host=$normalizedHost port=$port src=$normalizedSource success=$success prevExists=${previous != null}")
-        if (!isPersistableWarpVerifiedConfig(
-                normalizedEngine,
-                normalizedHost,
-                previous?.manual ?: false,
-                previous?.userImported ?: false,
-                normalizedSource,
-            )
-        ) return
-        if (previous == null) return
+        synchronized(warpVerifiedConfigsLock) {
+            if (port !in 1..65535) return
+            val normalizedMode = mode.trim()
+            val normalizedHost = host.trim().removePrefix("[").removeSuffix("]")
+            if (normalizedMode.isBlank() || normalizedHost.isBlank()) return
+            if (!isAllowedWarpVerifiedMode(normalizedMode)) return
+            val normalizedEngine = engine.trim().ifBlank { "wireguard" }
+            val existing = getWarpVerifiedConfigs().associateBy { it.id }.toMutableMap()
+            val normalizedScope = inferWarpVerifiedScope(normalizedMode, scope)
+            val configId = buildWarpConfigId(normalizedMode, normalizedHost, port, normalizedScope)
+            val previous = existing[configId]
+            val normalizedSource = endpointSource.trim().ifBlank { previous?.endpointSource ?: "runtime-success" }
+            Log.w("NovaAdapt", "recordWarpVerifiedRuntimeOutcome: mode=$normalizedMode host=$normalizedHost port=$port src=$normalizedSource success=$success prevExists=${previous != null}")
+            if (!isPersistableWarpVerifiedConfig(
+                    normalizedEngine,
+                    normalizedHost,
+                    previous?.manual ?: false,
+                    previous?.userImported ?: false,
+                    normalizedSource,
+                )
+            ) return
+            if (previous == null) return
 
 
-        val normalizedResolvedEngine = normalizedEngine.ifBlank { previous.engine }
-        val candidateRawConfig = rawConfig?.trim().orEmpty()
-        val normalizedRawConfig = when {
-            previous.userImported &&
-                previous.rawConfig.contains("[Interface]", ignoreCase = true) &&
-                !candidateRawConfig.contains("[Interface]", ignoreCase = true) ->
-                previous.rawConfig
-            candidateRawConfig.isNotBlank() -> candidateRawConfig
-            else -> previous.rawConfig
-        }
-        if (success && normalizedRawConfig.isBlank()) return
-        val exoticMasquePort = port in setOf(443, 4443, 8443, 8095)
-        val shouldDecayPersistedPriority = !success &&
-            normalizedSource.lowercase() in setOf("verified-config", "last-success-exact", "last-success")
-        val nextSuccessCount = when {
-            success -> previous.successCount + 1
-            shouldDecayPersistedPriority -> {
-                val currentSuccessCount = previous.successCount
-                when {
-                    normalizedResolvedEngine.equals("masque", ignoreCase = true) && exoticMasquePort && currentSuccessCount >= 4 ->
-                        currentSuccessCount - 3
-                    normalizedResolvedEngine.equals("masque", ignoreCase = true) && exoticMasquePort && currentSuccessCount >= 2 ->
-                        currentSuccessCount - 2
-                    currentSuccessCount >= 4 -> currentSuccessCount - 2
-                    currentSuccessCount >= 2 -> currentSuccessCount - 1
-                    else -> 1
-                }
+            val normalizedResolvedEngine = normalizedEngine.ifBlank { previous.engine }
+            val candidateRawConfig = rawConfig?.trim().orEmpty()
+            val normalizedRawConfig = when {
+                previous.userImported &&
+                    previous.rawConfig.contains("[Interface]", ignoreCase = true) &&
+                    !candidateRawConfig.contains("[Interface]", ignoreCase = true) ->
+                    previous.rawConfig
+                candidateRawConfig.isNotBlank() -> candidateRawConfig
+                else -> previous.rawConfig
             }
-            else -> previous?.successCount ?: 1
-        }
-        val nextQualityFailureCount = if (success) {
-            previous?.qualityFailureCount ?: 0
-        } else {
-            (previous?.qualityFailureCount ?: 0) + 1
-        }
+            if (success && normalizedRawConfig.isBlank()) return
+            val exoticMasquePort = port in setOf(443, 4443, 8443, 8095)
+            val shouldDecayPersistedPriority = !success &&
+                normalizedSource.lowercase() in setOf("verified-config", "last-success-exact", "last-success")
+            val nextSuccessCount = when {
+                success -> previous.successCount + 1
+                shouldDecayPersistedPriority -> {
+                    val currentSuccessCount = previous.successCount
+                    when {
+                        normalizedResolvedEngine.equals("masque", ignoreCase = true) && exoticMasquePort && currentSuccessCount >= 4 ->
+                            currentSuccessCount - 3
+                        normalizedResolvedEngine.equals("masque", ignoreCase = true) && exoticMasquePort && currentSuccessCount >= 2 ->
+                            currentSuccessCount - 2
+                        currentSuccessCount >= 4 -> currentSuccessCount - 2
+                        currentSuccessCount >= 2 -> currentSuccessCount - 1
+                        else -> 1
+                    }
+                }
+                else -> previous?.successCount ?: 1
+            }
+            val nextQualityFailureCount = if (success) {
+                previous?.qualityFailureCount ?: 0
+            } else {
+                (previous?.qualityFailureCount ?: 0) + 1
+            }
 
-        existing[configId] = WarpVerifiedConfig(
-            id = configId,
-            engine = normalizedResolvedEngine,
-            mode = normalizedMode,
-            host = normalizedHost,
-            port = port,
-            endpointSource = normalizedSource,
-            rawConfig = normalizedRawConfig.ifBlank {
-                buildString {
-                    appendLine("HOST=$normalizedHost")
-                    appendLine("PORT=$port")
-                    appendLine("PROTOCOL=${normalizedResolvedEngine.uppercase()}")
-                    appendLine("STRATEGY=$normalizedMode")
-                    appendLine("SOURCE=$normalizedSource")
-                }.trim()
-            },
-            createdAt = previous?.createdAt ?: nowMs,
-            lastVerifiedAt = if (success) nowMs else (previous?.lastVerifiedAt ?: nowMs),
-            // Отказ снимает закрепление наверху списка. Ручное переключение профиля
-            // ставит `promotedAt`, и без сброса выбранный профиль оставался первым
-            // даже после того, как перестал подключаться: перебор упирался в него
-            // каждый цикл, а «плохие вниз» не работало вовсе.
-            promotedAt = if (success) previous.promotedAt else 0L,
-            // Порядок встроенных профилей задан прошивкой и к результату попытки
-            // отношения не имеет. Пока он терялся при первой же записи результата,
-            // список встроенных перемешивался после первого подключения.
-            seedOrder = previous.seedOrder,
-            successCount = nextSuccessCount,
-            scope = normalizedScope,
-            manual = previous?.manual ?: false,
-            userImported = previous?.userImported ?: false,
-            qualityProbeCount = if (success) previous?.qualityProbeCount ?: 0 else 0,
-            qualityPingSuccesses = if (success) previous?.qualityPingSuccesses ?: 0 else 0,
-            qualityAvgPingMs = if (success) previous?.qualityAvgPingMs ?: 0.0 else 0.0,
-            qualityLastCheckedAt = if (success) previous?.qualityLastCheckedAt ?: 0L else nowMs,
-            qualityFailureCount = nextQualityFailureCount,
-            preferredSni = previous?.preferredSni.orEmpty(),
-            preferredPorts = updateWarpPortStats(
-                previous?.preferredPorts.orEmpty(),
+            // Пересобирать запись конструктором здесь нельзя, и это не стилистика.
+            // У всех счётчиков есть значения по умолчанию, поэтому пропущенное поле —
+            // валидный код, о котором компилятор промолчит. Так и потерялись
+            // churnWindows/churnRekeys: замер удержания копился на живой сессии, а
+            // первый же исход попытки обнулял его по всему списку. `copy` переносит
+            // и то, что появится позже.
+            existing[configId] = previous.copy(
+                id = configId,
+                engine = normalizedResolvedEngine,
+                mode = normalizedMode,
+                host = normalizedHost,
                 port = port,
-                success = success,
-                nowMs = nowMs,
-            ),
-        )
-        saveWarpVerifiedConfigs(existing.values.toList())
+                endpointSource = normalizedSource,
+                rawConfig = normalizedRawConfig.ifBlank {
+                    buildString {
+                        appendLine("HOST=$normalizedHost")
+                        appendLine("PORT=$port")
+                        appendLine("PROTOCOL=${normalizedResolvedEngine.uppercase()}")
+                        appendLine("STRATEGY=$normalizedMode")
+                        appendLine("SOURCE=$normalizedSource")
+                    }.trim()
+                },
+                lastVerifiedAt = if (success) nowMs else previous.lastVerifiedAt,
+                // Отказ снимает закрепление наверху списка. Ручное переключение профиля
+                // ставит `promotedAt`, и без сброса выбранный профиль оставался первым
+                // даже после того, как перестал подключаться: перебор упирался в него
+                // каждый цикл, а «плохие вниз» не работало вовсе.
+                promotedAt = if (success) previous.promotedAt else 0L,
+                successCount = nextSuccessCount,
+                scope = normalizedScope,
+                qualityProbeCount = if (success) previous.qualityProbeCount else 0,
+                qualityPingSuccesses = if (success) previous.qualityPingSuccesses else 0,
+                qualityAvgPingMs = if (success) previous.qualityAvgPingMs else 0.0,
+                qualityLastCheckedAt = if (success) previous.qualityLastCheckedAt else nowMs,
+                qualityFailureCount = nextQualityFailureCount,
+                preferredPorts = updateWarpPortStats(
+                    previous.preferredPorts,
+                    port = port,
+                    success = success,
+                    nowMs = nowMs,
+                ),
+            )
+            saveWarpVerifiedConfigs(existing.values.toList())
+        }
     }
 
     fun recordWarpVerifiedQualityResult(
@@ -4491,92 +5014,102 @@ class ClientData(context: Context) {
         scope: String = STRATEGY_SCOPE_DEFAULT,
         nowMs: Long = System.currentTimeMillis(),
     ) {
-        if (port !in 1..65535) return
-        val normalizedMode = mode.trim()
-        val normalizedHost = host.trim().removePrefix("[").removeSuffix("]")
-        if (normalizedMode.isBlank() || normalizedHost.isBlank()) return
-        if (!isAllowedWarpVerifiedMode(normalizedMode)) return
-        val normalizedEngine = engine.trim().ifBlank { "wireguard" }
-        val normalizedScope = inferWarpVerifiedScope(normalizedMode, scope)
-        val configId = buildWarpConfigId(normalizedMode, normalizedHost, port, normalizedScope)
-        val existing = getWarpVerifiedConfigs().associateBy { it.id }.toMutableMap()
-        val previous = existing[configId]
-        val source = endpointSource.trim().ifBlank { previous?.endpointSource ?: "runtime-quality" }
-        if (!isPersistableWarpVerifiedConfig(
-                normalizedEngine,
-                normalizedHost,
-                previous?.manual ?: false,
-                previous?.userImported ?: false,
-                source,
-            )
-        ) return
-        if (previous == null && !success) return
+        synchronized(warpVerifiedConfigsLock) {
+            if (port !in 1..65535) return
+            val normalizedMode = mode.trim()
+            val normalizedHost = host.trim().removePrefix("[").removeSuffix("]")
+            if (normalizedMode.isBlank() || normalizedHost.isBlank()) return
+            if (!isAllowedWarpVerifiedMode(normalizedMode)) return
+            val normalizedEngine = engine.trim().ifBlank { "wireguard" }
+            val normalizedScope = inferWarpVerifiedScope(normalizedMode, scope)
+            val configId = buildWarpConfigId(normalizedMode, normalizedHost, port, normalizedScope)
+            val existing = getWarpVerifiedConfigs().associateBy { it.id }.toMutableMap()
+            val previous = existing[configId]
+            val source = endpointSource.trim().ifBlank { previous?.endpointSource ?: "runtime-quality" }
+            if (!isPersistableWarpVerifiedConfig(
+                    normalizedEngine,
+                    normalizedHost,
+                    previous?.manual ?: false,
+                    previous?.userImported ?: false,
+                    source,
+                )
+            ) return
+            if (previous == null && !success) return
 
-        val safeProbeCount = probeCount.coerceAtLeast(0)
-        val safePingSuccesses = pingSuccesses.coerceIn(0, safeProbeCount.coerceAtLeast(pingSuccesses))
-        val safeAvgPingMs = avgPingMs.takeIf { it.isFinite() && it > 0.0 } ?: 0.0
-        Log.w("NovaAdapt", "recordWarpVerifiedQualityResult: mode=$normalizedMode host=$normalizedHost port=$port probeCount=$safeProbeCount pingSuccesses=$safePingSuccesses avgPing=${safeAvgPingMs}")
-        val candidateRawConfig = rawConfig?.trim().orEmpty()
-        val normalizedRawConfig = when {
-            previous?.userImported == true &&
-                previous.rawConfig.contains("[Interface]", ignoreCase = true) &&
-                !candidateRawConfig.contains("[Interface]", ignoreCase = true) ->
-                previous.rawConfig
-            candidateRawConfig.isNotBlank() -> candidateRawConfig
-            else -> previous?.rawConfig.orEmpty()
-        }
-        if (success && normalizedRawConfig.isBlank()) return
+            val safeProbeCount = probeCount.coerceAtLeast(0)
+            val safePingSuccesses = pingSuccesses.coerceIn(0, safeProbeCount.coerceAtLeast(pingSuccesses))
+            val safeAvgPingMs = avgPingMs.takeIf { it.isFinite() && it > 0.0 } ?: 0.0
+            Log.w("NovaAdapt", "recordWarpVerifiedQualityResult: mode=$normalizedMode host=$normalizedHost port=$port probeCount=$safeProbeCount pingSuccesses=$safePingSuccesses avgPing=${safeAvgPingMs}")
+            val candidateRawConfig = rawConfig?.trim().orEmpty()
+            val normalizedRawConfig = when {
+                previous?.userImported == true &&
+                    previous.rawConfig.contains("[Interface]", ignoreCase = true) &&
+                    !candidateRawConfig.contains("[Interface]", ignoreCase = true) ->
+                    previous.rawConfig
+                candidateRawConfig.isNotBlank() -> candidateRawConfig
+                else -> previous?.rawConfig.orEmpty()
+            }
+            if (success && normalizedRawConfig.isBlank()) return
 
-        val qualityFailed = !success || safePingSuccesses <= 0
-        existing[configId] = WarpVerifiedConfig(
-            id = configId,
-            engine = previous?.engine?.ifBlank { normalizedEngine } ?: normalizedEngine,
-            mode = normalizedMode,
-            host = normalizedHost,
-            port = port,
-            endpointSource = source,
-            rawConfig = normalizedRawConfig.ifBlank {
-                buildString {
-                    appendLine("HOST=$normalizedHost")
-                    appendLine("PORT=$port")
-                    appendLine("PROTOCOL=${normalizedEngine.uppercase()}")
-                    appendLine("STRATEGY=$normalizedMode")
-                    appendLine("SOURCE=$source")
-                }.trim()
-            },
-            createdAt = previous?.createdAt ?: nowMs,
-            lastVerifiedAt = if (!qualityFailed) nowMs else (previous?.lastVerifiedAt ?: nowMs),
-            promotedAt = if (qualityFailed) 0L else (previous?.promotedAt ?: 0L),
-            seedOrder = previous?.seedOrder ?: Int.MAX_VALUE,
-            successCount = if (!qualityFailed) {
-                maxOf(previous?.successCount ?: 1, 1) + 1
-            } else {
-                previous?.successCount ?: 1
-            },
-            scope = normalizedScope,
-            manual = previous?.manual ?: false,
-            userImported = previous?.userImported ?: false,
-            qualityProbeCount = safeProbeCount,
-            qualityPingSuccesses = if (qualityFailed) 0 else safePingSuccesses,
-            qualityAvgPingMs = if (qualityFailed) 0.0 else safeAvgPingMs,
-            qualityLastCheckedAt = nowMs,
-            qualityFailureCount = if (qualityFailed) {
-                (previous?.qualityFailureCount ?: 0) + 1
-            } else {
-                0
-            },
-            preferredSni = previous?.preferredSni.orEmpty(),
-            preferredPorts = updateWarpPortStats(
-                previous?.preferredPorts.orEmpty(),
+            val qualityFailed = !success || safePingSuccesses <= 0
+            // Основа — прежняя запись, если она есть. Пересборка конструктором молча
+            // теряла всё, чего нет в списке аргументов: churnWindows/churnRekeys
+            // обнулялись здесь на каждом окне замера, то есть один прогон адаптации
+            // стирал накопленное удержание по всем пятидесяти профилям. Через `copy`
+            // новые счётчики переживают публикацию качества сами.
+            val base = previous ?: WarpVerifiedConfig(
+                id = configId,
+                engine = normalizedEngine,
+                mode = normalizedMode,
+                host = normalizedHost,
                 port = port,
-                success = !qualityFailed,
-                probeCount = safeProbeCount,
-                pingSuccesses = safePingSuccesses,
-                avgPingMs = safeAvgPingMs,
-                nowMs = nowMs,
-            ),
-        )
-        saveWarpVerifiedConfigs(existing.values.toList())
+                endpointSource = source,
+                rawConfig = normalizedRawConfig,
+                createdAt = nowMs,
+                lastVerifiedAt = nowMs,
+                scope = normalizedScope,
+            )
+            existing[configId] = base.copy(
+                id = configId,
+                engine = base.engine.ifBlank { normalizedEngine },
+                mode = normalizedMode,
+                host = normalizedHost,
+                port = port,
+                endpointSource = source,
+                rawConfig = normalizedRawConfig.ifBlank {
+                    buildString {
+                        appendLine("HOST=$normalizedHost")
+                        appendLine("PORT=$port")
+                        appendLine("PROTOCOL=${normalizedEngine.uppercase()}")
+                        appendLine("STRATEGY=$normalizedMode")
+                        appendLine("SOURCE=$source")
+                    }.trim()
+                },
+                lastVerifiedAt = if (!qualityFailed) nowMs else base.lastVerifiedAt,
+                promotedAt = if (qualityFailed) 0L else base.promotedAt,
+                successCount = if (!qualityFailed) {
+                    maxOf(base.successCount, 1) + 1
+                } else {
+                    base.successCount
+                },
+                scope = normalizedScope,
+                qualityProbeCount = safeProbeCount,
+                qualityPingSuccesses = if (qualityFailed) 0 else safePingSuccesses,
+                qualityAvgPingMs = if (qualityFailed) 0.0 else safeAvgPingMs,
+                qualityLastCheckedAt = nowMs,
+                qualityFailureCount = if (qualityFailed) base.qualityFailureCount + 1 else 0,
+                preferredPorts = updateWarpPortStats(
+                    base.preferredPorts,
+                    port = port,
+                    success = !qualityFailed,
+                    probeCount = safeProbeCount,
+                    pingSuccesses = safePingSuccesses,
+                    avgPingMs = safeAvgPingMs,
+                    nowMs = nowMs,
+                ),
+            )
+            saveWarpVerifiedConfigs(existing.values.toList())
+        }
     }
 
     fun recordWarpVerifiedDegradedQualityResult(
@@ -4592,55 +5125,57 @@ class ClientData(context: Context) {
         scope: String = STRATEGY_SCOPE_DEFAULT,
         nowMs: Long = System.currentTimeMillis(),
     ) {
-        if (port !in 1..65535) return
-        val normalizedMode = mode.trim()
-        val normalizedHost = host.trim().removePrefix("[").removeSuffix("]")
-        if (normalizedMode.isBlank() || normalizedHost.isBlank()) return
-        if (!isAllowedWarpVerifiedMode(normalizedMode)) return
-        val normalizedEngine = engine.trim().ifBlank { "wireguard" }
-        val normalizedScope = inferWarpVerifiedScope(normalizedMode, scope)
-        val configId = buildWarpConfigId(normalizedMode, normalizedHost, port, normalizedScope)
-        val existing = getWarpVerifiedConfigs().associateBy { it.id }.toMutableMap()
-        val previous = existing[configId] ?: return
-        val source = endpointSource.trim().ifBlank { previous.endpointSource.ifBlank { "runtime-quality-degraded" } }
-        if (!isPersistableWarpVerifiedConfig(normalizedEngine, normalizedHost, previous.manual, previous.userImported, source)) return
+        synchronized(warpVerifiedConfigsLock) {
+            if (port !in 1..65535) return
+            val normalizedMode = mode.trim()
+            val normalizedHost = host.trim().removePrefix("[").removeSuffix("]")
+            if (normalizedMode.isBlank() || normalizedHost.isBlank()) return
+            if (!isAllowedWarpVerifiedMode(normalizedMode)) return
+            val normalizedEngine = engine.trim().ifBlank { "wireguard" }
+            val normalizedScope = inferWarpVerifiedScope(normalizedMode, scope)
+            val configId = buildWarpConfigId(normalizedMode, normalizedHost, port, normalizedScope)
+            val existing = getWarpVerifiedConfigs().associateBy { it.id }.toMutableMap()
+            val previous = existing[configId] ?: return
+            val source = endpointSource.trim().ifBlank { previous.endpointSource.ifBlank { "runtime-quality-degraded" } }
+            if (!isPersistableWarpVerifiedConfig(normalizedEngine, normalizedHost, previous.manual, previous.userImported, source)) return
 
-        val safeProbeCount = probeCount.coerceAtLeast(previous.qualityProbeCount.coerceAtLeast(1))
-        val safePingSuccesses = pingSuccesses
-            .coerceIn(0, safeProbeCount.coerceAtLeast(pingSuccesses))
-            .coerceAtLeast(1)
-        val safeAvgPingMs = avgPingMs.takeIf { it.isFinite() && it > 0.0 }
-            ?: previous.qualityAvgPingMs.takeIf { it.isFinite() && it > 0.0 }
-            ?: 480.0
-        val candidateRawConfig = rawConfig?.trim().orEmpty()
-        val normalizedRawConfig = when {
-            previous.userImported &&
-                previous.rawConfig.contains("[Interface]", ignoreCase = true) &&
-                !candidateRawConfig.contains("[Interface]", ignoreCase = true) ->
-                previous.rawConfig
-            candidateRawConfig.isNotBlank() -> candidateRawConfig
-            else -> previous.rawConfig
+            val safeProbeCount = probeCount.coerceAtLeast(previous.qualityProbeCount.coerceAtLeast(1))
+            val safePingSuccesses = pingSuccesses
+                .coerceIn(0, safeProbeCount.coerceAtLeast(pingSuccesses))
+                .coerceAtLeast(1)
+            val safeAvgPingMs = avgPingMs.takeIf { it.isFinite() && it > 0.0 }
+                ?: previous.qualityAvgPingMs.takeIf { it.isFinite() && it > 0.0 }
+                ?: 480.0
+            val candidateRawConfig = rawConfig?.trim().orEmpty()
+            val normalizedRawConfig = when {
+                previous.userImported &&
+                    previous.rawConfig.contains("[Interface]", ignoreCase = true) &&
+                    !candidateRawConfig.contains("[Interface]", ignoreCase = true) ->
+                    previous.rawConfig
+                candidateRawConfig.isNotBlank() -> candidateRawConfig
+                else -> previous.rawConfig
+            }
+            existing[configId] = previous.copy(
+                engine = previous.engine.ifBlank { normalizedEngine },
+                endpointSource = source,
+                rawConfig = normalizedRawConfig.ifBlank { previous.rawConfig },
+                qualityProbeCount = safeProbeCount,
+                qualityPingSuccesses = safePingSuccesses,
+                qualityAvgPingMs = safeAvgPingMs,
+                qualityLastCheckedAt = nowMs,
+                qualityFailureCount = previous.qualityFailureCount + 1,
+                preferredPorts = updateWarpPortStats(
+                    previous.preferredPorts.orEmpty(),
+                    port = port,
+                    success = false,
+                    probeCount = safeProbeCount,
+                    pingSuccesses = safePingSuccesses,
+                    avgPingMs = safeAvgPingMs,
+                    nowMs = nowMs,
+                ),
+            )
+            saveWarpVerifiedConfigs(existing.values.toList())
         }
-        existing[configId] = previous.copy(
-            engine = previous.engine.ifBlank { normalizedEngine },
-            endpointSource = source,
-            rawConfig = normalizedRawConfig.ifBlank { previous.rawConfig },
-            qualityProbeCount = safeProbeCount,
-            qualityPingSuccesses = safePingSuccesses,
-            qualityAvgPingMs = safeAvgPingMs,
-            qualityLastCheckedAt = nowMs,
-            qualityFailureCount = previous.qualityFailureCount + 1,
-            preferredPorts = updateWarpPortStats(
-                previous.preferredPorts.orEmpty(),
-                port = port,
-                success = false,
-                probeCount = safeProbeCount,
-                pingSuccesses = safePingSuccesses,
-                avgPingMs = safeAvgPingMs,
-                nowMs = nowMs,
-            ),
-        )
-        saveWarpVerifiedConfigs(existing.values.toList())
     }
 
     fun getWarpVerifiedPriorityScore(
@@ -4824,6 +5359,33 @@ class ClientData(context: Context) {
             0.0
         }
         val qualityFailurePenalty = item.qualityFailureCount.coerceAtMost(8).toDouble() * 7.0 * qualityFreshness
+        // Узел, который не удерживает сессию, до сих пор считался хорошим: пинг у
+        // него нормальный и подключение проходит. Штрафуем за превышение здоровой
+        // единицы на окно, с потолком — чтобы один плохой вечер не хоронил узел.
+        val churnPerWindow = warpConfigChurnPerWindow(item)
+        val churnPenalty = if (churnPerWindow < 0.0) {
+            0.0
+        } else {
+            ((churnPerWindow - 1.0).coerceAtLeast(0.0) * 12.0).coerceAtMost(36.0)
+        }
+        // Тот же дефект пути, замеренный дёшево — в коротком окне адаптации, а не
+        // двухминутными окнами живой сессии. Потолок ниже churn'а намеренно:
+        // одно двадцатисекундное окно слабее двух минут под нагрузкой, и
+        // перевешивать более дорогой замер оно не должно.
+        val holdPenalty = SessionHoldMetric.penalty(
+            windows = item.holdWindows,
+            stallMs = item.holdStallMs,
+            spanMs = item.holdSpanMs,
+            checkedAtMs = item.holdCheckedAt,
+            nowMs = nowMs,
+        )
+        // Потолок общий, а не по штрафу на каждый. Оба замера описывают один и тот
+        // же дефект пути — пропадающий обратный поток, — и на обычном подключении
+        // снимаются с одних и тех же секунд: сэмплер меряет тишину в первом окне,
+        // а тикер живой сессии считает там же перерукопожатия. Два независимых
+        // вычета за одно наблюдение перекосили бы оценку, и увидеть это в журнале
+        // было бы нечем.
+        val pathInstabilityPenalty = (churnPenalty + holdPenalty).coerceAtMost(36.0)
         return base +
             exact +
             freshnessScore * 10.0 +
@@ -4838,6 +5400,7 @@ class ClientData(context: Context) {
             qualitySuccessScore +
             qualityLatencyScore -
             qualityFailurePenalty -
+            pathInstabilityPenalty -
             profileFailurePenalty -
             collapsingMasqueWinnerPenalty -
             exoticMasqueRecentFailurePenalty -
@@ -4899,29 +5462,31 @@ class ClientData(context: Context) {
     }
 
     fun addManualWarpConfig(rawConfig: String, nowMs: Long = System.currentTimeMillis()): WarpVerifiedConfig? {
-        val cleaned = rawConfig.trim()
-        if (cleaned.isBlank()) return null
-        val marker = "manual-${nowMs}-${cleaned.hashCode()}"
-        val config = WarpVerifiedConfig(
-            id = marker,
-            engine = "manual",
-            mode = "manual",
-            host = "manual",
-            port = 1,
-            endpointSource = "manual",
-            rawConfig = cleaned,
-            createdAt = nowMs,
-            lastVerifiedAt = nowMs,
-            successCount = 1,
-            scope = STRATEGY_SCOPE_DEFAULT,
-            manual = true,
-            userImported = false,
-        )
-        val list = getWarpVerifiedConfigs().toMutableList()
-        list.removeAll { it.id == marker }
-        list.add(config)
-        saveWarpVerifiedConfigs(list)
-        return config
+        synchronized(warpVerifiedConfigsLock) {
+            val cleaned = rawConfig.trim()
+            if (cleaned.isBlank()) return null
+            val marker = "manual-${nowMs}-${cleaned.hashCode()}"
+            val config = WarpVerifiedConfig(
+                id = marker,
+                engine = "manual",
+                mode = "manual",
+                host = "manual",
+                port = 1,
+                endpointSource = "manual",
+                rawConfig = cleaned,
+                createdAt = nowMs,
+                lastVerifiedAt = nowMs,
+                successCount = 1,
+                scope = STRATEGY_SCOPE_DEFAULT,
+                manual = true,
+                userImported = false,
+            )
+            val list = getWarpVerifiedConfigs().toMutableList()
+            list.removeAll { it.id == marker }
+            list.add(config)
+            saveWarpVerifiedConfigs(list)
+            return config
+        }
     }
 
     private data class BundledWarpSeed(
@@ -4947,76 +5512,78 @@ class ClientData(context: Context) {
     )
 
     private fun ensureBundledVerifiedWarpSeeds() {
-        val rawSeeds = runCatching {
-            appContext.assets.open(WARP_VERIFIED_SEEDS_ASSET_NAME).bufferedReader().use { it.readText() }
-        }.getOrNull().orEmpty()
-        if (rawSeeds.isBlank()) return
+        synchronized(warpVerifiedConfigsLock) {
+            val rawSeeds = runCatching {
+                appContext.assets.open(WARP_VERIFIED_SEEDS_ASSET_NAME).bufferedReader().use { it.readText() }
+            }.getOrNull().orEmpty()
+            if (rawSeeds.isBlank()) return
 
-        val assetVersion = rawSeeds.hashCode().toString()
-        val importedVersion = prefs.getString("warp_verified_seeds_version", null).orEmpty()
+            val assetVersion = rawSeeds.hashCode().toString()
+            val importedVersion = prefs.getString("warp_verified_seeds_version", null).orEmpty()
 
-        val parsedSeeds = loadBundledVerifiedWarpSeeds(rawSeeds)
-        if (parsedSeeds.isEmpty()) return
-        val currentById = getWarpVerifiedConfigs().associateBy { it.id }
-        val exportedStatsById = getWarpVerifiedExportSnapshot().associateBy { it.id }
-        val parsedSeedIds = parsedSeeds
-            .mapTo(mutableSetOf()) { seed -> buildWarpConfigId(seed.mode, seed.host, seed.port, seed.scope) }
-        val currentSeeds = currentById.values.filter(::isBundledSeed)
-        val currentSeedIds = currentSeeds
-            .mapTo(mutableSetOf()) { it.id }
-        val parsedRawConfigById = parsedSeeds.associate { seed ->
-            buildWarpConfigId(seed.mode, seed.host, seed.port, seed.scope) to seed.rawConfig.trim()
-        }
-        val currentSeedsMatchAsset = currentSeedIds == parsedSeedIds &&
-            currentSeeds.all { seed -> seed.rawConfig.trim() == parsedRawConfigById[seed.id] }
-        val exportStatsAlreadyMerged = parsedSeedIds.all { id ->
-            val current = currentById[id]
-            val exported = exportedStatsById[id]
-            exported == null || (
-                current != null &&
-                    current.successCount >= exported.successCount &&
-                    current.lastVerifiedAt >= exported.lastVerifiedAt &&
-                    current.qualityProbeCount >= exported.qualityProbeCount &&
-                    current.qualityPingSuccesses >= exported.qualityPingSuccesses &&
-                    current.qualityLastCheckedAt >= exported.qualityLastCheckedAt
-                )
-        }
-        if (assetVersion == importedVersion && currentSeedsMatchAsset && exportStatsAlreadyMerged) return
-
-        val existing = currentById.toMutableMap()
-        existing.values.removeAll { isBundledSeed(it) }
-
-        for (seed in parsedSeeds) {
-            val configId = buildWarpConfigId(seed.mode, seed.host, seed.port, seed.scope)
-            val baseConfig = WarpVerifiedConfig(
-                id = configId,
-                engine = seed.engine,
-                mode = seed.mode,
-                host = seed.host,
-                port = seed.port,
-                endpointSource = seed.endpointSource,
-                rawConfig = seed.rawConfig,
-                createdAt = seed.lastVerifiedAt,
-                lastVerifiedAt = seed.lastVerifiedAt,
-                successCount = seed.successCount.coerceAtLeast(1),
-                scope = seed.scope,
-                manual = false,
-                seedOrder = seed.seedOrder,
-                preferredSni = seed.preferredSni,
-                preferredPorts = seed.preferredPorts.ifEmpty {
-                    updateWarpPortStats(emptyList(), seed.port, success = true, nowMs = seed.lastVerifiedAt)
-                },
-            )
-            existing[configId] = listOfNotNull(
-                currentById[configId],
-                exportedStatsById[configId],
-            ).fold(baseConfig) { merged, statsSource ->
-                mergeWarpVerifiedExportStats(merged, statsSource)
+            val parsedSeeds = loadBundledVerifiedWarpSeeds(rawSeeds)
+            if (parsedSeeds.isEmpty()) return
+            val currentById = getWarpVerifiedConfigs().associateBy { it.id }
+            val exportedStatsById = getWarpVerifiedExportSnapshot().associateBy { it.id }
+            val parsedSeedIds = parsedSeeds
+                .mapTo(mutableSetOf()) { seed -> buildWarpConfigId(seed.mode, seed.host, seed.port, seed.scope) }
+            val currentSeeds = currentById.values.filter(::isBundledSeed)
+            val currentSeedIds = currentSeeds
+                .mapTo(mutableSetOf()) { it.id }
+            val parsedRawConfigById = parsedSeeds.associate { seed ->
+                buildWarpConfigId(seed.mode, seed.host, seed.port, seed.scope) to seed.rawConfig.trim()
             }
-        }
+            val currentSeedsMatchAsset = currentSeedIds == parsedSeedIds &&
+                currentSeeds.all { seed -> seed.rawConfig.trim() == parsedRawConfigById[seed.id] }
+            val exportStatsAlreadyMerged = parsedSeedIds.all { id ->
+                val current = currentById[id]
+                val exported = exportedStatsById[id]
+                exported == null || (
+                    current != null &&
+                        current.successCount >= exported.successCount &&
+                        current.lastVerifiedAt >= exported.lastVerifiedAt &&
+                        current.qualityProbeCount >= exported.qualityProbeCount &&
+                        current.qualityPingSuccesses >= exported.qualityPingSuccesses &&
+                        current.qualityLastCheckedAt >= exported.qualityLastCheckedAt
+                    )
+            }
+            if (assetVersion == importedVersion && currentSeedsMatchAsset && exportStatsAlreadyMerged) return
 
-        saveWarpVerifiedConfigs(existing.values.toList())
-        prefs.edit().putString("warp_verified_seeds_version", assetVersion).apply()
+            val existing = currentById.toMutableMap()
+            existing.values.removeAll { isBundledSeed(it) }
+
+            for (seed in parsedSeeds) {
+                val configId = buildWarpConfigId(seed.mode, seed.host, seed.port, seed.scope)
+                val baseConfig = WarpVerifiedConfig(
+                    id = configId,
+                    engine = seed.engine,
+                    mode = seed.mode,
+                    host = seed.host,
+                    port = seed.port,
+                    endpointSource = seed.endpointSource,
+                    rawConfig = seed.rawConfig,
+                    createdAt = seed.lastVerifiedAt,
+                    lastVerifiedAt = seed.lastVerifiedAt,
+                    successCount = seed.successCount.coerceAtLeast(1),
+                    scope = seed.scope,
+                    manual = false,
+                    seedOrder = seed.seedOrder,
+                    preferredSni = seed.preferredSni,
+                    preferredPorts = seed.preferredPorts.ifEmpty {
+                        updateWarpPortStats(emptyList(), seed.port, success = true, nowMs = seed.lastVerifiedAt)
+                    },
+                )
+                existing[configId] = listOfNotNull(
+                    currentById[configId],
+                    exportedStatsById[configId],
+                ).fold(baseConfig) { merged, statsSource ->
+                    mergeWarpVerifiedExportStats(merged, statsSource)
+                }
+            }
+
+            saveWarpVerifiedConfigs(existing.values.toList())
+            prefs.edit().putString("warp_verified_seeds_version", assetVersion).apply()
+        }
     }
 
     private fun loadBundledVerifiedWarpSeeds(raw: String): List<BundledWarpSeed> {
@@ -5694,72 +6261,74 @@ class ClientData(context: Context) {
         clearStoredConfig: Boolean,
         nowMs: Long = System.currentTimeMillis(),
     ) {
-        val manualConfigs = getWarpVerifiedConfigs().filter { it.manual }
-        val preservedImportedConfigs = getWarpVerifiedConfigs().filter { it.userImported }
-        val strategyPrefixes = listOf(
-            "strategy_exact|",
-            "strategy_mode_port|",
-            "strategy_mode|",
-            "strategy_net_exact|",
-            "strategy_net_mode_port|",
-            "strategy_net_mode|",
-            "strategy_exit|",
-            "registration_route|",
-            TRAFFIC_MASK_STATS_PREFIX,
-        )
-        val scopedStablePrefixes = listOf(
-            "wifi_stable_last_success_",
-            "cell_stable_last_success_",
-            "eth_stable_last_success_",
-            "other_stable_last_success_",
-        )
-        prefs.edit().apply {
-            remove("last_success_port")
-            remove("last_success_protocol")
-            remove("last_success_at")
-            remove("last_success_endpoint")
-            remove("last_success_mode")
-            remove("stable_last_success_port")
-            remove("stable_last_success_protocol")
-            remove("stable_last_success_at")
-            remove("stable_last_success_endpoint")
-            remove("stable_last_success_mode")
-            remove("stable_last_success_network_signature")
-            remove("masque_transport_failed_at")
-            remove("masque_transport_failed_count")
-            remove("masque_bootstrap_failed_at")
-            remove("warp_verified_seeds_version")
-            remove("restart_session_json")
-            remove("soft_reapply_pending_until")
-            remove("transient_connecting_pending_until")
-            remove("restricted_mobile_network_id")
-            remove("restricted_mobile_detected")
-            remove("restricted_mobile_checked_at")
-            prefs.all.keys
-                .filter { key -> strategyPrefixes.any(key::startsWith) || scopedStablePrefixes.any(key::startsWith) }
-                .forEach(::remove)
-            if (clearStoredConfig) {
-                remove("private_key")
-                remove("public_key")
-                remove("ipv4")
-                remove("ipv6")
-                remove("peer_pub")
-                remove("peer_endpoint")
-                remove("reserved")
-                remove("access_token")
-                remove("device_id")
-                remove("license")
-                remove("masque_config_json")
-                remove("is_registered")
+        synchronized(warpVerifiedConfigsLock) {
+            val manualConfigs = getWarpVerifiedConfigs().filter { it.manual }
+            val preservedImportedConfigs = getWarpVerifiedConfigs().filter { it.userImported }
+            val strategyPrefixes = listOf(
+                "strategy_exact|",
+                "strategy_mode_port|",
+                "strategy_mode|",
+                "strategy_net_exact|",
+                "strategy_net_mode_port|",
+                "strategy_net_mode|",
+                "strategy_exit|",
+                "registration_route|",
+                TRAFFIC_MASK_STATS_PREFIX,
+            )
+            val scopedStablePrefixes = listOf(
+                "wifi_stable_last_success_",
+                "cell_stable_last_success_",
+                "eth_stable_last_success_",
+                "other_stable_last_success_",
+            )
+            prefs.edit().apply {
+                remove("last_success_port")
+                remove("last_success_protocol")
+                remove("last_success_at")
+                remove("last_success_endpoint")
+                remove("last_success_mode")
+                remove("stable_last_success_port")
+                remove("stable_last_success_protocol")
+                remove("stable_last_success_at")
+                remove("stable_last_success_endpoint")
+                remove("stable_last_success_mode")
+                remove("stable_last_success_network_signature")
+                remove("masque_transport_failed_at")
+                remove("masque_transport_failed_count")
+                remove("masque_bootstrap_failed_at")
+                remove("warp_verified_seeds_version")
+                remove("restart_session_json")
+                remove("soft_reapply_pending_until")
+                remove("transient_connecting_pending_until")
+                remove("restricted_mobile_network_id")
+                remove("restricted_mobile_detected")
+                remove("restricted_mobile_checked_at")
+                prefs.all.keys
+                    .filter { key -> strategyPrefixes.any(key::startsWith) || scopedStablePrefixes.any(key::startsWith) }
+                    .forEach(::remove)
+                if (clearStoredConfig) {
+                    remove("private_key")
+                    remove("public_key")
+                    remove("ipv4")
+                    remove("ipv6")
+                    remove("peer_pub")
+                    remove("peer_endpoint")
+                    remove("reserved")
+                    remove("access_token")
+                    remove("device_id")
+                    remove("license")
+                    remove("masque_config_json")
+                    remove("is_registered")
+                }
+                apply()
             }
-            apply()
+            saveWarpVerifiedConfigs((manualConfigs + preservedImportedConfigs).distinctBy { it.id })
+            ensureBundledVerifiedWarpSeeds()
+            clearTunnelUiSnapshot()
+            setTrafficMaskActiveHost(null)
+            setWarpTrafficMaskActiveHost(null)
+            markWarpColdReset(nowMs)
         }
-        saveWarpVerifiedConfigs((manualConfigs + preservedImportedConfigs).distinctBy { it.id })
-        ensureBundledVerifiedWarpSeeds()
-        clearTunnelUiSnapshot()
-        setTrafficMaskActiveHost(null)
-        setWarpTrafficMaskActiveHost(null)
-        markWarpColdReset(nowMs)
     }
 
     fun resetWarpStoredRegistrationIdentity() {
@@ -5792,49 +6361,51 @@ class ClientData(context: Context) {
     }
 
     fun resetWarpTransportLearning() {
-        val manualConfigs = getWarpVerifiedConfigs().filter { it.manual }
-        val preservedImportedConfigs = getWarpVerifiedConfigs().filter { it.userImported }
-        val strategyPrefixes = listOf(
-            "strategy_exact|",
-            "strategy_mode_port|",
-            "strategy_mode|",
-            "strategy_net_exact|",
-            "strategy_net_mode_port|",
-            "strategy_net_mode|",
-            "strategy_exit|",
-            TRAFFIC_MASK_STATS_PREFIX,
-        )
-        val scopedStablePrefixes = listOf(
-            "wifi_stable_last_success_",
-            "cell_stable_last_success_",
-            "eth_stable_last_success_",
-            "other_stable_last_success_",
-        )
-        prefs.edit().apply {
-            remove("last_success_port")
-            remove("last_success_protocol")
-            remove("last_success_at")
-            remove("last_success_endpoint")
-            remove("last_success_mode")
-            remove("stable_last_success_port")
-            remove("stable_last_success_protocol")
-            remove("stable_last_success_at")
-            remove("stable_last_success_endpoint")
-            remove("stable_last_success_mode")
-            remove("stable_last_success_network_signature")
-            remove("masque_transport_failed_at")
-            remove("masque_transport_failed_count")
-            remove("masque_bootstrap_failed_at")
-            remove("warp_verified_seeds_version")
-            prefs.all.keys
-                .filter { key -> strategyPrefixes.any(key::startsWith) || scopedStablePrefixes.any(key::startsWith) }
-                .forEach(::remove)
-            apply()
+        synchronized(warpVerifiedConfigsLock) {
+            val manualConfigs = getWarpVerifiedConfigs().filter { it.manual }
+            val preservedImportedConfigs = getWarpVerifiedConfigs().filter { it.userImported }
+            val strategyPrefixes = listOf(
+                "strategy_exact|",
+                "strategy_mode_port|",
+                "strategy_mode|",
+                "strategy_net_exact|",
+                "strategy_net_mode_port|",
+                "strategy_net_mode|",
+                "strategy_exit|",
+                TRAFFIC_MASK_STATS_PREFIX,
+            )
+            val scopedStablePrefixes = listOf(
+                "wifi_stable_last_success_",
+                "cell_stable_last_success_",
+                "eth_stable_last_success_",
+                "other_stable_last_success_",
+            )
+            prefs.edit().apply {
+                remove("last_success_port")
+                remove("last_success_protocol")
+                remove("last_success_at")
+                remove("last_success_endpoint")
+                remove("last_success_mode")
+                remove("stable_last_success_port")
+                remove("stable_last_success_protocol")
+                remove("stable_last_success_at")
+                remove("stable_last_success_endpoint")
+                remove("stable_last_success_mode")
+                remove("stable_last_success_network_signature")
+                remove("masque_transport_failed_at")
+                remove("masque_transport_failed_count")
+                remove("masque_bootstrap_failed_at")
+                remove("warp_verified_seeds_version")
+                prefs.all.keys
+                    .filter { key -> strategyPrefixes.any(key::startsWith) || scopedStablePrefixes.any(key::startsWith) }
+                    .forEach(::remove)
+                apply()
+            }
+            saveWarpVerifiedConfigs((manualConfigs + preservedImportedConfigs).distinctBy { it.id })
+            ensureBundledVerifiedWarpSeeds()
+            setTrafficMaskActiveHost(null)
+            setWarpTrafficMaskActiveHost(null)
         }
-        saveWarpVerifiedConfigs((manualConfigs + preservedImportedConfigs).distinctBy { it.id })
-        ensureBundledVerifiedWarpSeeds()
-        setTrafficMaskActiveHost(null)
-        setWarpTrafficMaskActiveHost(null)
     }
 
     // Split Tunneling
@@ -6244,7 +6815,7 @@ class ClientData(context: Context) {
     }
 
     private fun readOperaLaunchPlanStats(key: String): OperaLaunchPlanStats {
-        val raw = prefs.getString(key, null).orEmpty()
+        val raw = operaStateString(key)
         if (raw.isBlank()) return OperaLaunchPlanStats()
         return try {
             val json = JSONObject(raw)
@@ -6275,7 +6846,7 @@ class ClientData(context: Context) {
     }
 
     private fun readOperaRegistrationPlanStats(key: String): OperaRegistrationPlanStats {
-        val raw = prefs.getString(key, null).orEmpty()
+        val raw = operaStateString(key)
         if (raw.isBlank()) return OperaRegistrationPlanStats()
         return try {
             val json = JSONObject(raw)
@@ -6685,17 +7256,19 @@ class ClientData(context: Context) {
     }
 
     private fun compactWarpVerifiedConfigsIfNeeded() {
-        val current = getWarpVerifiedConfigs()
-        if (current.isEmpty()) return
-        val compacted = sortWarpVerifiedConfigs(compactWarpVerifiedPortVariantsInMemory(current))
-        val currentSignature = current.joinToString("\n") {
-            "${it.id}|${it.port}|${it.preferredPorts.map(WarpPortStat::port).joinToString(",")}|${it.successCount}|${it.lastVerifiedAt}"
-        }
-        val compactedSignature = compacted.joinToString("\n") {
-            "${it.id}|${it.port}|${it.preferredPorts.map(WarpPortStat::port).joinToString(",")}|${it.successCount}|${it.lastVerifiedAt}"
-        }
-        if (currentSignature != compactedSignature) {
-            saveWarpVerifiedConfigs(compacted)
+        synchronized(warpVerifiedConfigsLock) {
+            val current = getWarpVerifiedConfigs()
+            if (current.isEmpty()) return
+            val compacted = sortWarpVerifiedConfigs(compactWarpVerifiedPortVariantsInMemory(current))
+            val currentSignature = current.joinToString("\n") {
+                "${it.id}|${it.port}|${it.preferredPorts.map(WarpPortStat::port).joinToString(",")}|${it.successCount}|${it.lastVerifiedAt}"
+            }
+            val compactedSignature = compacted.joinToString("\n") {
+                "${it.id}|${it.port}|${it.preferredPorts.map(WarpPortStat::port).joinToString(",")}|${it.successCount}|${it.lastVerifiedAt}"
+            }
+            if (currentSignature != compactedSignature) {
+                saveWarpVerifiedConfigs(compacted)
+            }
         }
     }
 
@@ -6806,6 +7379,12 @@ class ClientData(context: Context) {
                         put("quality_avg_ping_ms", item.qualityAvgPingMs)
                         put("quality_last_checked_at", item.qualityLastCheckedAt)
                         put("quality_failure_count", item.qualityFailureCount)
+                        put("churn_windows", item.churnWindows)
+                        put("churn_rekeys", item.churnRekeys)
+                        put("hold_windows", item.holdWindows)
+                        put("hold_stall_ms", item.holdStallMs)
+                        put("hold_span_ms", item.holdSpanMs)
+                        put("hold_checked_at", item.holdCheckedAt)
                         put("preferred_sni", item.preferredSni)
                         putWarpPortStats(this, item.preferredPorts, item.port)
                     }
@@ -6856,6 +7435,14 @@ class ClientData(context: Context) {
                             put("quality_avg_ping_ms", effectiveAvgPingMs)
                             put("quality_last_checked_at", effectiveLastCheckedAt)
                             put("quality_failure_count", effectiveFailureCount)
+                            put("churn_windows", item.churnWindows)
+                            put("churn_rekeys", item.churnRekeys)
+                            put("hold_windows", item.holdWindows)
+                            put("hold_stall_ms", item.holdStallMs)
+                            put("hold_span_ms", item.holdSpanMs)
+                            put("hold_checked_at", item.holdCheckedAt)
+                            put("hold_stall_normalized_ms", warpConfigHoldStallMs(item))
+                            put("hold_grade", warpConfigHoldGrade(item))
                             put("preferred_sni", item.preferredSni)
                             putWarpPortStats(this, item.preferredPorts, item.port)
                         }
@@ -6892,6 +7479,12 @@ class ClientData(context: Context) {
                                 put("quality_avg_ping_ms", effectiveAvgPingMs)
                                 put("quality_last_checked_at", effectiveLastCheckedAt)
                                 put("quality_failure_count", effectiveFailureCount)
+                                put("churn_windows", item.churnWindows)
+                                put("churn_rekeys", item.churnRekeys)
+                                put("hold_windows", item.holdWindows)
+                                put("hold_stall_ms", item.holdStallMs)
+                                put("hold_span_ms", item.holdSpanMs)
+                                put("hold_checked_at", item.holdCheckedAt)
                                 put("preferred_sni", item.preferredSni)
                                 putWarpPortStats(this, item.preferredPorts, item.port)
                             }
@@ -7204,6 +7797,36 @@ class ClientData(context: Context) {
     companion object {
         private val runtimeSeedInitDone = AtomicBoolean(false)
         private val warpVerifiedExportCacheLock = Any()
+
+        /**
+         * Читаем-меняем-пишем `opera_state.json` из нескольких потоков `:vpn` — только
+         * под этим замком. Замок именно в companion, а не в экземпляре: `ClientData`
+         * создаётся заново на каждом вызове, и замок экземпляра ничего не сериализовал бы.
+         */
+        private val operaStateLock = Any()
+
+        /**
+         * Список проверенных WARP-конфигураций читается-меняется-пишется целиком,
+         * и делают это три потока сразу: поток перебора пишет исход попытки,
+         * демон-сэмплер — итог окна качества и удержания, главный поток — замер
+         * перерукопожатий с живой сессии. Без замка проигравший гонку писатель
+         * откатывал не одно поле, а результаты всех конфигураций, изменённых с
+         * момента его чтения, — и выглядело бы это как «замер не записался».
+         *
+         * Замок в companion, а не в экземпляре: `ClientData` создаётся заново на
+         * каждом вызове, и замок экземпляра ничего не сериализовал бы.
+         *
+         * Под ним не появляется никакой новой работы — только та запись, что и
+         * так шла. Расширять его дальше нельзя: общий замок вокруг остановки
+         * Opera уже приводил к ANR на главном потоке.
+         */
+        private val warpVerifiedConfigsLock = Any()
+
+        @Volatile
+        private var cachedOperaState: JSONObject? = null
+
+        @Volatile
+        private var cachedOperaStateStamp: Pair<Long, Long> = 0L to 0L
         @Volatile private var cachedWarpVerifiedExportPath: String? = null
         @Volatile private var cachedWarpVerifiedExportModifiedAt: Long = -1L
         @Volatile private var cachedWarpVerifiedExportLength: Long = -1L
@@ -7212,6 +7835,18 @@ class ClientData(context: Context) {
         private const val BOOTSTRAP_ASSET_NAME = "warp_bootstrap.json"
         private const val WARP_VERIFIED_SEEDS_ASSET_NAME = "warp_verified_seeds.json"
         private const val WARP_VERIFIED_EXPORT_FILE_NAME = "warp_verified_export.json"
+
+        /** Разовая чистка маскировочных имён из профилей, см. purgeStoredWarpPreferredSniOnce. */
+        private const val WARP_PREFERRED_SNI_PURGED_KEY = "warp_preferred_sni_purged_v1"
+
+        /** Сколько окон замера нужно, чтобы churn узла считался измеренным. */
+        private const val WARP_CHURN_MIN_WINDOWS = 2
+
+        /** Потолок накопления: дальше счётчики делятся пополам, давая старению ход. */
+        private const val WARP_CHURN_MAX_WINDOWS = 12
+
+        /** Отладочный ключ «AWG без junk», см. [isAwgJunkDisabled]. */
+        private const val AWG_JUNK_DISABLED_KEY = "debug_awg_junk_disabled"
         private const val LAST_SUCCESS_FRESH_MS = 3L * 24 * 60 * 60 * 1000L
         /**
          * Потолок числа импортированных профилей VLESS. Подписки бывают на тысячи
@@ -7235,6 +7870,15 @@ class ClientData(context: Context) {
         private const val UNSET_SENTINEL = "\u0000"
         private const val TRAFFIC_MASK_STATS_PREFIX = "traffic_mask_stats|"
         private const val STRATEGY_SCOPE_DEFAULT = "default"
+
+        /**
+         * Приставка идентификатора карточки профиля VLESS.
+         *
+         * По ней удаление отличает записи, собранные из `vless_profiles.json`, от
+         * настоящих строк хранилища WARP: лежат они в разных местах, и чистить их
+         * надо тоже по-разному.
+         */
+        const val VLESS_CONFIG_ID_PREFIX = "vless|"
         private const val STRATEGY_SCOPE_MESSENGER = "messenger"
         private const val FAILURE_REASON_VALIDATED_NO_TRAFFIC = "validated_no_traffic"
         private const val FAILURE_REASON_CONTROL_PLANE_ONLY = "control_plane_only"

@@ -111,9 +111,26 @@ open class ProxyVpnService : VpnService() {
             }
         }
 
+        /**
+         * Когда в последний раз звали `tun2proxy_stop()`.
+         *
+         * Библиотека после этого вызова безусловно поднимает отсоединённый поток
+         * «поспать 2 секунды → `exit(-1)`». Между сном и выходом она не проверяет
+         * ничего: ни вернулся ли рабочий цикл, ни запущен ли новый экземпляр. Отменить
+         * этот фитиль нечем, поэтому вызов равносилен приговору процессу.
+         */
+        @Volatile
+        var lastForceStopAtMs: Long = 0L
+            private set
+
         @JvmStatic
-        fun haltTun2proxy(): Int {
-            if (!nativeLoaded) return 0
+        fun haltTun2proxy(log: (String) -> Unit = {}): Int {
+            if (!nativeLoaded) {
+                log("tun2proxy_stop пропущен: нативная библиотека не загружена.")
+                return 0
+            }
+            lastForceStopAtMs = android.os.SystemClock.elapsedRealtime()
+            log("Зовём tun2proxy_stop. Через 2 секунды библиотека выполнит exit(-1).")
             return try {
                 when (wrapperMode) {
                     WrapperMode.MODERN -> nativeStopTun2proxy()

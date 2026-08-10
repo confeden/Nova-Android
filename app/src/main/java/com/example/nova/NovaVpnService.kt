@@ -452,6 +452,15 @@ class NovaVpnService : OperaNativeVpnService() {
         /** Ниже этого объёма отправки окно замера не показательно. */
         private const val TUNNEL_REKEY_MIN_TX_KB = 32L
 
+        /**
+         * Предел на резолв имени Private DNS мимо туннеля.
+         *
+         * Полторы секунды — с запасом на обычный ответ и заведомо меньше, чем
+         * стоит одна попытка подключения. Всё, что дольше, означает, что резолвер
+         * упёрся в недостижимый DoT-сервер, и ждать его бессмысленно.
+         */
+        private const val PRIVATE_DNS_RESOLVE_TIMEOUT_MS = 1_500L
+
         const val ACTION_VPN_STATE = "com.example.nova.VPN_STATE"
 
         /**
@@ -18621,7 +18630,7 @@ class NovaVpnService : OperaNativeVpnService() {
             )
         }
 
-        val resolvedAddresses = resolveHostOutsideVpn(privateDnsHost)
+        val resolvedAddresses = resolveHostOutsideVpn(privateDnsHost, underlyingNetwork)
         if (resolvedAddresses.isEmpty()) {
             LogManager.log("Private DNS $privateDnsHost активен, но IP исключения получить не удалось.")
             return
@@ -18912,13 +18921,49 @@ class NovaVpnService : OperaNativeVpnService() {
         }
     }
 
-    private fun resolveHostOutsideVpn(hostname: String): List<InetAddress> {
+    /**
+     * Резолвит имя мимо туннеля, с жёстким пределом по времени.
+     *
+     * Предел здесь — не перестраховка. Раньше стоял голый
+     * `InetAddress.getAllByName` в потоке подключения, внутри создания
+     * TUN-интерфейса. На устройстве со строгим Private DNS
+     * (`private_dns_mode=hostname`) системный резолвер обязан сходить к DoT-серверу,
+     * а тот в этот момент недостижим — VPN ещё не поднят, а прямой путь режется.
+     * Резолв висел около восьмидесяти секунд, попытка не начиналась вовсе, и
+     * фоновый heartbeat успевал перезапустить цикл подключения с начала. Снаружи
+     * это выглядело как «1/50 и дальше не идёт»: счётчик вечно на первом профиле,
+     * ни одной строки в журнале между поднятием TUN и перезапуском.
+     *
+     * Имя резолвим через подложную сеть, а не через общий резолвер: после того как
+     * туннель поднят, общий резолвер уходит в него, и «мимо VPN» перестаёт быть
+     * правдой.
+     */
+    private fun resolveHostOutsideVpn(
+        hostname: String,
+        underlyingNetwork: android.net.Network? = null,
+        timeoutMs: Long = PRIVATE_DNS_RESOLVE_TIMEOUT_MS,
+    ): List<InetAddress> {
+        val executor = Executors.newSingleThreadExecutor()
         return try {
-            InetAddress.getAllByName(hostname)
-                .toList()
-                .distinctBy { it.hostAddress ?: it.toString() }
+            val task = executor.submit<List<InetAddress>> {
+                val resolved = underlyingNetwork?.getAllByName(hostname)
+                    ?: InetAddress.getAllByName(hostname)
+                resolved.toList().distinctBy { it.hostAddress ?: it.toString() }
+            }
+            try {
+                task.get(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+            } catch (_: java.util.concurrent.TimeoutException) {
+                task.cancel(true)
+                LogManager.log(
+                    "Резолв $hostname мимо VPN не уложился в $timeoutMs мс. Идём дальше без него: " +
+                        "молча ждать здесь нельзя, ожидание съедает всю попытку подключения."
+                )
+                emptyList()
+            }
         } catch (_: Exception) {
             emptyList()
+        } finally {
+            executor.shutdownNow()
         }
     }
 

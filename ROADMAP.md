@@ -1,785 +1,646 @@
-# Дорожная карта Nova Android
+# ROADMAP.md — Claude's persistent project state file
 
-Рабочий документ проекта: на чём остановились, что открыто, какие правила приняты и что дальше.
-Ведётся, чтобы в следующем разговоре можно было продолжить с того же места, не восстанавливая контекст.
+> **Protocol (global rule):** Claude reads this file at the START of every session and updates it at the END of every response that changed anything. This is Claude's own working context, read by Claude only — NOT user documentation. Keep it in English, dense, conclusions not narratives. Accuracy rule: write "works" ONLY for what a device log confirms; everything else is "built, not verified on device". Quoted log/UI string literals stay in Russian — they are exact search keys for real program output.
+>
+> Updated: 2026-08-10.
 
-## Как пользоваться
+## Current state
 
-- **В начале разговора** — прочитать «Точку остановки» и «Открытые проблемы». Там написано, что
-  проверено на устройстве, а что только собрано.
-- **В конце каждого ответа** — обновить файл: перенести сделанное в «Состояние», закрыть или
-  уточнить проблемы, дописать новые ловушки и решения, сдвинуть «Точку остановки».
-- **Правило точности:** «работает» пишем только про то, что подтверждено журналом с устройства.
-  Всё остальное — «собрано, не проверено».
+Version **1.26** (`versionCode 136`). Test device — Pixel 4 XL (`9B071FFBA001CE`), spare — Pixel 4a.
+Release build, signed with the working key, installs over the previous one without data loss.
+134 Kotlin unit tests, green, plus `go test ./cfws ./tlsshape` green.
 
-Обновлено: 2026-08-10.
+Nothing unfinished in the tree. The whole series is committed 2026-08-10 to `main` (75 files, one
+commit). Screenshots of the test device (`.nova_shots/`) are deliberately not committed — they are
+evidence for analysis, not build input.
 
-## Точка остановки
+Build and install: `./gradlew :app:assembleRelease`, then
+`adb install -r app/build/outputs/apk/release/Nova_<version>.apk`. Release deliberately does not build
+without the WSS signing secret. Edits in `nova-core/` do **not** reach the APK by themselves — run
+`tools/build_nova_core_aar.sh` (needs Go, gomobile, NDK 27.2.12479018); it updates both the `.aar`
+and `jniLibs`, and `jniLibs` wins — updating only the `.aar` leaves the old library loading on device.
 
-**Закрыто и подтверждено журналом:** падение `:vpn` после «Стоп» → «Пуск»; перезапуск обречённого
-процесса (36 мс вместо назначенных Android 62 секунд); хвостовой broadcast `STOPPED`, молча
-отменявший только что начатый пуск. Подробности — в «Подтверждено журналом» и «Ловушках».
+### Stopping point
 
-**Сделано, ждёт проверки на устройстве:** нейтральный SNI и форма ClientHello для Telegram
-(проблема 1) — форма подтверждена в WARP, подстановку имени проверить нечем, пока выбрана квота
-воркера (проблема 2); выделение фокуса с пульта; пункты из таблицы «Собрано, но не проверено».
+- **Closed and log-confirmed:** `:vpn` crash after «Стоп» → «Пуск»; self-restart of a doomed process
+  (36 ms instead of the 62 s Android scheduled); trailing `STOPPED` broadcast that silently cancelled
+  a just-started launch.
+- **Built, awaiting device check:** neutral SNI + ClientHello shape for Telegram (problem 1) — the
+  shape is confirmed under WARP, the name substitution cannot be checked while the worker quota is
+  exhausted (problem 2); D-pad focus highlight; the rows in "Built, not verified on device".
+- **Problem 3 (WARP instability) — cause found:** churn is a property of the path to a specific node,
+  not of the client. See section 3.
+- **Adaptation:** two full 50/50 runs done, the second one clean (after SNI substitution was removed,
+  problem 3b). Both named the same four worst nodes, all with ping 38–49 ms — by the old metrics they
+  looked healthy. Bundled profile order rebuilt from the clean run. Adaptation deliberately leaves the
+  tunnel down when it finishes — it is a measuring run; reconnecting afterwards is a manual step.
 
-**Проблема 3, нестабильность WARP — причина найдена.** Четыре гипотезы отвергнуты (апстримный фикс
-keepalive, junk, обновление библиотек, `reserved`), пятая подтвердилась: churn зависит от узла.
-`.214.9:500` даёт 2,0–2,5 перерукопожатия в минуту, `.69.8:987` — 0,5–1,0 при большем трафике.
-Параметры AWG у всех 96 профилей одинаковые, значит дело в пути, а не в клиенте.
+### Confirmed by device log
 
-**Просьба владельца про адаптацию выполнена, и по дороге вскрылось, почему прежняя правка не могла
-подействовать.** Штраф за churn действительно считался, но до очереди перебора не доходил ни разу:
-первым ключом сортировки встроенных профилей стоял `seedOrder`, а он различается у всех пятидесяти
-записей — равенства не случается никогда, и все следующие ключи (качество, пинг, оценка, churn)
-были мёртвым кодом. Теперь прошивочный порядок огрублён до корзин по десять, и внутри корзины
-решают замеры. Подробности — в «3а. Удержание сессии».
-
-Дешёвый замер удержания сделан и подтверждён журналом: тишина обратного потока считается в том же
-двадцатисекундном окне, которое адаптация и так держит на каждом профиле, поэтому прогон не
-удлиняется. Замер и накопление проверены на одиночных подключениях.
-
-**Полный прогон адаптации проведён дважды, 50/50.** Первый — ещё с маскировочным SNI, второй —
-после того как подстановку убрали (проблема 3б закрыта). Оба назвали одну и ту же четвёрку худших
-узлов, пинг у всех четырёх 38–50 мс: прежними мерками они выглядели здоровыми.
-
-**Порядок профилей в прошивке пересобран по чистому прогону.** `8.39.214.9:500` вёз `seed_order = 0`
-и пробовался первым у каждого пользователя — тот самый узел, который числится теряющим обратный
-поток с 9 августа. Теперь он 45-й; позицию сменили 48 профилей из 50. Подробности — в «3а».
-
-Ничего недоделанного в дереве нет: 134 теста зелёные, релиз собран и установлен на Pixel 4 XL.
-Вся серия закоммичена 2026-08-10 в `main`.
-
-## Текущее состояние
-
-Версия **1.26** (`versionCode 136`). Проверочное устройство — Pixel 4 XL (`9B071FFBA001CE`),
-запасное — Pixel 4a. Сборка релизная, подписана рабочим ключом, ставится поверх без потери данных.
-Юнит-тестов 134, зелёные.
-
-### Подтверждено журналом с устройства
-
-| Что | Свидетельство в журнале |
+| What | Log evidence |
 |---|---|
-| EU поднимается через собственный релей API | `Discovered endpoints` через релей даёт рабочий набор, `fallback активен` |
-| Пинг для EU/US отображается | замер публикует служба, экран берёт его по метке транспорта |
-| Попытка по кэшированному адресу — 4–5.4 с | было 17.5 с |
-| Поднятие удачного способа наверх через 20 с | `Opera EU удержалась 20 секунд. Поднимаем этот способ наверх очереди` |
-| Состояние перебора переживает «Стоп» | после перезапуска перебор начинается с поднятого адреса |
-| «Стоп» → сразу «Пуск» больше не теряется | `Ждём завершения cleanup` → подключение за 430 мс |
-| Явный регион не подменяется на WARP | `регион выбран явно: временный WARP-bootstrap не запускаем` |
-| VLESS подключается, счётчик честный | `перебор 305 профилей`, `VLESS активен — профиль 1/305` |
-| Обречённый процесс не поднимает новую сессию | `процесс :vpn обречён` в 19:34:38.983, падение в 19:34:40.6, туннель не пострадал |
-| Явный запуск снимает задержку перезапуска | после падения в 19:34:13.7 «Пуск» в 19:34:15.19 поднял процесс за 30 мс |
-| Свой перезапуск обгоняет Android | 22:28:35.939 `Scheduling restart … in 62646ms`, 22:28:35.975 `Повторяем запуск сами` — 36 мс |
-| Форма hello — браузерная, ALPN сведён | `TLS shape=chrome sni=vesta-1.web.telegram.org (substituted=false) version=0x0303 alpn="http/1.1"` |
-| Откат нейтрального SNI срабатывает | `neutral SNI refused for kws5-1.nova-app.eu (403 Forbidden)` → зона вернулась к литеральному имени |
-| «Стоп» → «Пуск» в WARP доходит до службы | 23:26:18.9 стоп → 23:26:21.5 пуск → 23:26:21.7 служба приняла → 23:26:35.4 `STATE_CONNECTED` |
-| Удержание меряется в окне подключения | `Удержание warp-awg-exact@…69.8:987: тишина 1059 мс за окно 16774 мс, проб 16` |
-| Хвост окна в замер не попадает | 16 проб в окне удержания против 20 в окне качества — последние 2,5 с отрезаны |
-| Замер переживает публикацию качества | в выгрузке `hold_windows=1 … hold_grade=3` при том, что следом прошёл `WARP quality [ok]` |
-| Окна складываются, а не затирают друг друга | `hold_windows=2 hold_stall_ms=2117 hold_span_ms=33200` = сумма окон 1055+1062 и 16625+16575 |
-| Непоказательное окно называет причину | `Удержание …69.8:987 не замерено: окно 0 мс короче 12000 мс. Проб 0` |
-| Переключатели крупные и без подписей | снимки экрана «Настройки»: белый бегунок на зелёной дорожке, серый на тёмной |
-| Подстановка SNI убрана полностью | за весь прогон адаптации ни одного `sni=` в попытках WARP; в выгрузке `preferred_sni` пуст у всех 50 |
-| Подключение после прогона не буксует | было около пяти минут перебора, стало `Успешное подключение на порту 7559` со второго профиля |
-| Адаптация прошла все профили | экран: `Адаптация завершена. Сохранено: 50  50/50`, 47 показательных окон |
-| Замер разделяет узлы | здоровые 1,05–1,4 с тишины, четыре узла 7,8–15,4 с; промежуточных нет |
-| Плохой узел уходит вниз очереди | `8.39.125.3:987` (ping 49 мс) с 9-го места на 50-е |
-| Дешёвый замер сошёлся с дорогим | `8.39.214.9:500` назван и двухминутными окнами churn, и двадцатисекундным замером тишины |
-| Churn перестал стираться | на карточке появилось `Рукопожатий: 1,6/окно` — раньше счётчик не доживал до двух окон |
+| EU comes up through our own API relay | `Discovered endpoints` через релей даёт рабочий набор, `fallback активен` |
+| Ping for EU/US is displayed | замер публикует служба, экран берёт его по метке транспорта |
+| Attempt over a cached address — 4–5.4 s | было 17.5 с |
+| Promoting a successful method to the top after 20 s | `Opera EU удержалась 20 секунд. Поднимаем этот способ наверх очереди` |
+| Iteration state survives «Стоп» | после перезапуска перебор начинается с поднятого адреса |
+| «Стоп» → immediate «Пуск» is no longer lost | `Ждём завершения cleanup` → подключение за 430 мс |
+| An explicit region is not substituted with WARP | `регион выбран явно: временный WARP-bootstrap не запускаем` |
+| VLESS connects, the counter is honest | `перебор 305 профилей`, `VLESS активен — профиль 1/305` |
+| A doomed process does not raise a new session | `процесс :vpn обречён` в 19:34:38.983, падение в 19:34:40.6, туннель не пострадал |
+| An explicit launch removes the restart delay | после падения в 19:34:13.7 «Пуск» в 19:34:15.19 поднял процесс за 30 мс |
+| Our own restart beats Android | 22:28:35.939 `Scheduling restart … in 62646ms`, 22:28:35.975 `Повторяем запуск сами` — 36 мс |
+| Hello shape is browser-like, ALPN reduced | `TLS shape=chrome sni=vesta-1.web.telegram.org (substituted=false) version=0x0303 alpn="http/1.1"` |
+| Neutral SNI rollback fires | `neutral SNI refused for kws5-1.nova-app.eu (403 Forbidden)` → зона вернулась к литеральному имени |
+| «Стоп» → «Пуск» in WARP reaches the service | 23:26:18.9 стоп → 23:26:21.5 пуск → 23:26:21.7 служба приняла → 23:26:35.4 `STATE_CONNECTED` |
+| Hold is measured inside the connection window | `Удержание warp-awg-exact@…69.8:987: тишина 1059 мс за окно 16774 мс, проб 16` |
+| The tail of the window does not enter the measurement | 16 проб в окне удержания против 20 в окне качества — последние 2,5 с отрезаны |
+| The measurement survives quality publication | в выгрузке `hold_windows=1 … hold_grade=3` при том, что следом прошёл `WARP quality [ok]` |
+| Windows add up instead of overwriting each other | `hold_windows=2 hold_stall_ms=2117 hold_span_ms=33200` = сумма окон 1055+1062 и 16625+16575 |
+| A non-indicative window states its reason | `Удержание …69.8:987 не замерено: окно 0 мс короче 12000 мс. Проб 0` |
+| Switches are large and without labels | снимки экрана «Настройки»: белый бегунок на зелёной дорожке, серый на тёмной |
+| SNI substitution fully removed | за весь прогон адаптации ни одного `sni=` в попытках WARP; в выгрузке `preferred_sni` пуст у всех 50 |
+| Connection after a run does not stall | было около пяти минут перебора, стало `Успешное подключение на порту 7559` со второго профиля |
+| Adaptation walked all profiles | экран: `Адаптация завершена. Сохранено: 50  50/50`, 47 показательных окон |
+| The measurement separates nodes | здоровые 1,05–1,4 с тишины, четыре узла 7,8–15,4 с; промежуточных нет |
+| A bad node drops to the bottom of the queue | `8.39.125.3:987` (ping 49 мс) с 9-го места на 50-е |
+| The cheap measurement agreed with the expensive one | `8.39.214.9:500` назван и двухминутными окнами churn, и двадцатисекундным замером тишины |
+| Churn stopped being erased | на карточке появилось `Рукопожатий: 1,6/окно` — раньше счётчик не доживал до двух окон |
 
-### Собрано, но на устройстве не проверено
+### Built, not verified on device
 
-Экраны не экспортированы — `am start` от adb получает `SecurityException: not exported from uid
-10446`. Но пройти их можно как пользователь: `input tap/swipe` + `exec-out screencap`. Так и
-проверена разметка карточки. Оговорка: `uiautomator dump` отдаёт дерево **предыдущего** экрана,
-если снимать сразу после запуска, — сверяться нужно со скриншотом, иначе можно нажать не туда.
-Кнопка `>` рядом с «ОТКЛЮЧИТЬ» — это не выбор региона, а переподключение на следующую конфигурацию.
-Регион живёт в «Настройки → Выбор региона»: AUTO / WARP / EU / US / MASQUE. Поиск в списке
-приложений не терпит пробела в конце строки — с ним не находит ничего.
+Screens are not exported — `am start` from adb gets `SecurityException: not exported from uid 10446`.
+They can still be driven as a user: `input tap/swipe` + `exec-out screencap`; that is how the card
+layout was checked. Caveat: `uiautomator dump` returns the tree of the **previous** screen if taken
+right after launch — always cross-check against a screenshot, otherwise you tap the wrong thing. The
+`>` button next to «ОТКЛЮЧИТЬ» is not region choice, it is reconnect-to-next-config. Region lives in
+«Настройки → Выбор региона»: AUTO / WARP / EU / US / MASQUE. Search in the app list does not tolerate
+a trailing space — with one it finds nothing.
 
-Адрес подписки на случай восстановления:
+Subscription address for recovery:
 `https://raw.githubusercontent.com/luxxuria/harvester/refs/heads/main/speed_tested.txt`
-(307 профилей, интервал 12 ч).
+(307 profiles, 12 h interval).
 
-| Что | Как проверить | Что должно получиться |
+| What | How to check | Expected result |
 |---|---|---|
-| DNS `Virtual` вместо `OverTcp` у tun2proxy | EU + Chrome (владелец добавил его в список приложений VPN 2026-08-09) | имена резолвятся, страницы открываются |
-| Удаление профилей VLESS | экран конфигураций → удалить один; «Удалить все импортированные» | запись исчезает из обоих списков, активный профиль не пропадает |
-| Управление подпиской | сменить интервал, удалить подписку, удалить вместе с профилями | интервал сохраняется, профили уходят только при явном выборе |
-| Узлы, пропавшие из подписки | сменить адрес подписки на другой | старые узлы исчезают, а не копятся |
-| ~~Кнопки карточки на второй строке (`FlowLayout`)~~ | **проверено 2026-08-09** | шесть кнопок легли в две строки: `⇈ ↑ ↓ ⇊ Удалить` / `Копировать`, ничего не обрезано |
-| Выделение фокуса с пульта | открыть Nova на телевизоре, походить по меню | у строки под фокусом рамка втрое толще и подложка светлее; отличается не только цветом |
+| DNS `Virtual` instead of `OverTcp` for tun2proxy | EU + Chrome (the owner added it to the VPN app list on 2026-08-09) | names resolve, pages open |
+| Deleting VLESS profiles | configs screen → delete one; «Удалить все импортированные» | the entry disappears from both lists, the active profile does not vanish |
+| Subscription management | change the interval, delete the subscription, delete it together with the profiles | the interval is preserved, profiles go away only on an explicit choice |
+| Nodes that disappeared from the subscription | switch the subscription address to a different one | old nodes disappear instead of piling up |
+| ~~Card buttons on the second row (`FlowLayout`)~~ | **checked 2026-08-09** | six buttons laid out in two rows: `⇈ ↑ ↓ ⇊ Удалить` / `Копировать`, nothing clipped |
+| Focus highlight from the remote | open Nova on a TV, walk around the menu | the focused row has a three times thicker border and a lighter background; it differs by more than color |
 
-Проверяется по журналу, ждёт фоновой проверки Opera:
+Awaiting a background Opera check:
 
-- **Складывание списка адресов вместо замены.** Раньше проверить было нечем: единственная строка
-  про кэш (`Есть кэш Opera endpoints…`) печатает первые два адреса **вне остывания**, а не весь
-  список, — по ней слияние от замены не отличить, и это уже сбило один разбор. Добавлена строка
-  `Кэш Opera endpoints для X после слияния: было N, discover дал M, стало K: <список>`. Сам
-  `mergeKeepingOrder` покрыт тестами; проверить надо пайплайн.
-- **Нейтральный SNI** (проблема 2) — своя зона в маршрутах не участвует, пока выбрана квота
-  воркера (проблема 4).
+- **Merging the endpoint list instead of replacing it.** New log line
+  `Кэш Opera endpoints для X после слияния: было N, discover дал M, стало K: <список>` was added
+  because the only existing line (`Есть кэш Opera endpoints…`) prints the first two non-cooling
+  addresses, not the list — merge and replace were indistinguishable by it, and that already misled
+  one analysis. `mergeKeepingOrder` itself is covered by tests; the pipeline is what needs checking.
+- **Neutral SNI** (problem 1) — our own zone does not take part in routing while the worker quota is
+  exhausted (problem 2).
 
-## Открытые проблемы
+## Open issues
 
-### 1. Форма трафика Telegram: перенесена и проверена, кроме Opera-режима
+### 1. Telegram traffic shape: ported and verified, except Opera mode
 
-Маршрут Telegram уходил из открытого SNI: `dialTransparentTLSEndpoint` клал в `ServerName`
-литеральное `kwsN.nova-app.eu`. Одно правило `^kws\d+\.` кладёт весь пул разом — префикс общий, и
-пул из шести доменов стоит столько же, сколько один.
+The Telegram route leaked in cleartext SNI: `dialTransparentTLSEndpoint` put the literal
+`kwsN.nova-app.eu` into `ServerName`. One rule `^kws\d+\.` covers the whole six-domain pool — the
+prefix is shared, so the pool costs the same as one domain.
 
-Перенесено из Nova PC (`docs/adr/0004-neutral-sni.md`): в SNI уходит apex или `www.` той же зоны,
-маршрут остаётся в заголовке `Host`. Измерение на живом Worker сделано там же — расхождение SNI и
-Host край CF допускает внутри зоны и отвергает за её пределами (чужая зона даёт 403). Воркер менять
-не нужно. Чужие домены — собственные `kwsN.web.telegram.org` Telegram и воркеры общего пула — не
-трогаем: против них такого измерения никто не делал.
+Ported from Nova PC (`docs/adr/0004-neutral-sni.md`): SNI carries a neutral name of the same zone, the
+route stays in the `Host` header. CF edge tolerates SNI/Host divergence inside a zone and rejects it
+outside (a foreign zone gives 403). The worker needs no changes. Foreign domains — Telegram's own
+`kwsN.web.telegram.org` and the shared-pool workers — are left alone: nobody measured them. Rollback:
+the zone reverts to the literal name for 15 minutes if the handshake with the substituted name goes
+unanswered or the upgrade returns 403/421; failures before hello is sent and after an accepted
+handshake do not trigger it — the name took no part in them.
 
-Откат: зона возвращается к литеральному имени на 15 минут, если рукопожатие с подставленным именем
-осталось без ответа или upgrade вернул 403/421. Отказы до отправки hello и после принятого
-рукопожатия отката не вызывают — имя в них не участвовало.
+**ClientHello shape moved to uTLS.** Go's `crypto/tls` hello matches no browser, so the connection was
+separable long before the SNI name mattered. uTLS was already a core dependency (WARP registration), so
+no new one was needed. Shape lives in `nova-core/tlsshape`, Chrome first — the same browser the upgrade
+header claims to be. Exactly one failure phase rotates the shape (unanswered handshake) with a 20 s
+hold-off, because the candidate race hits several domains at once and without hold-off would burn the
+whole list in milliseconds without measuring a single shape. Neutral SNI is dropped in that same phase:
+one attempt cannot tell a name from a fingerprint, and both moves are cheap and reversible.
 
-**Форма ClientHello — перенесена на uTLS.** Рукопожатие писал `crypto/tls` из Go, чей hello не
-совпадает ни с одним браузером: соединение отделялось от браузерного раньше, чем начинало иметь
-значение имя в SNI. uTLS оказался уже в зависимостях ядра (1.7.3, его использует регистрация WARP),
-новой зависимости не потребовалось. Форма задаётся в `nova-core/tlsshape`, первым идёт Chrome — тот
-же браузер, которым представляется заголовок апгрейда.
+**Verified under WARP 2026-08-08:** relay came up (`профиль=wifi`), `TLS shape=chrome … alpn="http/1.1"`,
+WebSocket upgrade passes. No `Switching the TLS shape` in the log — Chrome shape accepted by all routes.
 
-Вращает форму ровно одна фаза отказа — рукопожатие без ответа, — с выдержкой 20 с: гонка кандидатов
-бьёт по нескольким доменам разом и без выдержки прокрутила бы весь список за миллисекунды, не
-измерив ни одной формы. В той же фазе снимается и нейтральный SNI: по одной попытке имя от отпечатка
-не отличить, оба хода дешёвые и обратимые.
+**Apex in SNI is wrong for some routes** (measured with a valid token, three identical runs): media route
+`kws5-1` rejects the apex `nova-app.eu` with **403**, while `www.nova-app.eu` and the literal name give
+429 (exhausted worker quota, i.e. the request reached our route); `kws2` accepts the apex (429 too —
+routed, not refused). Nova PC tested
+only `kws2` and generalized. Apex removed from candidates, only `www.` remains — accepted everywhere.
+Per-user name spread is lost, but a candidate that drags the zone into a 15-minute rollback on a third of
+the routes costs more. The zone has no wildcard (a random name does not resolve) and only apex, `www.`
+and `relay.` records exist — there is no third candidate. The rollback behaved as designed: caught the
+403, reverted the zone, left the hello shape alone (403 arrives after a completed handshake).
 
-**Проверено в режиме WARP 2026-08-08.** Релей поднялся (`профиль=wifi`), форма подтвердилась:
-`TLS shape=chrome … alpn="http/1.1"`. uTLS работает, ALPN сведён к HTTP/1.1, апгрейд WebSocket
-проходит. Строки `Switching the TLS shape` в журнале нет — форма Chrome принята всеми маршрутами.
+**The apex → `www.` fix is NOT verified on device and cannot be verified right now.** The 23:26 run has
+no `neutral SNI refused` line, but the substitution never fired either: routes went only through the
+foreign pool (`cakeisalie.co.uk`, `offshor.co.uk`, `pclead.co.uk`, `lovetrue.co.uk`,
+`noskomnadzor.co.uk`) and Telegram's own nodes; `*.nova-app.eu` did not participate at all. Cause is
+problem 2. An empty log here means "not attempted", not "works".
 
-Тот же прогон вскрыл ошибку в перенесённом решении: apex в SNI годится не для всякого маршрута.
-Замер с валидным токеном, три прогона подряд с одинаковым результатом:
+**There is no relay in Opera-only mode.** The transparent relay lives in `AndroidTUN` inside the Go core
+(`tunnel.go`, `tryHandleTelegramTransparent`), but on EU/US the tun-fd is handed to tun2proxy via
+`detachFd` and the core sees no packets. Also `setTelegramTransparentProxyConfigCompat` and
+`installTelegramWsSignatureSecret` are called from exactly one place — the warp-connect branch — and
+`configureAndStartOperaOnly` does not call them. So on EU/US the whole Telegram relay is structurally
+off, and with it neutral SNI and hello shape. They work only where the Go core owns the datapath: WARP
+and auto. **Owner decision (2026-08-08): leave it that way** — Telegram through Opera's Dutch exit works
+without slowdowns, the route is already outside Russia, there is nothing to bypass. A local proxy in
+front of `opera-proxy` that would return the relay to the Opera datapath was rejected as work without a
+task. If Telegram on EU ever starts lagging, this note says what to do.
 
-| Маршрут (`Host`) | SNI | Ответ |
-|---|---|---|
-| `kws5-1.nova-app.eu` | `kws5-1.nova-app.eu` | 429 |
-| `kws5-1.nova-app.eu` | `nova-app.eu` | **403** |
-| `kws5-1.nova-app.eu` | `www.nova-app.eu` | 429 |
-| `kws2.nova-app.eu` | `nova-app.eu` | 429 |
+The log silence that cost a run is closed: a disabled relay now states its reason — no messengers on the
+device, or they are not in split tunneling.
 
-429 — исчерпанная квота воркера, то есть запрос дошёл до нашего маршрута. Nova PC проверяла только
-`kws2` и обобщила apex на всю зону; медийный `kws5-1` его отвергает. Апекс убран из кандидатов,
-остался `www.` — он принимается везде. Разброс имён между пользователями при этом теряется, но
-кандидат, уводящий зону в пятнадцатиминутный откат на трети маршрутов, дороже разброса. Wildcard у
-зоны нет (случайное имя не резолвится), собственные записи только у apex, `www.` и `relay.` — так
-что третьего кандидата взять неоткуда.
+**Not ported, and why:**
 
-Откат при этом сработал ровно как задуман: 403 поймал, зону вернул к литеральному имени, форму
-hello не тронул — 403 приходит после завершённого рукопожатия, форма в нём не участвует.
+- **Phase attribution of failures** (`docs/adr/0003-tunnel-phases.md`). `raceTransparentDomains` applies
+  a flat 45 s cooldown to any error, including ones the domain is not to blame for. The route model
+  differs: PC penalizes egress, here it is the (IP, domain) pair. The mapping must be designed, not
+  guessed.
+- **Header persona.** On PC the headers come from the same browser whose ClientHello is in the profile.
+  Here the upgrade header is hand-built and only `User-Agent` pretends to be Chrome. All inside TLS and
+  invisible from outside — but switching the shape to Firefox or OkHttp breaks the persona.
+- **winws strategies** (`strat/*.json`). Those are zapret arguments over WinDivert, a Windows kernel
+  driver. There is no Android analogue and cannot be: bypass here is built with a tunnel, not by
+  rewriting packets in flight.
 
-**Правка apex → `www.` на устройстве не проверена, и проверить её сейчас нечем.** В прогоне
-23:26 строки `neutral SNI refused` действительно нет — но и подстановка ни разу не сработала:
-маршруты шли только через чужой пул (`cakeisalie.co.uk`, `offshor.co.uk`, `pclead.co.uk`,
-`lovetrue.co.uk`, `noskomnadzor.co.uk`) и собственные узлы Telegram, а `*.nova-app.eu` не
-участвовал вовсе. Причина — проблема 4. Пустой журнал здесь означает «не пробовали», а не
-«работает».
+### 2. Own zone hits the worker quota — falling back to the foreign pool is accepted, and now visible
 
-**В режиме Opera-only релея нет.** Прозрачный релей живёт в `AndroidTUN` внутри Go-ядра
-(`tunnel.go`, `tryHandleTelegramTransparent`), а на EU/US tun-fd отдан tun2proxy через `detachFd`,
-и ядро не видит ни одного пакета. Вдобавок `setTelegramTransparentProxyConfigCompat` и
-`installTelegramWsSignatureSecret` зовутся ровно из одного места — ветки warp-connect, — и в
-`configureAndStartOperaOnly` их нет.
+Measured from the dev machine: **any** request to `kws2.nova-app.eu` and `kws5-1.nova-app.eu` answers
+`429 Too Many Requests` — with and without a valid token, with literal and substituted name. 429 from a
+Cloudflare Worker means the daily quota is spent. So our own leg of the Telegram relay does not work at
+all, and has not for some time (the same 429s were present in the measurement that uncovered the apex
+story). In practice the relay lives on the foreign shared-pool domains, where the WSS signature and the
+neutral SNI simply do not exist.
 
-Значит **на EU/US весь релей Telegram выключен структурно**, а вместе с ним и нейтральный SNI, и
-форма hello. Работают они только там, где датапуть держит Go-ядро: WARP и авто.
+**Owner decision (2026-08-08): keep working this way.** The worker plan is free, 200 000 requests/day;
+when our own zone hits the quota we rely on the pool's foreign domains. This is a normal fallback, not a
+defect.
 
-**Решение владельца (2026-08-08): так и оставить.** Telegram через голландский выход Opera работает
-без замедлений — маршрут и так вне России, обходить нечего. Локальный прокси перед `opera-proxy`,
-который вернул бы релей в датапуть Opera-режима, отклонён как работа без задачи. Если Telegram на
-EU однажды начнёт тормозить — вот здесь записано, что делать.
+**Fixed:** the fallback no longer stays silent. An unusable own-zone route now prints
+`own-zone route … is unusable`, budgeted at 8 lines per session. (`cfpool:` named the chosen domain but
+never said that none of ours were left, and the empty log read as "SNI substitution took hold".)
 
-Молчание журнала, стоившее прогона, закрыто: выключенный релей теперь называет причину — нет
-мессенджеров на устройстве или они не попали в раздельное туннелирование.
+**Still open:** who is spending the quota — our own pool iteration or third-party clients that learned
+the names from the public repository. While the quota is spent, neutral SNI cannot be verified on device.
 
-**Не перенесено, и почему:**
+### 3. WARP rebuilds the handshake every 16–31 seconds — cause: path quality to a specific node
 
-- **Фазовая атрибуция отказов** (`docs/adr/0003-tunnel-phases.md`). `raceTransparentDomains` даёт
-  плоское остывание 45 с на любую ошибку, включая ту, где домен не виноват. Перенос упирается в то,
-  что модель маршрута другая: на ПК наказывается egress, здесь — пара (IP, домен). Раскладка нужна
-  своя, догадкой её делать нельзя.
-- **Персона заголовков.** На ПК заголовки сняты с того же браузера, чей ClientHello в профиле.
-  Здесь заголовок апгрейда собран вручную и Chrome изображает только `User-Agent`. Всё это внутри
-  TLS, снаружи не видно — но при смене формы на Firefox или OkHttp персона перестаёт сходиться.
-- **Стратегии winws** (`strat/*.json`, правки владельца в дереве Nova PC). Это аргументы zapret
-  поверх WinDivert — драйвера ядра Windows. Android-аналога нет и быть не может: обход здесь
-  строится туннелем, а не правкой пакетов на лету.
+Baseline measurement 2026-08-09 (7 min, `warp-awg-exact`): 18 handshake initiations, 18 responses, 17
+`Retrying handshake because we stopped hearing back after 15 seconds`, 37 keepalives sent, **0
+keepalives received**, zero decryption/MAC/drop errors. Each handshake completes in 40–60 ms first try;
+15 s later the node goes quiet and WireGuard rebuilds the session. Ping dips land exactly in those gaps.
+**The handshake path is fine; the reverse transport stream disappears.**
 
-### 2. Своя зона упирается в квоту воркера — отход на чужой пул принят, теперь он виден
+**Reference thresholds.** A healthy WireGuard session rekeys once per two minutes = 0,5/min. Measured
+1,5–3,0/min = three to six times the norm. Churn is sampled by `sampleTunnelRekeyChurn` over 2-minute
+windows off `last_handshake_time_sec`; windows with < 32 KB tx (`TUNNEL_REKEY_MIN_TX_KB = 32`) are marked
+non-indicative.
 
-Замер с машины разработчика: **любой** запрос к `kws2.nova-app.eu` и `kws5-1.nova-app.eu` отвечает
-`429 Too Many Requests` — с валидным токеном и без него, с литеральным именем и с подставленным.
-429 у Worker'а Cloudflare означает выбранную дневную квоту. То есть собственная нога релея Telegram
-сейчас не работает совсем, и работает она не с сегодняшнего дня: те же 429 стояли и в замере,
-который вскрыл историю с apex.
+**Cause confirmed 2026-08-10** — same build, same network, natural traffic, two nodes back to back:
 
-Практически это значит: релей живёт на чужих доменах общего пула. Подпись WSS и нейтральный SNI на
-этом пути не задействованы — у чужих воркеров их попросту нет.
-
-**Решение владельца (2026-08-08): так и работать.** План воркера бесплатный, 200 000 запросов в
-сутки; когда своя зона упирается в квоту, ориентируемся на чужие домены пула. Отход штатный, а не
-дефект.
-
-**Что исправлено:** отход больше не молчит. `cfpool:` называл выбранный домен, но не говорил, что
-своих в списке не осталось, — и пустой журнал читался как «подстановка SNI прижилась», хотя своя
-зона не участвовала ни разу. Теперь неудачный маршрут через свою зону печатает
-`own-zone route … is unusable`, с бюджетом в 8 строк на сессию.
-
-Остаётся открытым: кто выбирает квоту — мы сами перебором пула или сторонние клиенты, узнавшие
-имена из публичного репозитория. Пока квота выбрана, нейтральный SNI на устройстве не проверить.
-
-### 3. WARP пересобирает рукопожатие каждые 16–31 секунду
-
-Замер сессии 2026-08-09, 10:54:51 → 11:01:52 (7 минут), профиль `warp-awg-exact`:
-
-| Событие | Раз |
-|---|---|
-| `Sending handshake initiation` | 18 |
-| `Received handshake response` | 18 |
-| `Retrying handshake because we stopped hearing back after 15 seconds` | 17 |
-| `Sending keepalive packet` | 37 |
-| `Receiving keepalive packet` | 0 |
-| ошибки расшифровки, MAC, дропы | 0 |
-
-Каждое рукопожатие проходит за **40–60 мс** и с первого раза, ошибок приёма нет вообще. Но через
-15 секунд после каждого узел замолкает, и WireGuard пересобирает сессию: 10:54:51 → 10:55:21 →
-10:55:48 → 10:56:04 → 10:56:35 → 10:57:01 → 10:57:28 → 10:57:59. Провалы пинга ложатся ровно в эти
-разрывы.
-
-Путь рукопожатия исправен, пропадает **обратный транспортный поток**. Замером причину пока не
-сузили. Кандидаты по правдоподобию: узел не отвечает ничем на keepalive (за семь минут ни одного
-полученного пакета); `reserved` выключен (`WARP Reserved Mode configured: off`), а край Cloudflare
-может требовать его в транспортных пакетах; endpoint просто плохой — рядом в списке лежит
-конфигурация с качеством 100% и пингом 30 мс против текущих 65% и 46 мс.
-
-**Замер встроен и работает.** `sampleTunnelRekeyChurn` считает, как часто меняется
-`last_handshake_time_sec`, окнами по 2 минуты. Телеметрия уже была — на неё просто никто не смотрел
-во время работы. Первые окна на устройстве:
-
-```
-12:08:18 Туннель нестабилен: 5 перерукопожатий за 121 с (2,5/мин), backend=WARP
-12:10:20 Туннель нестабилен: 6 перерукопожатий за 121 с (3,0/мин), backend=WARP
-12:12:22 Туннель нестабилен: 3 перерукопожатий за 121 с (1,5/мин), backend=WARP
-```
-
-Здоровая сессия WireGuard меняет ключ раз в две минуты — это 0,5/мин. Мы держим 1,5–3,0/мин, то
-есть **в три–шесть раз чаще нормы**. Теперь есть чем сравнивать конфигурации между собой.
-
-#### Опыт с junk: гипотеза проверена и отвергнута
-
-Отладочный ключ `SET_AWG_JUNK` (adb, своего экрана нет намеренно) убирает из конфигурации `Jc`,
-`Jmin`, `Jmax`, `I1..I5`, оставляя `S1..S4` и `H1..H4`. Четыре сессии 2026-08-09:
-
-| Прогон | junk | Узел | Подключение | Перерукопожатий |
-|---|---|---|---|---|
-| базовый | вкл | .232.202 | быстрое | 5, 6, 3 за окно (до 3,0/мин), ядро 15 за сессию |
-| A | **выкл** | .204.3:7559 | быстрое | **0, 0, 0** |
-| контроль | вкл | .214.9:500 | быстрое | 2, 3, 6 (до 3,0/мин), ядро 9 |
-| B | **выкл** | — | **не состоялось: 42/50 перебора** | — |
-| восстановление | вкл | .214.9:500 | 20 секунд | — |
-
-Первый вывод напрашивался сам: junk нужен, чтобы войти, и он же роняет сессию. **Он не подтвердился
-— замер был с дырой.** Таймер перерукопожатия взводит только отправка данных; на молчащем туннеле
-ноль получается сам собой, безо всякого здоровья. Прогон A мог просто простоять без трафика, и
-сравнивать его с нагруженным базовым прогоном было нельзя. Прогон B (42/50 без подключения) при этом
-остаётся фактом: junk действительно нужен, чтобы рукопожатие прошло.
-
-**Инструмент исправлен:** окно замера печатает рядом объём трафика
-(`трафик N/M КБ tx/rx`), а окна с отправкой меньше 32 КБ помечаются как непоказательные.
-
-**Опыт переснят честным инструментом — гипотеза не подтвердилась.**
-
-| junk | Узел | Трафик за окно | Перерукопожатий |
-|---|---|---|---|
-| вкл | .214.9:500 | 365–416 КБ tx | 2, 2, 3, 2 (1,0–1,5/мин) |
-| **выкл** | перебор | — | **сессия не встала: перебор конфигураций без подключения, второй раз подряд** |
-
-Прежний «ноль без junk» был окном без трафика. При сопоставимой нагрузке сравнивать не с чем:
-без junk туннель просто не поднимается. **Junk не причина нестабильности — он условие
-подключения.** Идея «снять junk после рукопожатия» повисает без основания: снимать нечего, пока
-не показано, что он вредит уже поднятой сессии.
-
-#### `reserved` отпал — проверено по данным, без прогона
-
-Выгрузка встроенных конфигураций (`warp_verified_export.json`, доступна через adb) — **96 записей,
-ни одной с `Reserved`**. Клиентского идентификатора WARP в них нет, значит «включить reserved»
-означало бы записать `0,0,0`, то есть ровно то же самое, что и сейчас. Замер измерил бы шум.
-
-#### Все встроенные профили несут одинаковые параметры AWG
-
-Из той же выгрузки: `Jc = 4` — 96 раз, `Jmin = 40` — 96, `Jmax = 70` — 96, `S1..S4 = 0` — 96,
-`H1..H4 = 1,2,3,4` — 96. Различаются только endpoint и ключи.
-
-Отсюда два следствия. Первое: «переключиться на другой профиль» не меняет форму AWG вообще — только
-узел, и сообщение с таким советом ввело бы в заблуждение. Второе: чтобы разнообразие параметров
-вообще появилось, менять надо сами seed-данные, а не код.
-
-#### Причина: качество пути до конкретного узла (подтверждено 2026-08-10)
-
-Два узла подряд, одна сборка, одна сеть, естественный трафик:
-
-| Узел | Трафик за окно | Перерукопожатий |
+| Node | Traffic per window | Rekeys |
 |---|---|---|
 | `.214.9:500` | 219–302 КБ tx | 5, 4, 4, 5 — **2,0–2,5/мин** |
 | `.69.8:987` | 395–442 КБ tx | 2, 1, 2 — **0,5–1,0/мин** |
 
-Второй узел вдвое-вчетверо спокойнее, **неся при этом больше трафика**. Значит churn — свойство
-пути, а не конфигурации клиента: параметры AWG у всех 96 профилей одинаковые, а поведение разное.
+The second node is 2–4× calmer while carrying **more** traffic. AWG parameters are identical on all 96
+bundled profiles, so churn is a property of the path, not of the client config.
 
-Здесь же пригодилась починка инструмента: окно сразу после переключения помечено
-`Туннель молчал: трафик 0/0 КБ` и в сравнение не пошло.
+**Disproven hypotheses — do not retry:**
 
-#### Churn включён в ранжирование (2026-08-10)
+- **junk is not the cause of churn — it is a precondition for the handshake.** Debug key `SET_AWG_JUNK`
+  (adb only, no UI screen on purpose) strips `Jc`, `Jmin`, `Jmax`, `I1..I5`, keeping `S1..S4`/`H1..H4`.
+  The first experiment "0 rekeys without junk" was an artifact of a silent tunnel (the rekey timer is
+  armed only by data being sent). Tool fixed first: the window now prints `трафик N/M КБ tx/rx` next to
+  the count. Re-run honestly with that denominator: with junk at comparable load 1,0–1,5/min; without
+  junk the session does not come up at all (config iteration without connection, twice in a row — 42/50
+  profiles walked with no connection on the first). "Strip junk after the handshake" has no basis —
+  nothing shows it harms an already-established session.
+- **`reserved` is irrelevant — checked from data, no run needed.** `warp_verified_export.json` (available via adb) has 96
+  records, **none with `Reserved`**, and no WARP client id, so "enable reserved" would write `0,0,0` —
+  exactly what is there now. The measurement would measure noise.
+- **amneziawg-go upstream keepalive fix does not help.** Bundled copy was 4 months behind (2026-03-31);
+  upstream commit `08d68cd` **`fix: keepalives are ignored`** matched the symptom by description. Ported
+  (two files; the `padding` field from a neighbouring commit was not pulled). Measurement after it:
+  **6, 7, 6 rekeys per window (3,0–3,4/min)** — no change. The fix is kept (correct on its merits,
+  harmless), but the cause is not there: zero keepalives were received all session, so the receiving half
+  is inapplicable and the sending half does not matter because real traffic arms the timer honestly. The
+  reverse stream really disappears; it is not a bookkeeping loss.
+- **All bundled profiles carry identical AWG parameters.** From the same export: `Jc = 4` ×96,
+  `Jmin = 40` ×96, `Jmax = 70` ×96, `S1..S4 = 0` ×96, `H1..H4 = 1,2,3,4` ×96; only endpoint and keys
+  differ. Consequences: "switch to another profile" changes no AWG shape at all, only the node (a message
+  advising it would mislead); and to get parameter diversity you must change the seed data, not the code.
+- **AWG parameters are applied verbatim** — verified in code, not guessed. `tunnel.go` writes every `jc`,
+  `jmin`, `jmax`, `s1..s4`, `h1..h4`, `i1..i5` into UAPI as-is; bundled `amneziawg-go/device/uapi.go`
+  parses each and **returns an error** on an unknown key (`invalid UAPI device key`), so the tunnel would
+  not come up at all. `awg_compat.go` is stubs: validation only.
 
-Частота перерукопожатий стала признаком качества узла наравне с пингом. Цепочка целиком:
-показательное окно (трафик ≥ 32 КБ) → `recordWarpConfigChurn(host, port)` → поля `churnWindows` и
-`churnRekeys` у записи → штраф в числовой оценке → порядок перебора.
+**Churn in ranking (2026-08-10).** Chain: indicative window (tx ≥ 32 KB) → `recordWarpConfigChurn(host,
+port)` → `churnWindows`/`churnRekeys` on the record → penalty in the numeric score → iteration order.
+Penalty from a healthy 1 per 2-minute window: `(churn − 1) × 12`, cap 36 (so one bad evening does not
+bury a node forever); at 12 windows the counters are halved (aging, otherwise a node that went bad a
+month ago never recovers). Silent windows are excluded — a zero there comes for free and would inflate a
+node that carried nothing; in particular the window right after switching nodes is marked
+`Туннель молчал: трафик 0/0 КБ` and never enters a comparison. The configs screen shows «Удержание: N/окно» next to «Качество» so that a
+changed sort order has a visible explanation. Device-confirmed: `8.39.214.9:500 windows=2 rekeys=13`
+(6,5 per window vs a healthy 1 = full penalty cap).
 
-Штраф считается от здоровой единицы на двухминутное окно: `(churn − 1) × 12`, потолок 36. Потолок
-нужен, чтобы один плохой вечер не хоронил узел навсегда; по достижении 12 окон счётчики делятся
-пополам — старение, иначе испортившийся месяц назад узел не отмоется никогда.
+**Not done:** actively moving off a bad node on a live session. Churn only affects the order of the next
+iteration — a working tunnel is not torn down for statistics.
 
-Молчащие окна в оценку не идут: там ноль получается сам собой и завысил бы узел, который ничего не
-вёз. На экране конфигураций рядом с «Качество» появилось «Удержание: N/окно» — иначе сортировка
-меняется, а объяснения нет.
+**The churn penalty never reached the queue (found and fixed 2026-08-10).** `buildBuiltInWarpAttemptSet`
+sorted bundled profiles by `compareBy { seedOrder }` and `sortedVerifiedWarpConfigs` by `promotedAt` then
+`seedOrder`. The asset has 50 records with `seed_order` 0..49, all distinct (verified by script), so the
+first key never ties and `qualityTier`, `qualityPingSuccesses`, `qualityAvgPingMs` and
+`getWarpVerifiedPriorityScore` behind it were unreachable — any measurement affected only card order on
+screen. Fixed by coarsening: `SessionHoldMetric.bundledSeedQueueBucket` buckets profiles by ten — the
+firmware order keeps coarse authority (first ten before second ten), measurements decide inside a bucket.
+Removing `seedOrder` outright was rejected: it carries the manual rank from the Pixel 4a export and there
+is nothing to replace it with on an unmeasured network. Exact `seedOrder` is appended as the last
+tie-breaker so that without measurements the order stays as before and stable across launches.
 
-**Проверено на устройстве:** после двух окон в выгрузке появилось
-`8.39.214.9:500 windows=2 rekeys=13` — тот самый узел, который весь вечер давал 2–3 перерукопожатия
-в минуту. 6,5 на окно против здоровой единицы дают полный потолок штрафа.
+### 3a. Session hold: cheap measurement inside the adaptation window (2026-08-10)
 
-Попутно закрыта утечка: три места пересобирают запись конфигурации заново, а не через `copy`, и
-первая же переоценка качества стирала бы накопленный замер. Историю переносим руками.
+Adaptation measured ping and the fact of connecting. A node losing the reverse stream is normal on both —
+that is how it stayed at the top. Measuring churn with 2-minute windows over 50 profiles would take ~100
+minutes, so the metric was built from what already runs.
 
-**Не сделано:** активный увод с плохого узла на живой сессии. Пока churn только влияет на порядок
-следующего перебора — рвать работающий туннель ради статистики не стали.
+**What is counted.** `startWarpQualitySampling` already probes connectivity once a second for a 20 s
+window; a probe is data sent, a successful probe is a packet received from the tunnel. So **the longest
+silence between successful probes** is the same physical signal with twenty samples instead of one bit,
+and it triggers earlier: a five-second gap causes no rekey but does show as silence. It adds to coverage
+rather than duplicating it — twelve scattered failures and twelve consecutive ones both read "12/20" but
+describe different nodes. Logic is isolated in the pure `SessionHoldMetric`, covered by 23 tests.
 
-#### Штраф за churn до очереди не доходил (2026-08-10)
+**Counting rekeys in that window was rejected on analysis, not for cost.** The timer is armed by data and
+fires after 15 s of silence; the window opens after data-plane confirmation. Per the 2026-08-09 log the
+reverse stream lived 1, 11, 12, 12, 15, 16, 16 s after a handshake — a rekey lands in a 20 s window about
+one time in seven, so a bad node would usually show an honest zero just like a good one. Two side issues
+die with it: MASQUE stamps the handshake mark once per tunnel (zero rekeys would mean "not measured", not
+health), and on a tunnel being torn down `last_handshake_time_sec` goes to zero and would read as an
+extra rekey. A probe-based signal is free of both.
 
-Запись выше — «штрафует его оценку → порядок перебора» — была верна только в первой половине.
-Подтверждение с устройства доказывало накопление счётчиков в выгрузке, а не изменение порядка, и
-порядок как раз не менялся: `buildBuiltInWarpAttemptSet` сортировал встроенные профили
-`compareBy { seedOrder }`, а `sortedVerifiedWarpConfigs` — `promotedAt`, затем `seedOrder`. В ассете
-пятьдесят записей с `seed_order` 0..49, все разные (проверено скриптом), поэтому равенства по
-первому ключу не бывает никогда, и `qualityTier`, `qualityPingSuccesses`, `qualityAvgPingMs` и
-`getWarpVerifiedPriorityScore` за ним были недостижимы. Любой замер — и churn, и новый — влиял бы
-только на порядок карточек на экране, где оценка стоит выше пинга. Это самый дорогой вид дефекта:
-он выглядит как успех.
+**Constraints that keep the metric honest:**
 
-Починено огрублением: `SessionHoldMetric.bundledSeedQueueBucket` кладёт профили в корзины по
-десять. Прошивочный порядок сохраняет грубую власть — первая десятка идёт раньше второй, — а внутри
-десятки решают замеры с устройства. Полное удаление `seedOrder` отвергнуто: он несёт ручной ранг из
-выгрузки Pixel 4a, и на неизмеренной сети заменять его нечем. Точный `seedOrder` дописан последним
-тай-брейком, чтобы без замеров порядок остался прежним и одинаковым от запуска к запуску.
+- **Silence in milliseconds, not in failed-probe count.** A failed probe costs ~1,1 s on top of the sleep,
+  a successful one tens of ms, and on a slow device the loop step is 1,5×: the same "5 in a row" would
+  mean different durations on different nodes. The denominator — probe count and actual window length —
+  is always logged alongside.
+- **`uptimeMillis`, not `elapsedRealtime`** (see the gotcha). Unobserved sleep time is not counted, and a
+  slept-through window ends up too short and is discarded.
+- **Tail of the window cut by 2,5 s.** The attempt's hold window and the measurement window are equal and
+  start from the same mark, so the last iterations hit an already-tearing-down tunnel. Probes there fail
+  and would add silence to **every** profile, including healthy ones — biasing exactly those that
+  survived the window.
+- **Its own indicativeness threshold.** `TUNNEL_REKEY_MIN_TX_KB = 32` does not apply here: probes move
+  single kilobytes and every window would be dropped silently. Indicative = duration ≥ 12 s and ≥ 5
+  probes; a non-indicative window states its reason in the log.
+- **An iteration with no VPN network sent nothing** — that silence is not charged to the node, but the
+  window after it is not counted as full either. Silence accumulated **before** the skip does count: it
+  was measured by real probes through a live tunnel.
+- **"No data" is −1, not zero.** Zero is indistinguishable from perfect, and an unmeasured node must not
+  look flawless.
 
-### 3а. Удержание сессии: дешёвый замер в окне адаптации (2026-08-10)
+**How it influences ranking.** The grade is coarse — four levels (держит / проседает / неизвестно /
+теряет поток) — and it is inserted as an early key in four sorts right after `qualityTier`, above ping,
+because ping on such a node is normal. The numeric penalty shares a common cap with churn: both describe
+the same path defect and on a normal connection are taken from the same seconds, so two independent
+deductions would skew the score. The hold penalty decays with measurement age over six hours — churn has
+no such decay, and a month-old sample there penalizes like yesterday's.
 
-Адаптация меряла пинг и факт подключения. У узла, теряющего обратный поток, обе величины
-нормальные — на этом он и держался наверху списка. Мерить churn двухминутными окнами по всем 50
-профилям — около ста минут, поэтому замер сделан из того, что уже есть.
+**What the metric cannot see.** A profile that does not survive to the end of the window gets no
+measurement (`spanMs` < 12 s → window discarded). Such nodes are punished by other mechanisms
+(`qualityFailureCount`, runtime outcomes, `qualityTier`). The purpose of the signal is to separate the
+profiles that **did** survive the window and previously looked equally good.
 
-**Что считается.** `startWarpQualitySampling` и так крутит пробу связности раз в секунду в течение
-двадцатисекундного окна. Проба — это отправка данных, удачная проба — принятый из туннеля пакет.
-Значит **самая длинная тишина между удачными пробами** и есть тот же физический признак, только с
-двадцатью отсчётами вместо одного бита, и наступающий раньше: пятисекундный провал перерукопожатия
-не вызовет, а тишину покажет. К покрытию это добавка, а не его повтор — двенадцать неудач вразброс
-и двенадцать подряд дают одинаковые «12/20», но описывают разные узлы. Логика вынесена в чистый
-`SessionHoldMetric` и покрыта 23 тестами.
+#### Full 50-profile runs (2026-08-10, confirmed by export)
 
-**От счёта перерукопожатий в этом окне отказались, и это разбор, а не экономия.** Таймер взводится
-отправкой данных и срабатывает через 15 секунд молчания; окно открывается после подтверждения
-data-plane. По журналу 2026-08-09 обратный поток жил после рукопожатия 1, 11, 12, 12, 15, 16, 16
-секунд — в двадцатисекундное окно перерукопожатие попадает примерно раз из семи. То есть у плохого
-узла там чаще всего честный ноль, такой же, как у хорошего. Заодно отпали два побочных вопроса:
-у MASQUE метка рукопожатия ставится один раз за туннель, и «ноль перерукопожатий» означал бы там не
-здоровье, а отсутствие замера; а на разбираемом туннеле `last_handshake_time_sec` уходит в ноль и
-читался бы как лишнее перерукопожатие. Признак на пробах свободен от обоих.
+Run split the nodes: **43 hold, 4 lose the stream, 3 unmeasured**. No intermediate grade ever appeared —
+nodes are silent either ~1 s or for a long time.
 
-**Что пришлось учесть, чтобы замер не врал:**
-
-- **Тишина в миллисекундах, а не в числе неудачных проб.** Неудачная проба стоит около 1,1 с сверх
-  сна, удачная — десятки миллисекунд, а на слабом устройстве шаг цикла ещё и полуторный: одно и то
-  же «5 подряд» означало бы у разных узлов разное время. Рядом всегда лежит знаменатель — число
-  проб и фактическая длительность окна.
-- **Часы `uptimeMillis`, а не `elapsedRealtime`.** Второй идёт и во сне устройства. В журнале
-  Pixel 4 XL есть окна вида `4/4, avg=56836ms` — пробы удались, но между ними телефон спал почти
-  минуту. По `elapsedRealtime` это выглядело бы как минута молчания узла. `uptimeMillis` во сне
-  стоит, поэтому непронаблюдённое время просто не засчитывается, а спавшее окно окажется слишком
-  коротким и будет отброшено.
-- **Хвост окна отрезан на 2,5 с.** Окно удержания попытки и окно замера равны и отсчитываются от
-  одной отметки, поэтому последние итерации приходятся на уже разбираемый туннель. Проба по нему
-  падает и добавляла бы тишину **каждому** профилю, включая здоровые, — смещение било бы ровно по
-  тем, кто окно выдержал. Подтверждено на устройстве: 16 проб в окне удержания против 20 в окне
-  качества.
-- **Порог показательности свой.** `TUNNEL_REKEY_MIN_TX_KB = 32` сюда не годится: пробы дают единицы
-  килобайт, и каждое окно отбрасывалось бы молча. Показательность — по длительности (≥ 12 с) и
-  числу проб (≥ 5); непоказательное окно называет причину в журнале.
-- **Итерация без VPN-сети наружу ничего не отправила** — такую тишину узлу не приписываем, но окно
-  после неё полноценным не считаем. Тишина, накопленная **до** пропуска, при этом засчитывается:
-  она измерена настоящими пробами через живой туннель.
-- **«Нет данных» — это −1, а не ноль.** Ноль неотличим от идеала, и неизмеренный узел не должен
-  выглядеть безупречным.
-
-**Как влияет.** Оценка грубая — четыре градации (держит / проседает / неизвестно / теряет поток), и
-именно она вставлена ранним ключом в четыре сортировки сразу после `qualityTier`; выше пинга, потому
-что пинг у такого узла нормальный. Числовой штраф добавлен в оценку, но общим потолком с churn:
-оба замера описывают один дефект пути и на обычном подключении снимаются с одних и тех же секунд,
-так что два независимых вычета перекосили бы оценку. Штраф затухает по возрасту замера за шесть
-часов — у churn такого затухания нет, и замер месячной давности штрафует там как вчерашний.
-
-**Чего замер не видит.** Профиль, не доживший до конца окна, замера не получает: у него `spanMs`
-меньше двенадцати секунд, и окно отбрасывается. Такие узлы наказываются другими механизмами
-(`qualityFailureCount`, runtime-исходы, `qualityTier`). Задача признака — разделить те профили,
-которые окно **выдержали**, а раньше выглядели одинаково хорошими.
-
-#### Прогон по всем 50 профилям (2026-08-10, подтверждено выгрузкой)
-
-Замер показателен: **43 держат, 4 теряют поток, 3 без замера**. Промежуточной градации не
-встретилось ни разу — узлы либо молчат около секунды, либо надолго.
-
-| Узел | Тишина | Ping | Качество | Ранг до → после |
+| Node | Silence | Ping | Quality | Rank before → after |
 |---|---|---|---|---|
 | `8.39.125.3:987` | 7,8 с | 49 мс | 4/19 | **9 → 50** |
 | `8.47.69.8:946` | 15,4 с | 42 мс | 6/9 | 32 → 45 |
 | `8.6.112.8:1070` | 11,5 с | 42 мс | 5/8 | 34 → 47 |
 | `8.39.214.9:500` | 15,3 с | 38 мс | 5/8 | 45 → 46 |
 
-Здоровые узлы легли в 1,05–1,4 с — это разрешающая способность замера, шаг опроса. То есть между
-классами разрыв в семь-пятнадцать раз, а внутри здорового класса разброса почти нет: порог
-спокойствия в 3 с проходит посередине пустого места, а не по краю облака точек.
+Healthy nodes land at 1,05–1,4 s — that is the resolution of the metric (the poll step). The gap between
+classes is 7–15×, spread inside the healthy class is almost nil: the 3 s calm threshold passes through
+empty space, not along the edge of a point cloud.
 
-Два независимых подтверждения:
+Three independent instruments converged on `8.39.214.9:500`: 2-minute churn windows, the 20 s
+probe-silence metric (which knows nothing about handshakes), and the second clean run. `8.39.125.3:987`
+stood **ninth** and fell to last with ping 49 ms — by the old metrics it had no complaints.
 
-- `8.39.214.9:500` — тот самый узел, который 2026-08-09 дал 2,0–2,5 перерукопожатия в минуту в
-  двухминутных окнах. Двадцатисекундный замер по пробам, ничего не знающий о рукопожатиях, назвал
-  его же. Дорогой и дешёвый инструменты сошлись на одном узле.
-- `8.39.125.3:987` стоял **девятым** и упал на последнее место. У него пинг 49 мс — прежними
-  мерками претензий нет.
+**Second run was clean** (after SNI substitution was removed, see 3b): 50/50, 46 indicative windows,
+`preferred_sni` empty on all profiles, same four worst nodes.
 
-Заодно подтвердилось, что починка утечки работает: на карточках появилась строка
-`Рукопожатий: 1,6/окно`. Раньше её не было никогда — `churnWindows` не мог дорасти до двух, потому
-что каждое окно замера обнуляло счётчик.
+**Bundled order in `warp_verified_seeds.json` rebuilt from the clean run.** The key change:
+`8.39.214.9:500` carried `seed_order = 0`, i.e. **every user tried it first** — the very node listed
+since 9 August as losing the reverse stream. It is now 45th; 48 of 50 profiles changed position. Order is
+generated by `tools/generate_warp_verified_seeds_from_export.py` from `release_seed_items`, which is
+written in `sortWarpVerifiedConfigs` order (hold as an early key). Previously the basis was the manual
+Pixel 4a rank (`source_file: pixel4a_export_rank_*`) built on ping.
 
-**Строка карточки не помещалась.** `tv_config_meta` был `maxLines="1"`, и новый показатель
-обрезался ровно на себе: «Удержание: держи…». Разрешены две строки, формулировка укорочена до
-«Удержание: держит 1,4 с» — полная форма со знаменателем осталась в журнале.
+UI note: `tv_config_meta` was `maxLines="1"` and the new indicator truncated itself («Удержание:
+держи…»). Two lines allowed, wording shortened to «Удержание: держит 1,4 с»; the full form with the
+denominator stays in the log.
 
-#### Чистый прогон и новый порядок профилей в прошивке (2026-08-10)
+### 3b. Masking SNI substitution removed (closed 2026-08-10)
 
-Первый прогон шёл с маскировочным SNI и потому не годился в основу релиза. После того как
-подстановку убрали (см. «3б»), прогон повторён начисто: 50/50, 46 показательных окон, у всех
-профилей `preferred_sni` пуст.
-
-Результат сошёлся с прошлым: те же четыре узла внизу списка — `8.39.214.9:500`, `8.39.125.3:987`,
-`8.6.112.8:1070`, `8.47.69.8:946`. Два прогона в разных условиях назвали одну и ту же четвёрку, а
-`.214.9:500` до этого был найден ещё и двухминутными окнами churn — три независимых замера сошлись
-на одном узле.
-
-**Порядок в `warp_verified_seeds.json` пересобран по этому прогону.** Главное, что он изменил:
-`8.39.214.9:500` вёз `seed_order = 0`, то есть **у каждого пользователя он пробовался первым** —
-именно тот узел, который с 9 августа числится в дорожной карте как теряющий обратный поток. Теперь
-он 45-й. Позицию сменили 48 профилей из 50.
-
-Порядок собран `tools/generate_warp_verified_seeds_from_export.py` из `release_seed_items`, а тот
-пишется в порядке `sortWarpVerifiedConfigs` — то есть с удержанием ранним ключом. Раньше в основе
-лежал ручной ранг с Pixel 4a (`source_file: pixel4a_export_rank_*`), собранный по пингу.
-
-#### Обновление amneziawg-go: проверено, не помогло
-
-Вшитая копия отстала на четыре месяца (2026-03-31), наверху нашёлся коммит `08d68cd`
-**`fix: keepalives are ignored`** — по описанию ровно наш симптом: свой же keepalive засчитывался
-отправкой данных (`len(elem.packet) != MessageKeepaliveSize`) и взводил таймер, а на приёме
-падінг ломал распознавание чужого keepalive.
-
-Фикс перенесён на нашу копию (два файла, поле `padding` из соседнего коммита не тянули). Замер
-после него: **6, 7, 6 перерукопожатий за окно (3,0–3,4/мин)** — не изменилось ничего. Правка
-оставлена: она верна по сути и вреда не несёт, но причина не в ней.
-
-Почему не помогло, видно там же: за сессию **ни одного полученного keepalive**, то есть приёмная
-половина фикса неприменима, а отправная не спасает, потому что таймер честно взводит реальный
-трафик. Значит обратный поток действительно пропадает, а не теряется в учёте.
-
-Остальное апстрима не переносили: там `feat: amneziawg 3.0` со сменой мажорной версии — отдельная
-работа с отдельной проверкой.
-
-**Параметры AWG при этом применяются дословно** — проверено по коду, не по догадке. `tunnel.go`
-пишет в UAPI все `jc`, `jmin`, `jmax`, `s1..s4`, `h1..h4`, `i1..i5` как есть; вшитая
-`amneziawg-go/device/uapi.go` разбирает каждый и на неизвестном ключе **возвращает ошибку**
-(`invalid UAPI device key`), то есть туннель бы не поднялся вовсе. `awg_compat.go` — заглушки:
-только валидация, ничего не меняют.
-
-### 3б. Подстановка маскировочного SNI убрана (закрыто 2026-08-10)
-
-Прогон адаптации 2026-08-10 закончился тем, что ручное «Подключить» после него заняло около пяти
-минут вместо секунд. Каждая попытка падала с `handshake_timeout`, и у всех был один и тот же
-сохранённый маскировочный домен:
+Symptom: after an adaptation run, manual «Подключить» took ~5 minutes instead of seconds; every attempt
+failed with `handshake_timeout` on the same stored masking domain:
 
 ```
 Ставим cooldown на warp-awg-exact@3138 через ads.max.ru после handshake_timeout.
 Сбрасываем сохранённый preferred SNI 'ads.max.ru' для warp-awg-exact@3138: он привёл к handshake_timeout.
 ```
 
-Разбор нашёл три уровня, и главный оказался не в коде:
+Three levels, the main one not in code: (1) the release asset carried the mask —
+`preferred_sni = ads.max.ru` on **45 of 50** profiles in `warp_verified_seeds.json`, so every fresh
+install started with a substitution nobody enabled and the masking toggle had nothing to do with it;
+(2) every successful connection wrote the mask into the profile, and an adaptation run stamped it on all
+fifty at once; (3) the stored name was applied bypassing the toggle — the `preferredSni` branch in
+`publishWarpTrafficMaskHint` sat ABOVE the "masking enabled" check.
 
-1. **Ассет релиза вёз маску.** В `warp_verified_seeds.json` поле `preferred_sni = ads.max.ru`
-   стояло у **45 профилей из 50**. То есть каждая свежая установка стартовала с подстановкой,
-   которую никто не включал, — тумблер маскировки к этому отношения не имел.
-2. **Каждое удачное подключение дописывало маску в профиль**, а прогон адаптации проставлял её всем
-   пятидесяти разом.
-3. **Сохранённое имя применялось в обход выключателя.** Ветка с `preferredSni` в
-   `publishWarpTrafficMaskHint` стояла ВЫШЕ проверки «маскировка включена», поэтому имя, однажды
-   попавшее в профиль, подставлялось и после выключения маскировки.
+**Owner decision (2026-08-10): no substitution at all, neither on connect nor during adaptation.** Done:
+`resolveWarpTrafficMaskHosts` returns an empty list; the stored-name branch removed; writing the name
+into the profile removed; asset cleaned; the seed generator no longer carries `preferred_sni`; already
+installed apps purge stored names once at startup (`purgeStoredWarpPreferredSniOnce`). The domain catalog
+and the toggle are left in place — only the substitution was removed, so it can be restored from one spot.
 
-**Решение владельца (2026-08-10): подстановки быть не должно ни при подключении, ни при адаптации.**
-Сделано: `resolveWarpTrafficMaskHosts` возвращает пустой список; ветка сохранённого имени убрана;
-запись имени в профиль убрана; ассет очищен; генератор сидов больше не переносит `preferred_sni`;
-у уже установленных приложений имена вычищаются разово при старте
-(`purgeStoredWarpPreferredSniOnce`). Каталог доменов и тумблер оставлены на месте — убрана именно
-подстановка, чтобы вернуть её можно было одним местом.
+Device-verified: `preferred_sni` empty on all 50 in the export, not a single `sni=` in WARP attempts
+across a whole adaptation run, connection after a run comes up on the second profile in seconds. The
+Telegram relay's neutral SNI is a separate mechanism and untouched — visible in the log as
+`TLS shape=chrome sni=kws2.web.telegram.org (substituted=false)`.
 
-Проверено на устройстве: в выгрузке `preferred_sni` пуст у всех 50 профилей, за весь прогон
-адаптации в журнале **ни одного вхождения `sni=`** в попытках WARP, подключение после прогона
-поднимается на втором профиле за секунды. Нейтральный SNI релея Telegram — отдельный механизм и не
-тронут: в журнале он виден как `TLS shape=chrome sni=kws2.web.telegram.org (substituted=false)`.
+Side observation worth one run: the mask seems to have damaged tunnels itself — `8.39.125.3:987` gave
+7,5 s of silence in the masked run and 1,06 s in the clean one.
 
-Побочное наблюдение, стоившее одного прогона: маска, похоже, сама портила туннели. Узел
-`8.39.125.3:987` в прогоне с маской дал 7,5 с тишины, а в чистом — 1,06 с.
+### 3c. Connect stuck on «1/50»: Private DNS resolve without a timeout (closed 2026-08-10)
 
-### 4. Раздельное туннелирование в режиме Opera
+Symptom: the counter stays on the first profile forever, no connection. In the log there are
+**79 seconds of complete silence** between raising the TUN and the next line, then the background
+heartbeat decides «условия сети изменились» and restarts the cycle from the top — every 80 seconds.
 
-Пакет Nova вне VPN **всегда** — `applyOperaSplitTunnelPolicy` исключает его во всех трёх ветках.
-Значит экран принципиально не может ничего измерить сам: замеры для Opera обязана публиковать
-служба. Не дефект, но об этом легко забыть и снова написать замер в UI.
+The silence fell exactly between `applyUnderlyingNetworkHint` and `builder.establish()`, and there is
+a single call in between: `applyPrivateDnsBypass`. The device has strict Private DNS
+(`private_dns_mode=hostname`, `xbox-dns.ru`), so that branch ran and went into
+`resolveHostOutsideVpn` — a bare `InetAddress.getAllByName` **with no timeout and on the global
+resolver**. Once the process is bound to the VPN, the global resolver goes into a tunnel that does
+not exist yet: the resolve blocked until the system limit and the attempt never started.
 
-### 5. Мягкая остановка Opera ничего не ждёт
+Fixed in two parts, both needed:
 
-Ветка `preferGracefulOperaStopOnce` рассчитывает на естественный выход цикла tun2proxy, которого не
-бывает: tun-fd отдан библиотеке через `detachFd`, запуск идёт с `closeFdOnDrop = true`, и закрытие
-интерфейса на неё не влияет. В итоге ветка досиживает `join(4200)` и оставляет старый tun2proxy
-работать поверх новой сессии WARP. Новое логирование пропуска force-stop покажет это в первом же
-журнале. К падению отношения не имеет, чинить отдельно.
+1. **Resolve over the underlying network** (`underlyingNetwork.getAllByName`) instead of the global
+   resolver — «outside VPN» in the function name finally became true. This removed the cause.
+2. **Hard 1.5 s limit** with a log line. If the resolver ever blocks again, the attempt no longer
+   stalls: waiting silently here eats the whole attempt.
 
-### 6. Рост `opera_state.json`
+Verified on device: `Private DNS xbox-dns.ru выводим мимо VPN: …96.55` — 107 ms instead of 79
+seconds; three stop→start cycles connected on ports 987, 7103, 7559; no cycle-restart lines.
 
-Файл хранит адреса, остывания, статистику планов и выбранный профиль API. Чистка есть только для
-протухших остываний. Если начнёт разрастаться при ротации адресов — добавить обрезку по возрасту.
+**Checked alongside, at the owner's explicit request:** built-in profile parameters are not
+substituted. AWG parameters (`Jc/Jmin/Jmax`, `S1..S4`, `H1..H4`, `I1`) are present on all 50 records
+of the regenerated asset; `8.35.211.1:1701` from the «Сжали набор WARP endpoint-ов» line is a real
+asset entry, not an invented pair; each profile's `preferred_ports` holds exactly its own port.
 
-## Обновление сторонних компонентов (2026-08-09)
+### 4. Split tunneling in Opera mode
 
-Проверялось как отдельная гипотеза: не лечится ли часть проблем простым обновлением. Не вылечило
-ничего из известного, но и вреда не принесло — 112 тестов зелёные, релиз собран и работает, пинг
-после обновления 25 мс.
+The Nova package is **always** outside the VPN — `applyOperaSplitTunnelPolicy` excludes it in all three
+branches. So the UI fundamentally cannot measure anything itself: measurements for Opera must be
+published by the service. Not a defect, but easy to forget and write a UI-side measurement again.
 
-**Поднято:** `compileSdk` 34 → 35 (SDK установлен, `targetSdk` оставлен 34 — поведение приложения
-не меняется); `core-ktx` 1.12.0 → 1.13.1; `appcompat` 1.6.1 → 1.7.0; `material` 1.11.0 → 1.12.0;
-`constraintlayout` 2.1.4 → 2.2.1; `work-runtime-ktx` 2.9.1 → 2.10.5 (требовал compileSdk 35);
-`commons-compress` 1.26.0 → 1.27.1; `xz` 1.9 → 1.10; `bcprov-jdk18on` 1.78.1 → 1.80.
-В Go: `utls` 1.7.3 → 1.8.2, `x/crypto` 0.49 → 0.54, `x/net` 0.52 → 0.57 и их спутники.
+### 5. Graceful Opera stop waits for nothing
 
-**`quic-go` 0.55 → 0.61 — сделано через свой форк.** В 0.61 разовый `http3.ParseCapsule` заменён
-потоковым `CapsuleParser` (состояние между капсулами держит он сам). Старый вызов нашёлся в двух
-местах: `connect-ip-go/conn.go` и наш собственный `engine/masque_h2.go`. Оба переведены — правка
-механическая, по одной строке. `connect-ip-go` для этого форкнут в `tools/connect-ip-go` и
-подключён через `replace`, как уже сделано для `usque`, `warp-plus` и `amneziawg-go`; форк
-покрывает и `usque`, который тянет ту же зависимость.
+The `preferGracefulOperaStopOnce` branch expects a natural exit of the tun2proxy loop, which never
+happens: the tun-fd is handed to the library via `detachFd`, launch uses `closeFdOnDrop = true`, and
+closing the interface does not affect it. The branch sits out `join(4200)` and leaves the old tun2proxy
+running over the new WARP session. The new force-stop-skip logging will show it in the first log. Not
+related to the crash; fix separately.
 
-Правильный адресат на будущее — `github.com/quic-go/masque-go`: реализация CONNECT-IP от авторов
-самой quic-go, она следует за её API и не отстаёт. `connect-ip-go` — стороннее решение, и мы уже
-второй раз чиним его руками. Переезд трогает ветку MASQUE целиком, поэтому отдельной работой.
+### 6. `opera_state.json` growth
 
-**Вред, который тогда не заметили:** переключатели в «Настройках» приехали мелкими и с подписью
-«ВКЛ» внутри бегунка — умолчания `appcompat`/`material` для `Switch` поменялись. Исправлено
-2026-08-10: размеры, форма и цвета состояний заданы своими ресурсами и от версии библиотеки больше
-не зависят.
+Stores addresses, cooldowns, plan statistics and the chosen API profile. Cleanup exists only for expired
+cooldowns. If it starts growing under address rotation — add age-based trimming.
 
-**Не трогали:** локальные форки под `replace` (`usque`, `warp-plus`, `gvisor`) и переход
-amneziawg-go на 3.0 — мажорная версия, отдельная работа с отдельной проверкой.
+## Third-party component updates (2026-08-09)
 
-**Попутно:** `cmd/masque-bootstrap` не собирается (`"nova-core/engine" imported as nova and not
-used`). Сломан до обновления, проверено откатом go.mod. В `.aar` не входит — gomobile биндит
-корневой пакет, — поэтому на приложение не влияет.
+Tested as a separate hypothesis: does a plain update cure any of the problems? It cured nothing known and
+did no harm to function — 112 tests green at the time, release built and working, ping 25 ms after.
 
-## Принятые правила
+**Raised:** `compileSdk` 34 → 35 (`targetSdk` left at 34 — app behaviour unchanged); `core-ktx`
+1.12.0 → 1.13.1; `appcompat` 1.6.1 → 1.7.0; `material` 1.11.0 → 1.12.0; `constraintlayout`
+2.1.4 → 2.2.1; `work-runtime-ktx` 2.9.1 → 2.10.5 (required compileSdk 35); `commons-compress`
+1.26.0 → 1.27.1; `xz` 1.9 → 1.10; `bcprov-jdk18on` 1.78.1 → 1.80. In Go: `utls` 1.7.3 → 1.8.2,
+`x/crypto` 0.49 → 0.54, `x/net` 0.52 → 0.57 and companions.
 
-- **Явный выбор пользователя не подменяется.** Смена протокола или региона допустима только в
-  «Авто». Закреплено в `RegionTransportPolicy`, покрыто тестами.
-- **Секреты не попадают в репозиторий.** Значения приходят из переменных окружения или
-  `local.properties` в `BuildConfig` (секрет подписи WSS, пароль релеев API). Один секрет — один
-  источник истины: дублирование приводит к тому, что протухшее значение живёт незамеченным.
-- **Состояние, которое пишет служба, хранится в файлах, а не в `SharedPreferences`.**
-- **Отказ должен быть виден.** Молчаливый `return` в путях подключения запрещён: если цикл не
-  начался, в журнале обязана быть причина. Это относится и к выключенным подсистемам: молчащее
-  «выключено» неотличимо от «правка не подействовала», и один прогон на этом уже потерян.
-- **Правки в чувствительных местах проверяются состязательно.** Разбор плюс скептик, который
-  пытается опровергнуть. На этой практике уже пойманы взаимная блокировка и две неверные
-  первопричины.
+**`quic-go` 0.55 → 0.61 via our own fork.** 0.61 replaced one-shot `http3.ParseCapsule` with the
+streaming `CapsuleParser`. The old call existed in `connect-ip-go/conn.go` and our `engine/masque_h2.go`;
+both converted (one line each). `connect-ip-go` is forked into `tools/connect-ip-go` and wired via
+`replace`, as already done for `usque`, `warp-plus`, `amneziawg-go`; the fork also covers `usque`, which
+pulls the same dependency.
 
-## Ловушки, на которых уже обожглись
+**Future target:** `github.com/quic-go/masque-go` — the CONNECT-IP implementation by the quic-go authors,
+which tracks its API. `connect-ip-go` is third-party and we have now patched it by hand twice. The move
+touches the whole MASQUE branch, so it is separate work.
 
-- **Межпроцессный откат настроек.** Служба живёт в `:vpn`, экран — в основном процессе.
-  `SharedPreferences` в `MODE_PRIVATE` кешируются каждым процессом целиком; любой `commit()` пишет
-  на диск всю свою копию и откатывает чужие записи. Так исчезал адрес, только что удержавший
-  туннель. Лечится переносом в `AtomicFile`.
-- **Проба, ломающая сама себя.** `socket.getOutputStream().bufferedWriter().use { }` закрывает
-  поток, а с ним сокет: прокси видел обрыв клиента раньше, чем успевал сходить наружу.
-- **Библиотека, зовущая `exit()`.** Установлено дизассемблированием `libtun2proxy.so`:
-  `tun2proxy_stop()` безусловно поднимает отсоединённый поток «поспать 2 секунды → `exit(-1)`».
-  Между сном и выходом он не проверяет ничего — ни вернулся ли рабочий цикл, ни запущен ли новый
-  экземпляр. `exit` запускает `__cxa_finalize`, тот разрушает глобальный мьютекс `libandroidio`, и
-  любой поток, висящий в нативном чтении, роняет процесс. Отменить фитиль нечем: **любой вызов
-  `haltTun2proxy()` — приговор процессу `:vpn`**, планировать порядок запусков внутри того же
-  процесса бессмысленно. Три варианта уже проверены и признаны вредными: карантин перед новым
-  запуском (фитиль горит независимо от запусков), расширение ожидания cleanup-guard (ломает
-  сценарий «Стоп» → «Пуск») и общий замок вокруг `stopOperaFallback` (ANR на главном потоке).
-  Рабочее решение — не поднимать сессию в обречённом процессе и перезапуститься в свежем.
-- **Обещание, которого нет.** Ветка «мягкой» остановки Opera ждёт естественного выхода цикла
-  tun2proxy, а его не существует: tun-fd отдан библиотеке через `detachFd`, и закрытие интерфейса
-  на него не влияет. Ожидание просто досиживает свой таймаут.
-- **Перегруженный флаг.** `manual` у профиля VLESS означал «выбран сейчас», а экран прячет «ручные»
-  записи из обоих списков — активный профиль пропадал из интерфейса совсем.
-- **Проба вне бюджета.** `probeLocalProxyHttpConnectivity` перебирала шесть адресов по 2.6 с и шла
-  после `waitUntilReady`, то есть бюджет плана её не ограничивал.
-- **Остывание как запрет.** Когда в остывании оказались все профили API, отсеивался каждый план, и
-  цикл заканчивался за 2 мс, ни разу ничего не попробовав.
-- **`NextProtos` не действует на пресеты uTLS.** ALPN лежит в самой спецификации hello: Chrome и
-  Firefox объявляют «h2, http/1.1» что бы ни стояло в `utls.Config`. Край CF выбирает h2, и
-  написанный вручную апгрейд WebSocket по HTTP/1.1 уходит в соединение, которое его не понимает.
-  Лечится правкой расширения в `utls.ClientHelloSpec` (`tlsshape.Spec`), а не конфигом. Замерено на
-  живой зоне: `alpn="h2"` через конфиг против `alpn="http/1.1"` через спецификацию.
-- **Кольцевой буфер logcat на 256 КиБ.** На Pixel 4 XL это секунды истории: `adb logcat -d` после
-  прогона отдаёт уже пустоту. Перед сбором — `adb logcat -G 16M`; тогда буфер переживает и
-  отключение электричества на машине разработчика, и его хватает на два часа.
-- **Строка в журнале показывает не то, что кажется.** `Есть кэш Opera endpoints для X: a,b` — это
-  не содержимое кэша, а первые два адреса вне остывания (`filterNot { cooling }.take(2)`). По ней
-  нельзя ни сверить размер списка, ни отличить слияние от замены; пропавший адрес означает
-  остывание, а не потерю. Прежде чем делать вывод по строке журнала — посмотреть, что именно она
-  печатает.
-- **Пустой журнал — не подтверждение.** Отсутствие `neutral SNI refused` выглядело как «подстановка
-  прижилась», а означало «своя зона в маршрутах не участвовала ни разу». Прежде чем засчитывать
-  отсутствие отказа, надо убедиться, что проверяемый путь вообще был пройден.
-- **Хвост остановки живёт дольше самой остановки.** Broadcast `STOPPED` от прошлой сессии приходит
-  уже поверх нового пуска. У службы защита от этого есть, у экрана её не было — и цикл умирал между
-  «Подготовка к подключению...» и отправкой intent'а. Признак «этот STOPPED не про нас» должен быть
-  точным, а не по времени: пока intent не ушёл службе, сообщать о нём попросту нечему.
-- **Замер на одном маршруте — не замер на зоне.** Nova PC проверила подстановку SNI на `kws2` и
-  распространила вывод на всю зону; медийный `kws5-1` тот же apex отвергает с 403. Прежде чем
-  обобщать ответ края CF, надо пройти по маршрутам разного вида — обычному и медийному минимум.
-- **Счётчик без знаменателя врёт.** Перерукопожатия считались без учёта трафика, а таймер
-  перерукопожатия взводит только отправка данных: молчащий туннель даёт честный ноль и выглядит
-  здоровым. На этом построили и почти отгрузили ложный вывод про junk. Любая метрика «сколько раз
-  случилось» должна печатать рядом, сколько было попыток.
-- **Отладочный ключ через `SharedPreferences` до службы не доезжает.** Ключ «AWG без junk» сначала
-  писался в настройки: экран сохранял, а служба в процессе `:vpn` продолжала читать свой кэш, и
-  переключатель молча не действовал — прямо та ловушка, что уже записана про межпроцессный откат.
-  Перенесён в `opera_state.json` (AtomicFile). Всё, что пишет экран, а читает служба, — только файл.
-- **Значение по умолчанию прячет потерянное поле.** У счётчиков в `WarpVerifiedConfig` есть
-  умолчания, поэтому пропущенный аргумент конструктора — валидный код, о котором компилятор молчит.
-  Так churn обнулялся в двух местах, а удержание — ещё в трёх, причём рядом стоял комментарий
-  «переносим руками», описывающий ровно то, чего не сделали. Снаружи это выглядит как «замер не
-  записался»: в журнале «записали», в выгрузке ноль. Лечится одной точкой переноса
-  (`carryMeasurementsFrom`) и переходом на `previous.copy(...)` — тогда следующее поле переживёт
-  пересборку само.
-- **Строгий полный порядок первым ключом убивает все следующие.** `seedOrder` различается у всех
-  пятидесяти встроенных профилей, поэтому `thenBy` после него не выполнялся никогда, и накопленные
-  замеры на очередь не влияли. Перед тем как объяснять, почему признак «не сработал», надо
-  проверить, достижим ли вообще ключ, в который его положили.
-- **`elapsedRealtime` идёт во сне устройства.** Любой интервал, измеренный им между двумя
-  итерациями фонового цикла, включает время, когда цикл не работал: в журнале есть окна
-  `4/4, avg=56836ms` — пробы удались, а между ними телефон спал. Для метрик «сколько времени длилось
-  молчание» нужен `uptimeMillis`, иначе доза Android превращается в свойство узла.
-- **Обновление библиотеки меняет вид готовых виджетов.** Подъём `appcompat` 1.6.1 → 1.7.0 и
-  `material` 1.11.0 → 1.12.0 в этой серии сделал переключатели в «Настройках» мелкими и подписал
-  бегунок словом «ВКЛ». В разделе про обновление тогда записали «вреда не принесло» — по тестам и
-  по подключению это было верно, а по внешнему виду нет. Переключатель теперь задан своими
-  размерами, своими состояниями и своими drawable, чтобы следующая версия библиотеки его не
-  переопределила.
-- **Один цвет на бегунок и дорожку прячет положение переключателя.** `setupSwitchColor` красила обе
-  части одинаково, и включённый переключатель выглядел сплошной заливкой — состояние читалось
-  только по подписи внутри. Цвет должен различать части, а не совпадать у них.
-- **Прерванный прогон адаптации оставляет живой движок.** Остановка адаптации на середине и
-  немедленный повторный запуск дали два перебора сразу: в журнале `Движок не завершился после stop.
-  Принудительно пропускаем зависший…`, а в GoLog — старый peer, который десять минут слал
-  keepalive'ы, пока новый движок не мог подняться. Лечится перезапуском процесса
-  (`am force-stop`), а не повторным нажатием. Перед прогоном адаптации нужно спокойное состояние:
-  запуск через десять секунд после старта приложения столкнулся с обычным циклом подключения, и
-  прогон оборвался на 19-м профиле.
-- **Счётчик попыток в шапке адаптации может показать «4 из 4» вместо «4 из 50».** Общее число
-  берётся как `maxOf(currentAttemptTotal, currentAttemptOrdinal)`, а обычный цикл подключения при
-  завершении обнуляет обе переменные. Косметика: журнал в этот момент честно пишет
-  `подготовлено 50/50`. Сверяться надо с журналом.
-- **Значение по умолчанию в ассете живёт дольше кода.** Подстановка маскировочного имени была
-  выключена бы одним `if`, но 45 профилей из 50 везли `ads.max.ru` прямо в
-  `warp_verified_seeds.json`, и каждая новая установка начинала с ним. Прежде чем считать поведение
-  выключенным, надо посмотреть, не записано ли оно в данные, которые едут в релизе.
-- **Датапуть у режимов разный.** В WARP/авто пакеты читает `AndroidTUN` из Go-ядра; в Opera-only
-  tun-fd отдан tun2proxy через `detachFd`, и ядро из датапути выпадает целиком. Всё, что живёт в
-  `engine` и работает с пакетами — прозрачный релей Telegram в том числе, — в режимах EU/US просто
-  не вызывается. Проверять такие правки на EU бесполезно: журнал будет молчать не потому, что всё
-  хорошо.
+**Harm not noticed at the time:** the «Настройки» switches came out small with «ВКЛ» written inside the
+thumb — `appcompat`/`material` defaults for `Switch` changed. Fixed 2026-08-10: sizes, shape and state
+colors are set by our own resources and no longer depend on library version.
 
-## Как устроены ключевые механизмы
+**Not touched:** local `replace` forks (`usque`, `warp-plus`, `gvisor`) and the amneziawg-go 3.0 move —
+major version, separate work with separate verification.
 
-- **Релей API SurfEasy.** Набор endpoint'ов зависит от того, откуда пришёл `discover`, и
-  российскому адресу выдаётся недостижимый набор. Релей переносит в Швецию **только вызовы API**;
-  туннель набирается напрямую, страна выхода не меняется. Имя релея резолвит Android через
-  `OperaApiRelayBridge`: резолвер Go внутри `opera-proxy` на Android остаётся без настроек и уходит
-  в `[::1]:53`.
-- **Порядок перебора Opera.** Тир: кэшированный адрес → релей → прямой discover. Внутри тира
-  сначала отметка «продержался 20 секунд», затем накопленная статистика.
-- **Замер задержки.** Проба живости через прокси и есть замер; служба публикует его в
-  `transport_latency.json`, экран фильтрует по метке транспорта.
-- **Маршрут Telegram через свой Worker.** Имя `kwsN.nova-app.eu` едет в заголовке `Host` —
-  Cloudflare маршрутизирует Workers по нему, а не по SNI. В SNI уходит нейтральное имя той же зоны
-  (`cfws.NeutralSNI`). Подпись рукопожатия (`cfws.Build`) привязана к литеральному имени, а не к
-  подставленному, — считается в Go, потому что окно живёт две минуты, а пул держит сокеты открытыми.
-  Само рукопожатие пишет uTLS формой из `tlsshape`: ALPN в ней сведён к `http/1.1`, иначе край CF
-  выбрал бы h2 и апгрейд WebSocket по HTTP/1.1 не сработал бы.
+**Aside:** `cmd/masque-bootstrap` does not build (`"nova-core/engine" imported as nova and not used`).
+Broken before the update (verified by reverting go.mod). Not in the `.aar` — gomobile binds the root
+package — so the app is unaffected.
 
-## Состав изменений этой серии
+## Accepted rules
 
-Новые файлы: `RegionTransportPolicy`, `OperaApiRelayBridge`, `FlowLayout`, `SessionHoldMetric`,
-`cfws/neutral_sni.go`, `tlsshape/shape.go`, тесты `RegionTransportPolicyTest`,
-`DiagnosticLogSanitizerTest`, `SessionHoldMetricTest`, `cfws/neutral_sni_test.go`,
-`tlsshape/shape_test.go`, drawable и списки состояний переключателя (`switch_thumb_liquid`,
-`switch_track_liquid`, `color/switch_*_tint_liquid`).
-Изменены: `NovaVpnService`, `OperaProxyManager`, `ClientData`, `MainActivity`, `SettingsActivity`,
-`WarpConfigsActivity`, `ConfigsAdapter`, `ProfileRotation`, `VlessSubscriptionManager`,
-`DiagnosticLogSanitizer`, `engine/telegram_transparent.go`, `build.gradle.kts`, `themes.xml`,
-разметка карточки и экрана конфигураций.
+- **A user's explicit choice is never overridden.** Protocol or region may be switched only in «Авто».
+  Enforced by `RegionTransportPolicy`, covered by tests.
+- **Secrets never enter the repository.** Values come from env vars or `local.properties` into
+  `BuildConfig` (WSS signing secret, API relay password). One secret — one source of truth; duplication
+  lets a stale value live unnoticed.
+- **State written by the service lives in files, not `SharedPreferences`.**
+- **A failure must be visible.** A silent `return` in connection paths is forbidden: if the loop did not
+  start, the log must state why. This includes disabled subsystems — a silent "off" is indistinguishable
+  from "the change did not take effect", and one run has already been lost to that.
+- **Changes in sensitive places are reviewed adversarially.** Analysis plus a skeptic trying to refute it.
+  That practice has already caught a deadlock and two wrong root causes.
 
-Отдельно по надёжности замеров: список проверенных конфигураций читается-меняется-пишется тремя
-потоками сразу (перебор, демон-сэмплер, тикер живой сессии) и до сих пор делал это без замка —
-проигравший гонку писатель откатывал не одно поле, а результаты всех конфигураций, изменённых с
-момента его чтения. Девятнадцать функций-писателей заведены под общий `warpVerifiedConfigsLock`.
-Новой работы под замком не появилось: там только та запись, что и так шла, — расширять его дальше
-нельзя, общий замок вокруг остановки Opera уже приводил к ANR.
+## GOTCHAS (already burned by)
 
-Отдельно — диагностика, без которой предыдущие пункты нельзя было ни подтвердить, ни опровергнуть:
-причина отказа прозрачного релея, разбор обрыва цикла подключения, отход на чужой пул CF, итог
-слияния списка адресов.
-Пересобраны артефакты ядра: `app/libs/nova-core-api24*.aar`, `app/src/main/jniLibs/*/libgojni.so`.
+- **Cross-process settings rollback.** The service lives in `:vpn`, the UI in the main process.
+  `MODE_PRIVATE` `SharedPreferences` are cached whole by each process; any `commit()` writes that
+  process's entire copy and rolls back the other's writes. That is how the address that had just held the
+  tunnel disappeared. Cure: move to `AtomicFile`.
+- **A probe that breaks itself.** `socket.getOutputStream().bufferedWriter().use { }` closes the stream
+  and with it the socket: the proxy saw the client disconnect before it could go outside.
+- **A library that calls `exit()`.** Established by disassembling `libtun2proxy.so`: `tun2proxy_stop()`
+  unconditionally starts a detached thread "sleep 2 seconds → `exit(-1)`", checking nothing in between —
+  neither whether the worker loop returned nor whether a new instance started. `exit` runs
+  `__cxa_finalize`, which destroys the global `libandroidio` mutex, and any thread parked in a native read
+  kills the process. The fuse cannot be cancelled: **any call to `haltTun2proxy()` is a death sentence for
+  the `:vpn` process**, so scheduling launch order inside the same process is pointless. Three variants
+  already tried and found harmful: quarantine before a new launch (the fuse burns regardless of launches),
+  extending the cleanup-guard wait (breaks «Стоп» → «Пуск»), and a shared lock around `stopOperaFallback`
+  (ANR on the main thread). Working solution — do not raise a session in a doomed process, restart into a
+  fresh one.
+- **A promise that does not exist.** The "graceful" Opera stop waits for a natural exit of the tun2proxy
+  loop, which does not exist: the tun-fd was handed over via `detachFd` and closing the interface does not
+  affect it. The wait just sits out its timeout.
+- **Overloaded flag.** `manual` on a VLESS profile meant "currently selected", while the screen hides
+  "manual" entries from both lists — the active profile vanished from the UI entirely.
+- **A probe outside the budget.** `probeLocalProxyHttpConnectivity` walked six addresses at 2.6 s each and
+  ran after `waitUntilReady`, so the plan budget did not bound it.
+- **Cooldown as a ban.** When all API profiles were cooling, every plan was filtered out and the loop
+  finished in 2 ms without trying anything.
+- **`NextProtos` does not affect uTLS presets.** ALPN lives in the hello spec itself: Chrome and Firefox
+  advertise "h2, http/1.1" no matter what `utls.Config` says. The CF edge picks h2, and a hand-written
+  HTTP/1.1 WebSocket upgrade goes into a connection that does not understand it. Cure: edit the extension
+  in `utls.ClientHelloSpec` (`tlsshape.Spec`), not the config. Measured on the live zone: `alpn="h2"` via
+  config vs `alpn="http/1.1"` via spec.
+- **256 KiB logcat ring buffer.** On Pixel 4 XL that is seconds of history: `adb logcat -d` after a run
+  returns nothing. Before collecting — `adb logcat -G 16M`; then the buffer survives even a power cut on
+  the dev machine and covers about two hours.
+- **A log line shows something other than what it looks like.** `Есть кэш Opera endpoints для X: a,b` is
+  not the cache contents but the first two non-cooling addresses (`filterNot { cooling }.take(2)`). You
+  cannot check the list size or tell merge from replace by it; a missing address means cooldown, not loss.
+  Before concluding from a log line, check what that line actually prints.
+- **An empty log is not confirmation.** The absence of `neutral SNI refused` looked like "the substitution
+  took hold" but meant "our own zone never participated in routing". Before counting an absent failure,
+  make sure the path under test was actually exercised.
+- **The tail of a stop outlives the stop.** A `STOPPED` broadcast from the previous session arrives on top
+  of the new launch. The service guards against it, the UI did not — and the cycle died between
+  «Подготовка к подключению...» and sending the intent. The "this STOPPED is not ours" test must be exact,
+  not time-based: until the intent has gone to the service, there is nothing to report about.
+- **A measurement on one route is not a measurement of the zone.** Nova PC tested SNI substitution on
+  `kws2` and generalized to the whole zone; media route `kws5-1` rejects that apex with 403. Before
+  generalizing a CF edge response, walk routes of different kinds — plain and media at minimum.
+- **A counter without a denominator lies.** Rekeys were counted without traffic, but the rekey timer is
+  armed only by data being sent: a silent tunnel yields an honest zero and looks healthy. A false
+  conclusion about junk was built on this and nearly shipped. Any "how many times it happened" metric must
+  print how many attempts there were next to it.
+- **A debug key routed through `SharedPreferences` never reaches the service.** The "AWG without junk" key
+  was first written to settings: the UI saved it, the service in `:vpn` kept reading its own cache, and
+  the toggle silently did nothing — exactly the cross-process rollback trap. Moved to `opera_state.json`
+  (AtomicFile). Anything the UI writes and the service reads goes through a file only.
+- **A default value hides a lost field.** Counters in `WarpVerifiedConfig` have defaults, so a missing
+  constructor argument is valid code the compiler says nothing about. Churn was zeroed in two places and
+  hold in three more — with a comment "переносим руками" sitting right there describing exactly what was
+  not done. From outside it looks like "the measurement was not recorded": log says written, export shows
+  zero. Cure: one transfer point (`carryMeasurementsFrom`) and `previous.copy(...)`, so the next field
+  survives a rebuild by itself.
+- **A strict total order as the first key kills every key after it.** `seedOrder` differs on all fifty
+  bundled profiles, so `thenBy` after it never ran and accumulated measurements never affected the queue.
+  Before explaining why a signal "did not work", check whether the key you put it behind is reachable at
+  all.
+- **`elapsedRealtime` runs while the device sleeps.** Any interval measured with it between two iterations
+  of a background loop includes time when the loop was not running: the log has `4/4, avg=56836ms` windows
+  where probes succeeded but the phone slept in between. Metrics of the form "how long the silence lasted"
+  need `uptimeMillis`, otherwise an Android doze becomes a property of the node.
+- **A library update changes the look of stock widgets.** `appcompat` 1.6.1 → 1.7.0 and `material`
+  1.11.0 → 1.12.0 made the «Настройки» switches small and printed «ВКЛ» inside the thumb. The update
+  section recorded "did no harm" — true for tests and connectivity, false for appearance. The switch is
+  now defined by our own sizes, states and drawables so the next library version cannot override it.
+- **One color for thumb and track hides the switch position.** `setupSwitchColor` painted both parts the
+  same, so an enabled switch looked like a solid fill and state was readable only from the label inside.
+  Color must distinguish the parts, not match across them.
+- **An interrupted adaptation run leaves a live engine.** Stopping adaptation midway and immediately
+  restarting produced two iterations at once: `Движок не завершился после stop. Принудительно пропускаем
+  зависший…` in the log, and in GoLog an old peer sending keepalives for ten minutes while the new engine
+  could not come up. Cure: restart the process (`am force-stop`), not press the button again. Adaptation
+  needs a quiet state beforehand: starting ten seconds after app launch collided with the normal
+  connection cycle and the run aborted on the 19th profile.
+- **The attempt counter in the adaptation header can show "4 из 4" instead of "4 из 50".** The total is
+  `maxOf(currentAttemptTotal, currentAttemptOrdinal)`, and the normal connection cycle zeroes both
+  variables when it ends. Cosmetic: the log honestly says `подготовлено 50/50` at that moment. Trust the
+  log.
+- **A default value in an asset outlives the code.** The masking-name substitution would have been
+  disabled by a single `if`, but 45 of 50 profiles carried `ads.max.ru` directly in
+  `warp_verified_seeds.json`, so every new install started with it. Before considering a behaviour
+  disabled, check whether it is written into data shipped in the release.
+- **The datapath differs per mode.** In WARP/auto, packets are read by `AndroidTUN` from the Go core; in
+  Opera-only the tun-fd is handed to tun2proxy via `detachFd` and the core drops out of the datapath
+  entirely. Everything living in `engine` and touching packets — the transparent Telegram relay included —
+  is simply not called in EU/US modes. Testing such changes on EU is pointless: the log will be silent for
+  the wrong reason.
 
-Тестов: 134 в Kotlin (зелёные) + `go test ./cfws ./tlsshape` (зелёные).
+## How the key mechanisms work
 
-Закоммичено 2026-08-10 в `main` по решению владельца: 75 файлов одним коммитом. Снимки экрана
-проверочного устройства (`.nova_shots/`) в репозиторий не идут — они доказательства для разбора,
-а не вход сборки.
+- **SurfEasy API relay.** The endpoint set depends on where `discover` came from, and a Russian address
+  gets an unreachable set. The relay moves **only API calls** to Sweden; the tunnel is dialed directly and
+  the exit country does not change. The relay hostname is resolved by Android through
+  `OperaApiRelayBridge`: the Go resolver inside `opera-proxy` on Android has no settings and falls back to
+  `[::1]:53`.
+- **Opera iteration order.** Tiers: cached address → relay → direct discover. Inside a tier: the "held for
+  20 seconds" mark first, then accumulated statistics.
+- **Latency measurement.** The liveness probe through the proxy *is* the measurement; the service
+  publishes it to `transport_latency.json`, the UI filters by transport tag.
+- **Telegram route through our own Worker.** The name `kwsN.nova-app.eu` travels in the `Host` header —
+  Cloudflare routes Workers by it, not by SNI. SNI carries a neutral name of the same zone
+  (`cfws.NeutralSNI`). The handshake signature (`cfws.Build`) is bound to the literal name, not the
+  substituted one, and is computed in Go because the window lives two minutes and the pool keeps sockets
+  open. The handshake itself is written by uTLS with a shape from `tlsshape`: ALPN reduced to `http/1.1`,
+  otherwise the CF edge would pick h2 and the HTTP/1.1 WebSocket upgrade would fail.
+- **Measurement-write concurrency.** The verified-config list is read-modify-written by three threads at
+  once (iteration, daemon sampler, live-session ticker). It used to do that without a lock, so a writer
+  losing the race rolled back not one field but the results of every config changed since it read. Nineteen
+  writer functions are now under a shared `warpVerifiedConfigsLock`. No new work was added under the lock —
+  only the writes that were already happening. Do not widen it: a shared lock around the Opera stop already
+  caused an ANR.
 
-## Справочное
+## Where things live
 
-- Эталон логики подключения — Nova PC (`D:/Documents/Coding/Nova PC`, `nova.pyw`). Если регион
-  работает там, а здесь нет, решение обычно уже написано в нём.
-- Сборка и установка: `./gradlew :app:assembleRelease`, затем
-  `adb install -r app/build/outputs/apk/release/Nova_<версия>.apk`. Релиз без секрета подписи WSS не
-  собирается намеренно.
-- Правки в `nova-core/` не попадают в APK сами: нужен `tools/build_nova_core_aar.sh` (нужны Go,
-  gomobile и NDK 27.2.12479018). Он обновляет и `.aar`, и `jniLibs` — второе имеет приоритет, и
-  если обновить только `.aar`, на устройстве продолжит грузиться старая библиотека.
-- Решения Nova PC по релею Telegram записаны там же в `docs/adr/`: 0003 — фазовая атрибуция
-  отказов, 0004 — нейтральный SNI.
+Own components introduced by this work: `RegionTransportPolicy` (explicit-choice policy),
+`OperaApiRelayBridge` (relay hostname resolution), `SessionHoldMetric` (pure hold metric + seed
+bucketing), `FlowLayout`, `cfws/neutral_sni.go`, `tlsshape/shape.go`, `DiagnosticLogSanitizer`, switch
+drawables/state lists (`switch_thumb_liquid`, `switch_track_liquid`, `color/switch_*_tint_liquid`).
+Main touch points: `NovaVpnService`, `OperaProxyManager`, `ClientData`, `MainActivity`,
+`SettingsActivity`, `WarpConfigsActivity`, `ConfigsAdapter`, `ProfileRotation`,
+`VlessSubscriptionManager`, `engine/telegram_transparent.go`.
+Core artifacts: `app/libs/nova-core-api24*.aar`, `app/src/main/jniLibs/*/libgojni.so`.
+
+## Release 1.26 (2026-08-10)
+
+**Sources published** to `confeden/Nova-Android` with commit `Исходный код Nova 1.26`
+(`2b0e0367..a6799aa7`, 76 files). The method was chosen by the owner: a commit of our tree **on top of**
+the public branch, not a force-push. Reason — the public repository and the working one have **no common
+ancestor**: the histories are independent, the contents almost coincide. A force-push would have erased
+51 public commits.
+
+Two files were deliberately left in the public repository's revision, because there they are newer:
+`.github/workflows/publish_apk_update.yml` (APK auto-publishing — deleting it would break the automation)
+and `README.md` (screenshots were added to it).
+
+**The release draft** `Nova 1.26` with tag `v1.26` on `main` is created and saved as a Draft — not
+published. The tag appears at the moment of publication, not earlier.
+
+**What is left to do by hand:**
+
+- **Attach the APK to the draft.** `app/build/outputs/apk/release/Nova_1.26.apk`, 76,8 MB,
+  sha256 `e8d7f1352485a0e5419b79ce8c8613343cfd53219dd6180d6ee3b99699680f03`. There is nothing to upload
+  it with from the agent: the file upload limit is 10 MB.
+- **Update `apk_version.json`.** Auto-update reads the version not from releases but from a third
+  repository `confeden/nova_updates` (`AppUpdateManager`:
+  `raw.githubusercontent.com/confeden/nova_updates/main/apk_version.json`). Until it is updated,
+  publishing the release by itself will not deliver an update to users.
+- **`origin` (`Nova-source`) was not touched:** it has a different layout — sources in the
+  `NovaAndroid/` subfolder — and 3 commits that we do not have.
+
+## Reference
+
+- Connection-logic reference is Nova PC (`D:/Documents/Coding/Nova PC`, `nova.pyw`). If a region works
+  there and not here, the solution is usually already written there.
+- Nova PC decisions on the Telegram relay are in its `docs/adr/`: 0003 — phase attribution of failures,
+  0004 — neutral SNI.

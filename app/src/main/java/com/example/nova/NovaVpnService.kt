@@ -69,6 +69,10 @@ class NovaVpnService : OperaNativeVpnService() {
     private var lastTaskRemovedAtMs = 0L
     @Volatile
     private var operaFallbackActive = false
+
+    /** Когда в этом процессе звали `tun2proxy_stop()`. Ноль — ещё ни разу. */
+    @Volatile
+    private var tun2proxyForceStopAtMs = 0L
     @Volatile
     private var preferGracefulOperaStopOnce = false
     @Volatile
@@ -155,6 +159,15 @@ class NovaVpnService : OperaNativeVpnService() {
     private val connectGeneration = AtomicInteger(0)
     @Volatile
     private var connectedHealthProbeFailures = 0
+
+    /** Учёт перерукопожатий на живой сессии, см. [sampleTunnelRekeyChurn]. */
+    private var tunnelRekeyWindowStartedAtMs = 0L
+    private var lastSeenHandshakeTimeSec = 0L
+    private var tunnelRekeyCount = 0
+    private var activeEndpointHost = ""
+    private var activeEndpointPort = 0
+    private var tunnelRekeyWindowRxBytes = 0L
+    private var tunnelRekeyWindowTxBytes = 0L
     private val connectedWarpHealthWindow = ArrayDeque<Boolean>()
     @Volatile
     private var connectedWarpHealthWindowFailures = 0
@@ -240,6 +253,7 @@ class NovaVpnService : OperaNativeVpnService() {
     private val vpnConsistencyRunnable = object : Runnable {
         override fun run() {
             try {
+                sampleTunnelRekeyChurn()
                 reconcileSystemVpnConsistency()
             } finally {
                 vpnConsistencyHandler.postDelayed(this, nextVpnConsistencyIntervalMs())
@@ -431,7 +445,22 @@ class NovaVpnService : OperaNativeVpnService() {
     
     companion object {
         var isRunning = false
+        /** Окно замера перерукопожатий и порог, после которого сессия считается нестабильной. */
+        private const val TUNNEL_REKEY_WINDOW_MS = 120_000L
+        private const val TUNNEL_REKEY_ALERT_COUNT = 2
+
+        /** Ниже этого объёма отправки окно замера не показательно. */
+        private const val TUNNEL_REKEY_MIN_TX_KB = 32L
+
         const val ACTION_VPN_STATE = "com.example.nova.VPN_STATE"
+
+        /**
+         * Процесс `:vpn` обречён: в этой остановке звали `tun2proxy_stop`, и через две
+         * секунды библиотека выполнит `exit(-1)`. Основной процесс живёт дальше и обязан
+         * повторить запуск сам — ждать перезапуска от Android нельзя, он назначает свою
+         * задержку (на устройстве доходило до 51 секунды).
+         */
+        const val ACTION_VPN_PROCESS_DOOMED = "com.example.nova.VPN_PROCESS_DOOMED"
         const val ACTION_START_OPERA_ONLY = "START_OPERA_ONLY"
         const val ACTION_CONNECT_SMART = "CONNECT_SMART"
         const val ACTION_RESTORE_LAST_SESSION = "RESTORE_LAST_SESSION"
@@ -504,6 +533,27 @@ class NovaVpnService : OperaNativeVpnService() {
         const val EXTRA_DISCOVERY_RUNNING = "discovery_running"
         const val EXTRA_DISCOVERY_FOUND_COUNT = "discovery_found_count"
         const val EXTRA_DISCOVERY_MESSAGE = "discovery_message"
+        /**
+         * Как tun2proxy обходится с DNS (`Tun2proxyDns` из `tun2proxy.h`).
+         *
+         * `VIRTUAL` — отвечать на запросы самому, выдавая виртуальный адрес, а наружу
+         * отдавать имя: разрешает его сам прокси. `OVER_TCP` — гнать запрос в туннель
+         * как TCP на выданный резолвер.
+         *
+         * Дефект, ради которого это стало важно: стоял `OVER_TCP`, и весь DNS уходил в
+         * туннель как TCP на 1.1.1.1:53. Opera такой CONNECT не пропускает — в журнале
+         * `#1 TCP …→1.1.1.1:53 error "timed out"`. Снаружи это выглядело хуже всего:
+         * пинги в Nova стабильные (они идут по literal-адресам), а в браузере интернета
+         * нет, потому что не разрешается ни одно имя. С `VIRTUAL` имя уходит в сам
+         * запрос CONNECT и разрешается на стороне выхода — ровно так же, как это
+         * работает в версии для ПК, где браузер ходит через HTTP-прокси.
+         */
+        private const val TUN2PROXY_DNS_VIRTUAL = 0
+
+        /** Причины, за которыми стоит нажатие пользователя: только их отсечки логируем. */
+        private val EXPLICIT_CONNECT_REASONS =
+            setOf("opera-only", "smart-connect", "warp-connect", "vless-reapply")
+
         const val BACKEND_WARP = "WARP"
         const val BACKEND_OPERA = "OPERA"
         const val BACKEND_VLESS = "VLESS"
@@ -538,6 +588,20 @@ class NovaVpnService : OperaNativeVpnService() {
          * нечего. Живой узел из Сингапура даёт около двух секунд, поэтому четыре.
          */
         private const val VLESS_SESSION_PROBE_TIMEOUT_MS = 4_000
+
+        /**
+         * Бюджет пробы Opera в цикле удержания.
+         *
+         * Проба идёт наружу через сам прокси и служит двум целям: подтверждает живость
+         * и задаёт потолок замера задержки. Прежние 1200 мс были меньше бюджета цикла
+         * подключения (1400 мс), а подключиться Opera иначе как этой пробой не может:
+         * CONNECT на 53-й порт прокси не пропускает, DNS через туннель не идёт, и
+         * VALIDATED система не ставит. Выход, уложившийся в 1400 мс на подключении,
+         * тут же начинал копить отказы. Две секунды снимают разрыв и не ломают
+         * обнаружение мёртвого data-plane: худшая итерация 1500+1200+2000 = 4.7 с,
+         * порог в восемь отказов даёт около 37 с против прежних 31.
+         */
+        private const val OPERA_SESSION_PROBE_TIMEOUT_MS = 2_000
 
         /**
          * Общий бюджет поиска живого узла, пока туннеля ещё нет.
@@ -937,7 +1001,22 @@ class NovaVpnService : OperaNativeVpnService() {
                 return START_STICKY
             }
             val connectGenerationId = beginConnectGeneration(stopExisting = true)
+            // Явный пуск отменяет отложенное добивание предыдущего stop: иначе оно
+            // снесёт службу под уже начавшимся циклом.
+            cancelStopCleanupConfirmation()
             startSafeServiceThread("NovaSmartConnect") {
+                // Ждём в потоке, а не в onStartCommand: ожидание блокирующее, а
+                // onStartCommand исполняется на main-потоке службы.
+                if (!waitForPreviousCleanupIfNeeded(
+                        connectGenerationId = connectGenerationId,
+                        reason = "smart-connect",
+                        maxWaitMs = 2_500L,
+                        allowForcedRelease = false,
+                    )
+                ) {
+                    logConnectAbortedBeforeStart("smart-connect", connectGenerationId)
+                    return@startSafeServiceThread
+                }
                 startSmartConnection(
                     regionPreferenceOverride = regionPreference,
                     diagnosticsMode = diagnosticsStart,
@@ -957,13 +1036,16 @@ class NovaVpnService : OperaNativeVpnService() {
             novaCoreTunnelActive = false
             operaTunThread = null
             novaEngineThread = null
-            setCurrentBackend(BACKEND_WARP)
             val requestedRegion = normalizeRegionPreference(
                 regionPreference ?: ClientData(this).getExitRegionPreference()
             )
             val expectedBackendHint = getOperaFallbackSequence(requestedRegion).firstOrNull()?.second
                 ?.let { "$BACKEND_OPERA-$it" }
                 ?: BACKEND_OPERA
+            // Метку ставим до первого broadcast, а не WARP «по умолчанию»: пока цикл
+            // назывался WARP, интерфейс подставлял счётчик встроенных WARP-профилей —
+            // те самые «1/50» перед настоящим «1/54» плана запуска Opera.
+            setCurrentBackend(expectedBackendHint)
             if (adoptHealthyExistingVpnIfPresent(expectedBackendHint)) {
                 isRunning = true
                 return START_STICKY
@@ -975,7 +1057,21 @@ class NovaVpnService : OperaNativeVpnService() {
                 )
             )
             val connectGenerationId = beginConnectGeneration(stopExisting = true)
+            cancelStopCleanupConfirmation()
+            // Ожидание стоит здесь, а не в теле configureAndStartOperaOnly: у неё
+            // девять точек вызова, и среди них recovery-пути, которые намеренно
+            // отказываются работать при активном cleanup.
             startSafeServiceThread("NovaOperaOnly") {
+                if (!waitForPreviousCleanupIfNeeded(
+                        connectGenerationId = connectGenerationId,
+                        reason = "opera-only",
+                        maxWaitMs = 2_500L,
+                        allowForcedRelease = false,
+                    )
+                ) {
+                    logConnectAbortedBeforeStart("opera-only", connectGenerationId)
+                    return@startSafeServiceThread
+                }
                 configureAndStartOperaOnly(regionPreference, connectGenerationId)
             }
             isRunning = true
@@ -1010,6 +1106,9 @@ class NovaVpnService : OperaNativeVpnService() {
                 )
             )
             val connectGenerationId = beginConnectGeneration(stopExisting = true)
+            // Ожидание cleanup у этого пути уже есть внутри configureAndStartVpn —
+            // не хватало только отмены отложенного добивания предыдущего stop.
+            cancelStopCleanupConfirmation()
             if (warpBootstrapStart) {
                 operaBootstrapWarpGenerationId = connectGenerationId
             }
@@ -1041,7 +1140,10 @@ class NovaVpnService : OperaNativeVpnService() {
 
     private fun configureAndStartOperaOnly(regionPreferenceOverride: String?, connectGenerationId: Int) {
         try {
-            if (!isConnectGenerationCurrent(connectGenerationId)) return
+            if (!isConnectGenerationCurrent(connectGenerationId)) {
+                logConnectAbortedBeforeStart("opera-only", connectGenerationId)
+                return
+            }
             if (!ensureFreshTransportState(connectGenerationId, "opera-only")) return
             suppressSessionRestore = false
             val clientData = ClientData(this)
@@ -1071,6 +1173,10 @@ class NovaVpnService : OperaNativeVpnService() {
             if (adoptHealthyExistingVpnIfPresent(expectedBackendHint)) {
                 return
             }
+            // beginConnectGeneration стирает метку транспорта, а первый broadcast идёт
+            // уже отсюда: без этой строки интерфейс несколько секунд считал фазу
+            // неизвестной и показывал заглушку по списку встроенных WARP-профилей.
+            setCurrentBackend(expectedBackendHint)
             broadcastState(STATE_CONNECTING)
             val result = runOperaFallbackUntilStable(clientData, operaTargets, connectGenerationId)
             if (
@@ -1092,7 +1198,9 @@ class NovaVpnService : OperaNativeVpnService() {
                     return
                 }
                 isRunning = false
-                setCurrentBackend(BACKEND_WARP)
+                // Остановка выбранного региона — это остановка выбранного региона, а не
+                // переход на WARP. Метка WARP в момент STOPPED и читалась как переход.
+                setCurrentBackend(expectedBackendHint)
                 broadcastState(STATE_STOPPED)
                 stopSelf()
             }
@@ -1347,9 +1455,20 @@ class NovaVpnService : OperaNativeVpnService() {
         stopStartId: Int? = null,
     ) {
         cancelStopCleanupConfirmation()
+        // Отложенное добивание планируется при остановке, но срабатывает через сотни
+        // миллисекунд — за это время пользователь успевает нажать «Пуск». Голый
+        // stopSelf() в этот момент убивал уже начавшийся цикл, и подключение молча не
+        // происходило. stopSelfResult гасит службу только если это последний startId.
+        if (isRunning || currentState == STATE_CONNECTING || currentState == STATE_CONNECTED) {
+            LogManager.log(
+                "Отложенное добивание stop ($source) отменено: уже идёт новый цикл подключения."
+            )
+            stopStartId?.let { stopSelfResult(it) }
+            return
+        }
         val persistedState = clientData.getServiceState()
         if (persistedState != STATE_STOPPED || clientData.getRestartSession() != null) {
-            stopStartId?.let { stopSelfResult(it) } ?: stopSelf()
+            stopStartId?.let { stopSelfResult(it) }
             return
         }
         val connectivityManager = getSystemService(android.net.ConnectivityManager::class.java)
@@ -1541,6 +1660,81 @@ class NovaVpnService : OperaNativeVpnService() {
         if (currentTransportLabel != label) {
             currentTransportLabel = label
         }
+        // Запоминаем узел попытки, чтобы было к чему привязать замер
+        // перерукопожатий. Замер идёт только в состоянии CONNECTED, а последняя
+        // выставленная попытка к этому моменту и есть удачная.
+        activeEndpointHost = attempt.endpointHost
+        activeEndpointPort = attempt.port
+    }
+
+    /**
+     * Отдаёт замер окна в оценку узла.
+     *
+     * До этого частоту пересборки сессии не видел никто: ранжирование смотрит на
+     * пинг и на факт подключения, поэтому узел, который не удерживает сессию,
+     * считался хорошим и оставался наверху очереди. Замер 2026-08-10 показал
+     * разброс между узлами вдвое-вчетверо при одинаковых параметрах AWG.
+     */
+    private fun recordTunnelRekeyChurnForEndpoint(rekeys: Int) {
+        val host = activeEndpointHost.trim()
+        val port = activeEndpointPort
+        if (host.isBlank() || port !in 1..65535) return
+        runCatching { ClientData(this).recordWarpConfigChurn(host, port, rekeys) }
+            .onFailure { LogManager.log("Не удалось записать churn узла $host:$port: ${it.message}") }
+    }
+
+    /**
+     * Отдаёт замер удержания окна в оценку узла.
+     *
+     * Дешёвая половина той же работы, что делает [recordTunnelRekeyChurnForEndpoint]:
+     * churn меряется двухминутными окнами на живой сессии, а этот замер снимается
+     * с двадцатисекундного окна адаптации, которое и так держится на каждом
+     * профиле. Ради него ничего не удлиняется — считается тишина между уже
+     * идущими пробами связности.
+     *
+     * Непоказательное окно не записывается, но и не молчит: пустой замер
+     * неотличим от «правка не подействовала», и один прогон на этом уже потерян.
+     */
+    private fun recordWarpHoldWindow(
+        clientData: ClientData,
+        attempt: ConnectionAttempt,
+        window: SessionHoldMetric.Window,
+    ) {
+        val label = "${attempt.mode.name}@${attempt.endpointHost}:${attempt.port}"
+        if (!window.representative) {
+            LogManager.log(
+                "Удержание $label не замерено: ${window.rejectionReason}. " +
+                    "Проб ${window.probeCount}, окно ${window.spanMs} мс."
+            )
+            return
+        }
+        val recorded = runCatching {
+            clientData.recordWarpConfigHoldWindow(
+                host = attempt.endpointHost,
+                port = attempt.port,
+                window = window,
+            )
+        }.onFailure {
+            LogManager.log("Не удалось записать удержание узла $label: ${it.message}")
+        }.getOrDefault(false)
+        if (!recorded) {
+            LogManager.log(
+                "Удержание $label не записано: узла нет в списке проверенных конфигураций."
+            )
+            return
+        }
+        LogManager.log(
+            "Удержание $label: тишина ${window.worstStallMs} мс за окно ${window.spanMs} мс, " +
+                "проб ${window.probeCount}. " +
+                when {
+                    window.worstStallMs <= SessionHoldMetric.STEADY_MAX_STALL_MS ->
+                        "Обратный поток не пропадал."
+                    window.worstStallMs <= SessionHoldMetric.SHAKY_MAX_STALL_MS ->
+                        "Обратный поток проседал."
+                    else ->
+                        "Обратный поток пропадал надолго — узел уходит вниз очереди."
+                }
+        )
     }
 
     private fun beginConnectGeneration(stopExisting: Boolean = true): Int {
@@ -1839,7 +2033,14 @@ class NovaVpnService : OperaNativeVpnService() {
         connectGenerationId: Int,
         reason: String,
     ): Boolean {
-        if (!isConnectGenerationCurrent(connectGenerationId)) return false
+        if (!isConnectGenerationCurrent(connectGenerationId)) {
+            // Пишем только про явные пуски: сюда же приходят ротация профилей, повторы
+            // и восстановление после смены сети — их отсечки залили бы журнал.
+            if (reason in EXPLICIT_CONNECT_REASONS) {
+                logConnectAbortedBeforeStart("$reason/transport", connectGenerationId)
+            }
+            return false
+        }
         if (hasFreshPreparedTransportState(connectGenerationId)) {
             LogManager.log(
                 "Транспорт уже очищен для текущего connect-сеанса. " +
@@ -1860,10 +2061,17 @@ class NovaVpnService : OperaNativeVpnService() {
         return isConnectGenerationCurrent(connectGenerationId)
     }
 
+    /**
+     * @param allowForcedRelease снимать зависший guard силой. Для явного пуска это
+     * опасно: guard может держаться и из-за исключения в cleanup, и тогда форс просто
+     * запустит цикл поверх недоразобранного стека. Явные пути ждут и честно
+     * отказываются, а guard от исключений защищён try/finally в [cleanupAndStop].
+     */
     private fun waitForPreviousCleanupIfNeeded(
         connectGenerationId: Int,
         reason: String,
         maxWaitMs: Long = 1_600L,
+        allowForcedRelease: Boolean = true,
     ): Boolean {
         if (!cleanupInProgress.get()) {
             return connectGeneration.get() == connectGenerationId && !explicitStopRequested
@@ -1882,7 +2090,12 @@ class NovaVpnService : OperaNativeVpnService() {
                 return false
             }
         }
-        if (cleanupInProgress.get() && !explicitStopRequested && connectGeneration.get() == connectGenerationId) {
+        if (
+            allowForcedRelease &&
+            cleanupInProgress.get() &&
+            !explicitStopRequested &&
+            connectGeneration.get() == connectGenerationId
+        ) {
             LogManager.log(
                 "Cleanup предыдущего stop не отпустил guard вовремя. " +
                     "Снимаем cleanup-guard и продолжаем новый connect-сеанс: $reason"
@@ -1892,11 +2105,51 @@ class NovaVpnService : OperaNativeVpnService() {
         return !cleanupInProgress.get() && connectGeneration.get() == connectGenerationId && !explicitStopRequested
     }
 
+    /**
+     * Объясняет, почему цикл подключения не начался.
+     *
+     * Отсечки до старта были молчаливыми: пользователь нажимал «Пуск», в журнале не
+     * появлялось ни строки, и понять, что запуск съеден чужим cleanup, было нельзя.
+     */
+    private fun logConnectAbortedBeforeStart(reason: String, connectGenerationId: Int) {
+        LogManager.log(
+            "Цикл подключения ($reason) прерван до старта: " +
+                "поколение=${connectGeneration.get()} ожидалось=$connectGenerationId " +
+                "cleanupInProgress=${cleanupInProgress.get()} " +
+                "explicitStopRequested=$explicitStopRequested isUserStopped=$isUserStopped"
+        )
+    }
+
     private fun invalidateConnectGeneration() {
         connectGeneration.incrementAndGet()
         clearPreparedTransportState()
         connectedHealthProbeFailures = 0
         resetConnectedWarpHealthWindow()
+    }
+
+    /**
+     * Просит основной процесс повторить запуск, когда обречённый `:vpn` умрёт.
+     *
+     * Обещание «Android перезапустит службу» на устройстве не выполняется вовремя:
+     * после падения ActivityManager пишет `Scheduling restart of crashed service ... in
+     * 51242ms`, и нажатый «Пуск» оживает только через минуту. Явный
+     * `startForegroundService` из живого основного процесса эту задержку снимает — в том
+     * же журнале процесс поднимался через 30 мс после такого запуска.
+     *
+     * Отправляем до смерти: широковещание уходит через system_server, и выживание
+     * отправителя ему уже не нужно.
+     */
+    private fun requestRestartFromMainProcess() {
+        runCatching {
+            sendBroadcast(
+                Intent(ACTION_VPN_PROCESS_DOOMED).apply { setPackage(packageName) }
+            )
+        }.onFailure {
+            LogManager.log(
+                "Не удалось позвать основной процесс на перезапуск: ${it.message}. " +
+                    "Остаётся перезапуск средствами Android с его задержкой."
+            )
+        }
     }
 
     private fun isConnectGenerationCurrent(connectGenerationId: Int): Boolean {
@@ -4028,158 +4281,194 @@ class NovaVpnService : OperaNativeVpnService() {
         if (!cleanupInProgress.compareAndSet(false, true)) {
             return
         }
-        invalidateConnectGeneration()
-        val clientData = ClientData(this)
-        if (!forceServiceTeardown && !unexpectedDisconnect) {
-            clientData.clearSoftReapplyPending()
-        }
-        val delayServiceTeardownForOpera = !forceServiceTeardown && (
-            operaFallbackActive ||
-            operaTunThread != null ||
-            isOperaBackendLabel(currentBackendLabel)
-        )
-        explicitStopRequested = manualStopRequested && !unexpectedDisconnect
-        suppressSessionRestore = false
-        isUserStopped = manualStopRequested && !unexpectedDisconnect
-        isRunning = false
-        currentState = STATE_STOPPED
-        releaseRecoveryWakeLock()
-        resetEstablishNullLoopGuard()
-        currentAttemptOrdinal = 0
-        currentAttemptTotal = 0
-        observedUnderlyingNetworkId = null
-        observedUnderlyingNetworkSignature = null
-        observedUnderlyingUnavailable = false
-        pendingNetworkRecoveryReason = null
-        networkRecoveryHandler.removeCallbacks(networkRecoveryRunnable)
-        setCurrentBackend(BACKEND_WARP)
-        if (!preserveRestartSession) {
-            clientData.clearRestartSession()
-        }
-        if (manualStopRequested && !unexpectedDisconnect) {
-            cancelStopCleanupConfirmation()
-        }
-        LogManager.log(
-            if (unexpectedDisconnect) {
-                "VPN-сеанс завершился неожиданно. Останавливаем текущий стек."
-            } else {
-                "Система остановлена."
+        // Guard снимаем в finally: между взведением и снятием больше сотни строк, и
+        // любое исключение внутри оставляло бы cleanupInProgress взведённым навсегда —
+        // а с ним isConnectGenerationCurrent гасит все будущие циклы подключения.
+        try {
+            invalidateConnectGeneration()
+            // Снимок поколения: если пока идёт разбор стека придёт явный пуск, он
+            // выдаст себе номер больше этого — по нему хвост и узнаёт, что гасить
+            // больше нечего.
+            val cleanupGeneration = connectGeneration.get()
+            val clientData = ClientData(this)
+            if (!forceServiceTeardown && !unexpectedDisconnect) {
+                clientData.clearSoftReapplyPending()
             }
-        )
+            val delayServiceTeardownForOpera = !forceServiceTeardown && (
+                operaFallbackActive ||
+                operaTunThread != null ||
+                isOperaBackendLabel(currentBackendLabel)
+            )
+            explicitStopRequested = manualStopRequested && !unexpectedDisconnect
+            suppressSessionRestore = false
+            isUserStopped = manualStopRequested && !unexpectedDisconnect
+            isRunning = false
+            currentState = STATE_STOPPED
+            releaseRecoveryWakeLock()
+            resetEstablishNullLoopGuard()
+            currentAttemptOrdinal = 0
+            currentAttemptTotal = 0
+            observedUnderlyingNetworkId = null
+            observedUnderlyingNetworkSignature = null
+            observedUnderlyingUnavailable = false
+            pendingNetworkRecoveryReason = null
+            networkRecoveryHandler.removeCallbacks(networkRecoveryRunnable)
+            setCurrentBackend(BACKEND_WARP)
+            if (!preserveRestartSession) {
+                clientData.clearRestartSession()
+            }
+            if (manualStopRequested && !unexpectedDisconnect) {
+                cancelStopCleanupConfirmation()
+            }
+            LogManager.log(
+                if (unexpectedDisconnect) {
+                    "VPN-сеанс завершился неожиданно. Останавливаем текущий стек."
+                } else {
+                    "Система остановлена."
+                }
+            )
 
-        stopNovaCoreEngine(allowBlockingWait = true)
-        stopOperaFallback(stopProxyManager = true, allowBlockingWait = true)
-        try {
-            XrayBridge.stop()
-        } catch (t: Throwable) {
-            LogManager.log("Не удалось остановить ядро Xray при остановке сервиса: ${t.message}")
-        }
-        LocalDnsProxyManager.stop(LogManager::log)
-        LocalAppProxyManager.stop(this, LogManager::log)
-        closeActiveInterface()
-        val connectivityManager = getSystemService(android.net.ConnectivityManager::class.java)
-        val aggressiveManualDetach = manualStopRequested && shouldUseAggressiveStopDetach()
-        val shouldUseSyntheticDetach = allowSyntheticDetach && aggressiveManualDetach
-        val fallbackDetachAllowed =
-            allowSyntheticDetach &&
-                manualStopRequested &&
-                !unexpectedDisconnect &&
-                !preserveRestartSession
-        if (shouldUseSyntheticDetach) {
-            LogManager.log("Выполняем агрессивный detach VPN для явного stop на Android 10/Honor/Huawei.")
-            forceDetachVpnStack()
+            stopNovaCoreEngine(allowBlockingWait = true)
+            stopOperaFallback(stopProxyManager = true, allowBlockingWait = true)
             try {
-                Thread.sleep(180L)
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
+                XrayBridge.stop()
+            } catch (t: Throwable) {
+                LogManager.log("Не удалось остановить ядро Xray при остановке сервиса: ${t.message}")
             }
-        }
-        try {
-            Thread.sleep(220L)
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-        }
-        if (findCurrentVpnNetwork(connectivityManager) != null) {
+            LocalDnsProxyManager.stop(LogManager::log)
+            LocalAppProxyManager.stop(this, LogManager::log)
+            closeActiveInterface()
+            val connectivityManager = getSystemService(android.net.ConnectivityManager::class.java)
+            val aggressiveManualDetach = manualStopRequested && shouldUseAggressiveStopDetach()
+            val shouldUseSyntheticDetach = allowSyntheticDetach && aggressiveManualDetach
+            val fallbackDetachAllowed =
+                allowSyntheticDetach &&
+                    manualStopRequested &&
+                    !unexpectedDisconnect &&
+                    !preserveRestartSession
             if (shouldUseSyntheticDetach) {
-                try {
-                    Thread.sleep(180L)
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                }
-                if (findCurrentVpnNetwork(connectivityManager) != null) {
-                    LogManager.log("После первого detach VPN всё ещё висит в системе. Повторяем принудительный сброс.")
-                    forceDetachVpnStack()
-                }
-            } else if (fallbackDetachAllowed) {
-                LogManager.log(
-                    "После штатного stop Android всё ещё видит VPN Nova. " +
-                        "Выполняем единичный synthetic detach, чтобы снять зависший VPN-стек."
-                )
+                LogManager.log("Выполняем агрессивный detach VPN для явного stop на Android 10/Honor/Huawei.")
                 forceDetachVpnStack()
                 try {
                     Thread.sleep(180L)
                 } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
                 }
-                if (findCurrentVpnNetwork(connectivityManager) != null) {
+            }
+            try {
+                Thread.sleep(220L)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+            if (findCurrentVpnNetwork(connectivityManager) != null) {
+                if (shouldUseSyntheticDetach) {
+                    try {
+                        Thread.sleep(180L)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                    }
+                    if (findCurrentVpnNetwork(connectivityManager) != null) {
+                        LogManager.log("После первого detach VPN всё ещё висит в системе. Повторяем принудительный сброс.")
+                        forceDetachVpnStack()
+                    }
+                } else if (fallbackDetachAllowed) {
                     LogManager.log(
-                        "После fallback detach системный VPN всё ещё не снят. " +
-                            "Оставляем delayed confirmation на добивку cleanup."
+                        "После штатного stop Android всё ещё видит VPN Nova. " +
+                            "Выполняем единичный synthetic detach, чтобы снять зависший VPN-стек."
                     )
-                    scheduleStopCleanupConfirmation()
+                    forceDetachVpnStack()
+                    try {
+                        Thread.sleep(180L)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                    }
+                    if (findCurrentVpnNetwork(connectivityManager) != null) {
+                        LogManager.log(
+                            "После fallback detach системный VPN всё ещё не снят. " +
+                                "Оставляем delayed confirmation на добивку cleanup."
+                        )
+                        scheduleStopCleanupConfirmation()
+                    } else {
+                        LogManager.log("Fallback detach успешно снял зависший VPN-стек.")
+                        cancelStopCleanupConfirmation()
+                    }
                 } else {
-                    LogManager.log("Fallback detach успешно снял зависший VPN-стек.")
-                    cancelStopCleanupConfirmation()
+                    LogManager.log(
+                        "После штатного stop Android всё ещё видит VPN Nova. " +
+                            "Synthetic detach пропускаем, чтобы не создавать временный VPN и не моргать Wi‑Fi."
+                    )
+                    if (manualStopRequested && !unexpectedDisconnect && !preserveRestartSession) {
+                        scheduleStopCleanupConfirmation()
+                    }
                 }
+            } else if (aggressiveManualDetach) {
+                LogManager.log("После агрессивного detach живой VPN-сети уже не видно.")
+                cancelStopCleanupConfirmation()
             } else {
-                LogManager.log(
-                    "После штатного stop Android всё ещё видит VPN Nova. " +
-                        "Synthetic detach пропускаем, чтобы не создавать временный VPN и не моргать Wi‑Fi."
-                )
-                if (manualStopRequested && !unexpectedDisconnect && !preserveRestartSession) {
-                    scheduleStopCleanupConfirmation()
+                LogManager.log("VPN-стек уже снят штатно. Принудительный detach не нужен.")
+                cancelStopCleanupConfirmation()
+            }
+            currentAttemptOrdinal = 0
+            currentAttemptTotal = 0
+            if (connectGeneration.get() != cleanupGeneration) {
+                cancelStopCleanupConfirmation()
+                if (tun2proxyForceStopAtMs != 0L) {
+                    // В этой остановке звали tun2proxy_stop, значит через две секунды
+                    // библиотека выполнит exit(-1) и процесс умрёт в любом случае.
+                    // Поднимать в нём новую сессию — значит через эти две секунды
+                    // уронить уже работающий туннель, что и происходило.
+                    LogManager.log(
+                        "В этой остановке был force-stop tun2proxy: процесс :vpn обречён " +
+                            "и умрёт в ближайшие секунды. Новый цикл в нём не начинаем — " +
+                            "просим основной процесс повторить запуск в свежем :vpn."
+                    )
+                    requestRestartFromMainProcess()
+                    invalidateConnectGeneration()
+                    return
                 }
-            }
-        } else if (aggressiveManualDetach) {
-            LogManager.log("После агрессивного detach живой VPN-сети уже не видно.")
-            cancelStopCleanupConfirmation()
-        } else {
-            LogManager.log("VPN-стек уже снят штатно. Принудительный detach не нужен.")
-            cancelStopCleanupConfirmation()
-        }
-        currentAttemptOrdinal = 0
-        currentAttemptTotal = 0
-        broadcastState(STATE_STOPPED)
-        // Раздача живёт отдельно от туннеля. На клиентах уже прописаны адрес и порт,
-        // и терять их вместе с остановкой VPN нельзя: человек увидит не «VPN
-        // выключен», а «интернет пропал», и пойдёт перенастраивать телевизор.
-        // Служба остаётся именно в foreground — без него Android быстро её убьёт,
-        // и шлюз исчезнет тем же способом, только с задержкой.
-        if (!forceServiceTeardown && ClientData(this).isLocalProxyEnabled()) {
-            cleanupInProgress.set(false)
-            runCatching {
-                startForeground(
-                    NOTIFICATION_ID,
-                    createNotification("VPN выключен, работает только раздача"),
+                // Пока разбирали стек, пользователь запустил подключение заново. Хвост
+                // прошлой остановки не должен ни возвращать экран в «выключено», ни
+                // снимать foreground, ни звать stopSelf под уже начавшимся циклом.
+                LogManager.log(
+                    "Хвост cleanup застал новый явный запуск (поколение ${connectGeneration.get()}). " +
+                        "STOPPED, снятие foreground и stopSelf пропускаем."
                 )
+                return
             }
-            syncLocalAppProxy(reason = "gateway-keepalive")
-            LogManager.log(
-                "VPN остановлен, но раздача включена: службу оставляем, адрес и порт " +
-                    "для клиентов сохраняются."
-            )
-            return
+            broadcastState(STATE_STOPPED)
+            // Раздача живёт отдельно от туннеля. На клиентах уже прописаны адрес и порт,
+            // и терять их вместе с остановкой VPN нельзя: человек увидит не «VPN
+            // выключен», а «интернет пропал», и пойдёт перенастраивать телевизор.
+            // Служба остаётся именно в foreground — без него Android быстро её убьёт,
+            // и шлюз исчезнет тем же способом, только с задержкой.
+            if (!forceServiceTeardown && ClientData(this).isLocalProxyEnabled()) {
+                cleanupInProgress.set(false)
+                runCatching {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        createNotification("VPN выключен, работает только раздача"),
+                    )
+                }
+                syncLocalAppProxy(reason = "gateway-keepalive")
+                LogManager.log(
+                    "VPN остановлен, но раздача включена: службу оставляем, адрес и порт " +
+                        "для клиентов сохраняются."
+                )
+                return
+            }
+            finishForegroundShutdown()
+            cleanupInProgress.set(false)
+            if (delayServiceTeardownForOpera && !explicitStopRequested) {
+                LogManager.log("Opera shutdown завершён. Сервис оставляем живым, чтобы избежать native abort tun2proxy после stop.")
+                return
+            }
+            if (forceServiceTeardown) {
+                LogManager.log("Выполняем полный stop сервиса для безопасного мягкого рестарта VPN.")
+            }
+            stopSelf()
+        } finally {
+            cleanupInProgress.set(false)
         }
-        finishForegroundShutdown()
-        cleanupInProgress.set(false)
-        if (delayServiceTeardownForOpera && !explicitStopRequested) {
-            LogManager.log("Opera shutdown завершён. Сервис оставляем живым, чтобы избежать native abort tun2proxy после stop.")
-            return
-        }
-        if (forceServiceTeardown) {
-            LogManager.log("Выполняем полный stop сервиса для безопасного мягкого рестарта VPN.")
-        }
-        stopSelf()
     }
 
     private fun configureAndStartVpn(
@@ -4287,6 +4576,14 @@ class NovaVpnService : OperaNativeVpnService() {
                 LogManager.log(
                     "Transparent Telegram relay: профиль=$telegramTransparentProfile, " +
                         "Telegram/Nagram/AyuGram трафик пойдёт через встроенный WS/WSS transport."
+                )
+            } else {
+                // Молчащий «выключен» уже стоил одного прогона: журнал был пуст, и
+                // отличить «релей не понадобился» от «правка не подействовала»
+                // оказалось нечем. Причина отказа обязана быть в журнале.
+                LogManager.log(
+                    "Transparent Telegram relay выключен: " +
+                        clientData.describeMessengerWarpProfilesRefusal() + "."
                 )
             }
             if (preferMessengerChatProfiles) {
@@ -6205,7 +6502,7 @@ class NovaVpnService : OperaNativeVpnService() {
                     tunFd,
                     true,
                     VLESS_TUN_MTU.toChar(),
-                    1,
+                    TUN2PROXY_DNS_VIRTUAL,
                     3,
                 )
                 operaTunLastExitCode = exitCode
@@ -6651,6 +6948,26 @@ class NovaVpnService : OperaNativeVpnService() {
         val normalizedRegion = normalizeRegionPreference(regionPreference)
         if (normalizedRegion != "eu" && normalizedRegion != "us") return false
         if (!isConnectGenerationCurrent(connectGenerationId) || isUserStopped) return false
+        // Временный WARP — это другой протокол и другая страна выхода. В «Авто» такой
+        // размен делает само приложение и он законен, при выбранном EU/US — нет:
+        // ровно так выбранный регион и превращался в WARP через минуту после неудачи.
+        val userChoice = clientData.getExitRegionPreference()
+        if (!RegionTransportPolicy.allowsTransportSubstitution(userChoice)) {
+            LogManager.log(
+                "Opera ${normalizedRegion.uppercase(Locale.US)} не поднялась, но регион выбран явно: " +
+                    "временный WARP-bootstrap не запускаем. Подмена протокола допустима только в «Авто»."
+            )
+            // Сюда приходят и с живого туннеля — по серии upstream 500/502. Там регион
+            // работает, просто плохо, и «не подключается» было бы неправдой.
+            if (currentState != STATE_CONNECTED) {
+                publishTransportNotice(
+                    clientData,
+                    "${normalizedRegion.uppercase(Locale.US)} не подключается: узлы Opera не отвечают. " +
+                        "Выбранный регион на WARP не меняем — переключитесь на «Авто», если это допустимо."
+                )
+            }
+            return false
+        }
         if (!OperaProxyManager.isLastFailureWorthWarpBootstrap()) return false
         if (!clientData.canStartOperaBootstrapViaWarp()) {
             LogManager.log("WARP-bootstrap для Opera недавно уже запускался. Повтор не делаем, чтобы не уйти в цикл.")
@@ -6869,7 +7186,7 @@ class NovaVpnService : OperaNativeVpnService() {
                     tunFd,
                     true,
                     1420.toChar(),
-                    1,
+                    TUN2PROXY_DNS_VIRTUAL,
                     3,
                 )
                 operaTunLastExitCode = exitCode
@@ -6897,14 +7214,32 @@ class NovaVpnService : OperaNativeVpnService() {
             else -> 22_000L
         }
 
-        val operaProxyHealthCheckEnabled = clientData.getSplitMode() != 0
+        // Проба через сам прокси нужна всегда, а не только при раздельном туннелировании.
+        //
+        // Две другие пробы на Opera структурно бессильны: CONNECT на 53-й порт прокси не
+        // пропускает, поэтому DNS через туннель не проходит, а без DNS система не ставит
+        // VALIDATED. Оставалась одна рабочая проверка — и она была выключена у всех, кто
+        // не настроил split-режим.
+        val operaProxyHealthCheckEnabled = true
 
         while (!isUserStopped && tunThread.isAlive && SystemClock.elapsedRealtime() < connectDeadline && isConnectGenerationCurrent(connectGenerationId)) {
             Thread.sleep(1000L)
             vpnNetwork = findCurrentVpnNetwork(connectivityManager) ?: vpnNetwork
             val validated = isValidatedVpnNetwork(connectivityManager, vpnNetwork)
             val tunnelReady = hasTunnelConnectivity(vpnNetwork, 1400, allowHttpDnsFallback = false)
+            // Бюджет здесь не трогаем: у цикла жёсткий дедлайн 22/26 с, и удлинение
+            // пробы стоило бы попыток. Замер публикуем, чтобы к моменту STATE_CONNECTED
+            // экрану было что показать. Число завышено — в него входит первый подъём
+            // upstream-соединения прокси до edge; через полторы секунды цикл удержания
+            // перепишет его честным.
+            val connectProbeStartedAtMs = SystemClock.elapsedRealtime()
             val proxyReady = operaProxyHealthCheckEnabled && hasOperaProxyConnectivity(1400)
+            if (proxyReady) {
+                clientData.publishTransportLatency(
+                    (SystemClock.elapsedRealtime() - connectProbeStartedAtMs).toInt().coerceAtLeast(0),
+                    TRANSPORT_OPERA,
+                )
+            }
             if (validated || tunnelReady || proxyReady) {
                 connected = true
                 connectedAtMs = SystemClock.elapsedRealtime()
@@ -6933,12 +7268,43 @@ class NovaVpnService : OperaNativeVpnService() {
         OperaProxyManager.markCurrentMaskHostSuccessful(applicationContext)
         broadcastState(STATE_CONNECTED)
 
+        // То же правило, что у встроенных профилей: наверх очереди поднимается не то,
+        // что подключилось, а то, что продержалось. Подключиться успевает и выход,
+        // который через секунду отваливается, — с ним перебор ходил бы по кругу.
+        var stablePlanPromoted = false
+
         while (!isUserStopped && tunThread.isAlive && isConnectGenerationCurrent(connectGenerationId)) {
             Thread.sleep(1500L)
+            if (
+                !stablePlanPromoted &&
+                connectedAtMs > 0L &&
+                SystemClock.elapsedRealtime() - connectedAtMs >= STABLE_LAST_SUCCESS_HOLD_MS
+            ) {
+                stablePlanPromoted = true
+                val promoted = OperaProxyManager.promoteCurrentLaunchPlan(applicationContext)
+                if (promoted.isNotEmpty()) {
+                    LogManager.log(
+                        "Opera $operaLabel удержалась 20 секунд. Поднимаем этот способ наверх очереди: $promoted."
+                    )
+                }
+            }
             vpnNetwork = findCurrentVpnNetwork(connectivityManager) ?: vpnNetwork
             val validated = isValidatedVpnNetwork(connectivityManager, vpnNetwork)
             val tunnelReady = hasTunnelConnectivity(vpnNetwork, 1200, allowHttpDnsFallback = false)
-            val proxyReady = operaProxyHealthCheckEnabled && hasOperaProxyConnectivity(1200)
+            // Проба живости и есть замер задержки: запрос уходит наружу через сам прокси.
+            // Экран измерить не может — в режиме Opera пакет Nova всегда вне VPN
+            // (applyOperaSplitTunnelPolicy исключает его во всех трёх ветках), сети VPN
+            // он не видит, а порт локального прокси служба выбирает на лету в процессе
+            // :vpn и в основной процесс он не долетает.
+            val probeStartedAtMs = SystemClock.elapsedRealtime()
+            val proxyReady = operaProxyHealthCheckEnabled &&
+                hasOperaProxyConnectivity(OPERA_SESSION_PROBE_TIMEOUT_MS)
+            if (proxyReady) {
+                clientData.publishTransportLatency(
+                    (SystemClock.elapsedRealtime() - probeStartedAtMs).toInt().coerceAtLeast(0),
+                    TRANSPORT_OPERA,
+                )
+            }
             if (validated || tunnelReady || proxyReady) {
                 failures = 0
                 lastHealthyAtMs = SystemClock.elapsedRealtime()
@@ -6963,11 +7329,18 @@ class NovaVpnService : OperaNativeVpnService() {
         }
 
         if (cleanupInProgress.get() || explicitStopRequested) {
+            // Тот же сброс, что и на обычном выходе: путь через STATE_STOPPED страхует
+            // не всегда — broadcastState глушит всё, кроме STOPPED, а cleanup может
+            // закончиться и без него.
+            clientData.clearTransportLatency()
             operaTunThread = null
             operaFallbackActive = false
             return OperaFallbackResult.CONNECTED
         }
 
+        // Замер принадлежит закончившейся сессии: без сброса он ещё восемь секунд
+        // выдавался бы за пинг следующего транспорта.
+        clientData.clearTransportLatency()
         stopOperaFallback(
             joinTimeoutMs = 2500L,
             stopProxyManager = readyState == OperaProxyManager.ReadyState.STARTED_INTERNAL,
@@ -6998,6 +7371,40 @@ class NovaVpnService : OperaNativeVpnService() {
         }
     }
 
+    /**
+     * Единственная точка вызова `tun2proxy_stop()` — и точка признания приговора.
+     *
+     * Дизассемблирование `libtun2proxy.so` показало: после этого вызова библиотека
+     * безусловно поднимает отсоединённый поток «поспать 2 секунды → `exit(-1)`», не
+     * проверяя между сном и выходом ничего. Отменить фитиль нечем. `exit` запускает
+     * `__cxa_finalize`, тот разрушает глобальные мьютексы, и любой поток, висящий в
+     * этот момент в нативном чтении, роняет процесс на разрушенном мьютексе.
+     *
+     * Дефект, ради которого это записано: остановка вызывала force-stop, через 160 мс
+     * пользователь запускал подключение заново, оно успевало подняться — и через две
+     * секунды догоравший фитиль убивал уже работающий туннель.
+     */
+    private fun forceStopTun2proxy(reason: String, thread: Thread?, wasActive: Boolean) {
+        tun2proxyForceStopAtMs = SystemClock.elapsedRealtime()
+        LogManager.log(
+            "force-stop tun2proxy ($reason): поток жив=${thread?.isAlive}, wasActive=$wasActive, " +
+                "код выхода=$operaTunLastExitCode. После вызова процесс :vpn обречён — " +
+                "новую сессию в нём поднимать нельзя."
+        )
+        try {
+            OperaNativeVpnService.haltTun2proxy { LogManager.log("[tun2proxy] $it") }
+        } catch (t: Throwable) {
+            LogManager.log("[tun2proxy] force-stop не удался: ${t.message}")
+        }
+    }
+
+    private fun logForceStopSkipped(reason: String, thread: Thread?, wasActive: Boolean) {
+        LogManager.log(
+            "force-stop tun2proxy пропущен ($reason): поток жив=${thread?.isAlive}, " +
+                "wasActive=$wasActive, код выхода=$operaTunLastExitCode."
+        )
+    }
+
     private fun stopOperaFallback(
         joinTimeoutMs: Long = 2500L,
         stopProxyManager: Boolean = false,
@@ -7022,10 +7429,9 @@ class NovaVpnService : OperaNativeVpnService() {
                     )
                 }
                 if (shouldForceStopTun) {
-                    try {
-                        OperaNativeVpnService.haltTun2proxy()
-                    } catch (_: Exception) {
-                    }
+                    forceStopTun2proxy("асинхронная остановка", thread, wasActive)
+                } else {
+                    logForceStopSkipped("асинхронная остановка", thread, wasActive)
                 }
                 if (thread != null && thread.isAlive && thread !== Thread.currentThread()) {
                     try {
@@ -7057,10 +7463,9 @@ class NovaVpnService : OperaNativeVpnService() {
             )
         }
         if (shouldForceStopTun) {
-            try {
-                OperaNativeVpnService.haltTun2proxy()
-            } catch (_: Exception) {
-            }
+            forceStopTun2proxy("синхронная остановка", thread, wasActive)
+        } else {
+            logForceStopSkipped("синхронная остановка", thread, wasActive)
         }
         if (thread != null && thread.isAlive) {
             if (thread !== Thread.currentThread()) {
@@ -7071,9 +7476,19 @@ class NovaVpnService : OperaNativeVpnService() {
                 }
             }
         }
-        operaTunThread = null
-        operaFallbackActive = false
-        operaTunLastExitCode = null
+        // Сброс учёта — только если гасили именно тот поток, который держим. Иначе
+        // хвост старой остановки обнулял бы состояние уже новой сессии, и следующая
+        // остановка решила бы, что убивать нечего, оставив живой tun2proxy работать.
+        if (operaTunThread === thread || operaTunThread?.isAlive != true) {
+            operaTunThread = null
+            operaFallbackActive = false
+            operaTunLastExitCode = null
+        } else {
+            LogManager.log(
+                "Хвост stopOperaFallback застал уже новый поток tun2proxy " +
+                    "(${operaTunThread?.name}): учёт не трогаем."
+            )
+        }
         if (stopProxyManager) {
             OperaProxyManager.stopManaged(::logOperaProxyManagerMessage)
             ClientData(this).setTrafficMaskActiveHost(null)
@@ -8025,14 +8440,29 @@ class NovaVpnService : OperaNativeVpnService() {
         val matchingConfig = findMatchingWarpVerifiedConfigForAttempt(attempt, clientData)
             ?: return emptyList()
 
-        val extras = extractSupportedAwgInterfaceLines(
+        val allExtras = extractSupportedAwgInterfaceLines(
             rawConfig = matchingConfig.rawConfig,
             includeHandshakePayloads = true,
         )
-        if (extras.isNotEmpty()) {
+        val extras = if (clientData.isAwgJunkDisabled()) {
+            // Опыт по проблеме 5: мы шлём по Jc мусорных пакетов перед каждым
+            // рукопожатием на живой сервер Cloudflare, а рукопожатий втрое больше
+            // нормы. Отключаемый junk даёт вторую точку замера на том же узле —
+            // без него сравнивать не с чем, и любая правка алгоритма была бы
+            // угадыванием. Заголовки и паддинги (H/S) остаются: их край принимает
+            // как обычный WireGuard.
+            allExtras.filterNot { line ->
+                line.substringBefore('=').trim().uppercase(Locale.US)
+                    .matches(Regex("JC|JMIN|JMAX|I[1-5]"))
+            }
+        } else {
+            allExtras
+        }
+        if (extras.isNotEmpty() || allExtras.isNotEmpty()) {
             LogManager.log(
                 "AWG client extras for ${attempt.endpointHost}:${attempt.port}/${attempt.mode.name}: " +
-                    extras.joinToString(", ") { it.substringBefore('=').trim() }
+                    extras.joinToString(", ") { it.substringBefore('=').trim() }.ifBlank { "<нет>" } +
+                    if (clientData.isAwgJunkDisabled()) " (junk отключён отладочным ключом)" else ""
             )
         }
         return extras
@@ -9314,16 +9744,10 @@ class NovaVpnService : OperaNativeVpnService() {
                                     poolHint = maskPoolHint,
                                 )
                                 clientData.recordWarpTrafficMaskAttempt(activeMaskHost, success = true)
-                                clientData.recordWarpVerifiedPreferredSni(
-                                    engine = transportMode.engine,
-                                    mode = transportMode.name,
-                                    host = currentHost,
-                                    port = currentPort,
-                                    preferredSni = activeMaskHost,
-                                    endpointSource = normalizeVerifiedConfigSource(currentAttempt.endpointSource),
-                                    rawConfig = buildWarpConfigDescription(currentAttempt),
-                                    scope = verifiedConfigScope,
-                                )
+                                // Имя в профиль больше не записывается. Именно эта строка
+                                // и проставляла маску всем пятидесяти профилям за один
+                                // прогон адаптации, после чего она подставлялась сама и
+                                // переживала выключение маскировки.
                             }
                         }
                         if (
@@ -13727,20 +14151,27 @@ class NovaVpnService : OperaNativeVpnService() {
         manualFirstAttemptKey: String? = null,
     ): List<ConnectionAttempt> {
         val bundledSeedCount = bundledSeedConfigs.size.coerceAtLeast(1)
-        val promotedBundledSeedOrder = bundledSeedConfigs
-            .filter { it.promotedAt > 0L && it.seedOrder != Int.MAX_VALUE }
-            .maxByOrNull { it.promotedAt }
-            ?.seedOrder
+        /**
+         * Прошивочный порядок — грубыми корзинами, а не поштучно.
+         *
+         * Пока здесь стоял сам `seedOrder`, очередь встроенных профилей задавалась
+         * им целиком: у всех пятидесяти записей он разный, равенства по первому
+         * ключу не случается никогда, и все следующие ключи — качество, пинг,
+         * удержание, числовая оценка — были недостижимы. Адаптация мерила
+         * профили, а очередь после неё не менялась ни на шаг; штраф за churn,
+         * заведённый ради того же, тоже никуда не попадал. Корзина оставляет
+         * прошивке грубую власть (первая десятка идёт раньше второй) и отдаёт
+         * порядок внутри десятки замерам с устройства.
+         */
         fun bundledSeedQueueOrder(config: WarpVerifiedConfig): Int {
-            val seedOrder = config.seedOrder
-            if (seedOrder == Int.MAX_VALUE) return Int.MAX_VALUE
-            return seedOrder
+            return SessionHoldMetric.bundledSeedQueueBucket(config.seedOrder)
         }
 
         val sortedVerifiedConfigs = bundledSeedConfigs
             .sortedWith(
                 compareBy<WarpVerifiedConfig> { bundledSeedQueueOrder(it) }
                     .thenByDescending { clientData.getWarpVerifiedQualityTier(it) }
+                    .thenByDescending { clientData.warpConfigHoldGrade(it) }
                     .thenByDescending { it.qualityPingSuccesses }
                     .thenBy {
                         if (it.qualityPingSuccesses > 0 && it.qualityAvgPingMs > 0.0) {
@@ -13752,6 +14183,9 @@ class NovaVpnService : OperaNativeVpnService() {
                     .thenBy { it.qualityFailureCount }
                     .thenByDescending { clientData.getWarpVerifiedPriorityScore(it) }
                     .thenByDescending { it.lastVerifiedAt }
+                    // Замеров может не быть вовсе — тогда порядок обязан остаться
+                    // прошивочным и одинаковым от запуска к запуску.
+                    .thenBy { it.seedOrder }
             )
         val manualKey = manualFirstAttemptKey?.trim()?.takeIf { it.isNotBlank() }
         val verifiedConfigs = if (manualKey != null) {
@@ -14126,9 +14560,11 @@ class NovaVpnService : OperaNativeVpnService() {
                     networkClass = strategyNetworkClass,
                 )
             }
+            // Корзина, а не сам seedOrder: поштучный прошивочный порядок делал все
+            // следующие ключи недостижимыми, см. buildBuiltInWarpAttemptSet.
             fun bundledSeedQueueOrder(item: WarpVerifiedConfig): Int {
                 if (!clientData.isBundledSeed(item)) return Int.MAX_VALUE
-                return item.seedOrder
+                return SessionHoldMetric.bundledSeedQueueBucket(item.seedOrder)
             }
             return items
                 .filter { !it.manual }
@@ -14138,6 +14574,7 @@ class NovaVpnService : OperaNativeVpnService() {
                             if (clientData.isBundledSeed(it)) bundledSeedQueueOrder(it) else Int.MAX_VALUE
                         }
                         .thenByDescending { clientData.getWarpVerifiedQualityTier(it) }
+                        .thenByDescending { clientData.warpConfigHoldGrade(it) }
                         .thenByDescending { clientData.isExactFreshWarpVerifiedLastSuccessMatch(it) }
                         .thenByDescending { it.qualityPingSuccesses }
                         .thenBy {
@@ -14154,6 +14591,8 @@ class NovaVpnService : OperaNativeVpnService() {
                         }
                         .thenByDescending { it.lastVerifiedAt }
                         .thenByDescending { it.userImported }
+                        // Без замеров порядок обязан остаться прошивочным.
+                        .thenBy { it.seedOrder }
                 )
         }
         fun exported(scope: String): List<WarpVerifiedConfig> =
@@ -16439,14 +16878,29 @@ class NovaVpnService : OperaNativeVpnService() {
         return nextDistinctIndex ?: defaultNext
     }
 
+    /**
+     * Подстановка маскировочного имени в WARP выключена — решение владельца
+     * (2026-08-10).
+     *
+     * Что она делала. Каждое удачное подключение записывало активный домен
+     * маскировки в `preferredSni` профиля, а прогон адаптации проставлял его
+     * **всем пятидесяти** разом. Дальше имя жило в сохранённых конфигурациях и
+     * подставлялось само, причём в обход выключателя маскировки: ветка с
+     * сохранённым именем в [publishWarpTrafficMaskHint] стояла раньше проверки
+     * «маскировка включена». Когда сеть переставала пропускать это имя, перебор
+     * шёл по всему списку и сбрасывал его по одному — восемь секунд на профиль,
+     * минуты вместо секунд на подключение.
+     *
+     * Цена подстановки оказалась выше пользы: WARP — это WireGuard поверх UDP,
+     * имени в нём нет, маскировка была отдельным ходом ради ограниченных сетей.
+     * Список доменов и выключатель остаются в настройках и в каталоге — убрана
+     * именно подстановка, чтобы вернуть её можно было одним местом, а не
+     * восстанавливая по кускам.
+     */
     private fun resolveWarpTrafficMaskHosts(
-        clientData: ClientData,
+        @Suppress("UNUSED_PARAMETER") clientData: ClientData,
     ): List<String> {
-        if (!clientData.getTrafficMaskEnabled()) return emptyList()
-        return when (clientData.getTrafficMaskMode()) {
-            "custom" -> listOf(clientData.getTrafficMaskHost()).filter { it.isNotBlank() }
-            else -> buildWarpTrafficMaskCatalog(clientData).take(16)
-        }
+        return emptyList()
     }
 
     private fun buildWarpTrafficMaskCatalog(clientData: ClientData): List<String> {
@@ -16473,18 +16927,10 @@ class NovaVpnService : OperaNativeVpnService() {
         attemptIndex: Int,
         preferredHost: String? = null,
     ) {
-        val preferred = normalizeRuntimeTrafficMaskHost(preferredHost)
-        if (preferred.isNotBlank()) {
-            val previousHost = currentWarpMaskHost
-            currentWarpMaskHost = preferred
-            val poolHint = resolveWarpTrafficMaskPoolHint(clientData)
-            clientData.setTrafficMaskActiveHost(preferred, poolHint)
-            clientData.setWarpTrafficMaskActiveHost(preferred)
-            if (!preferred.equals(previousHost, ignoreCase = true)) {
-                LogManager.log("WARP profile SNI: текущий fake host = $preferred")
-            }
-            return
-        }
+        // Сохранённое имя больше не подставляется. Раньше эта ветка стояла ВЫШЕ
+        // проверки «маскировка включена», поэтому имя, однажды записанное в
+        // профиль, применялось даже при выключенном тумблере — и переживало
+        // выключение маскировки, не спрашивая никого. См. [resolveWarpTrafficMaskHosts].
         if (!clientData.getTrafficMaskEnabled() || trafficMaskHosts.isEmpty()) {
             currentWarpMaskHost = null
             clientData.setTrafficMaskActiveHost(null)
@@ -17113,6 +17559,87 @@ class NovaVpnService : OperaNativeVpnService() {
             ) -> normalized
             else -> if (normalizedReserved.isNullOrBlank()) "warp-awg" else "reserved-only"
         }
+    }
+
+    /**
+     * Считает, как часто туннель пересобирает рукопожатие на живой сессии.
+     *
+     * Замер сессии 2026-08-09: 18 рукопожатий за семь минут, каждое проходит с
+     * первого раза за 40–60 мс, ошибок приёма нет — и семнадцать раз ядро пишет
+     * «stopped hearing back after 15 seconds». Таймер перерукопожатия взводится
+     * только отправкой **данных**, keepalive его не трогает (см.
+     * `timersDataSent` в amneziawg-go), и снимается любым принятым пакетом.
+     * Значит это не тишина простоя: мы отправляли трафик и пятнадцать секунд не
+     * получали ничего в ответ. Ровно в эти окна и проваливается пинг.
+     *
+     * Экран этого не видел: ни один слой Nova не смотрел на частоту рукопожатий
+     * во время работы. `last_handshake_time_sec` уже отдаёт ядро — считаем по
+     * нему, без правок в самом amneziawg-go.
+     */
+    private fun sampleTunnelRekeyChurn() {
+        if (currentState != STATE_CONNECTED || !novaCoreTunnelActive) {
+            resetTunnelRekeyChurn()
+            return
+        }
+        val stats = readTunnelStats()
+        val handshakeSec = stats.lastHandshakeTimeSec
+        if (handshakeSec <= 0L) return
+        val nowMs = SystemClock.elapsedRealtime()
+        if (tunnelRekeyWindowStartedAtMs == 0L) {
+            tunnelRekeyWindowStartedAtMs = nowMs
+            lastSeenHandshakeTimeSec = handshakeSec
+            tunnelRekeyWindowRxBytes = stats.rxBytes
+            tunnelRekeyWindowTxBytes = stats.txBytes
+            return
+        }
+        if (handshakeSec != lastSeenHandshakeTimeSec) {
+            lastSeenHandshakeTimeSec = handshakeSec
+            tunnelRekeyCount += 1
+        }
+        val windowMs = nowMs - tunnelRekeyWindowStartedAtMs
+        if (windowMs < TUNNEL_REKEY_WINDOW_MS) return
+        val perMinute = tunnelRekeyCount * 60_000.0 / windowMs
+        val rxKb = (stats.rxBytes - tunnelRekeyWindowRxBytes).coerceAtLeast(0L) / 1024
+        val txKb = (stats.txBytes - tunnelRekeyWindowTxBytes).coerceAtLeast(0L) / 1024
+        // Трафик за окно печатаем рядом с числом перерукопожатий, и это не украшение.
+        // Таймер перерукопожатия взводит только отправка данных: на молчащем туннеле
+        // ноль получается сам собой, без всякого здоровья. Без этой пары чисел
+        // сравнение двух прогонов ничего не значит — на этом уже один раз обманулись.
+        val traffic = "трафик ${txKb}/${rxKb} КБ tx/rx"
+        when {
+            txKb < TUNNEL_REKEY_MIN_TX_KB -> LogManager.log(
+                "Туннель молчал: $traffic за ${windowMs / 1000} с, перерукопожатий " +
+                    "${tunnelRekeyCount}. Окно не показательно — таймер перерукопожатия " +
+                    "взводит только отправка данных."
+            )
+            tunnelRekeyCount >= TUNNEL_REKEY_ALERT_COUNT -> LogManager.log(
+                "Туннель нестабилен: ${tunnelRekeyCount} перерукопожатий за " +
+                    "${windowMs / 1000} с (${"%.1f".format(perMinute)}/мин), $traffic, " +
+                    "backend=$currentBackendLabel. Рукопожатие проходит, обратный поток " +
+                    "пропадает — провалы пинга ложатся в эти окна."
+            )
+            else -> LogManager.log(
+                "Туннель стабилен: ${tunnelRekeyCount} перерукопожатий за ${windowMs / 1000} с, " +
+                    "$traffic, backend=$currentBackendLabel."
+            )
+        }
+        // Показательное окно уходит в оценку узла. Молчащее — нет: там ноль
+        // получается сам собой и завысил бы узел, который ничего не вёз.
+        if (txKb >= TUNNEL_REKEY_MIN_TX_KB) {
+            recordTunnelRekeyChurnForEndpoint(tunnelRekeyCount)
+        }
+        tunnelRekeyWindowStartedAtMs = nowMs
+        tunnelRekeyCount = 0
+        tunnelRekeyWindowRxBytes = stats.rxBytes
+        tunnelRekeyWindowTxBytes = stats.txBytes
+    }
+
+    private fun resetTunnelRekeyChurn() {
+        tunnelRekeyWindowStartedAtMs = 0L
+        lastSeenHandshakeTimeSec = 0L
+        tunnelRekeyCount = 0
+        tunnelRekeyWindowRxBytes = 0L
+        tunnelRekeyWindowTxBytes = 0L
     }
 
     private fun readTunnelStats(): TunnelStats {
@@ -18613,6 +19140,24 @@ class NovaVpnService : OperaNativeVpnService() {
                     sampleIntervalMs
                 }
                 val effectiveProbeTimeoutMs = if (resourceConstrainedDevice) 650 else 900
+                // Замер удержания закрывается раньше окна качества. Окно удержания
+                // попытки и это окно равны и отсчитываются от одной отметки, поэтому
+                // последние итерации приходятся на уже разбираемый туннель:
+                // `Nova.stopVPN()` вызван, а флаг попытки ещё не снят. Проба по
+                // мёртвому туннелю добавляет тишину каждому профилю, включая
+                // здоровые, то есть смещение било бы ровно по тем, кто окно выдержал.
+                val holdWindowMs = (windowMs - SessionHoldMetric.TAIL_GUARD_MS).coerceAtLeast(0L)
+                // Тишина меряется по uptimeMillis, а не по elapsedRealtime, и это не
+                // мелочь. elapsedRealtime идёт и во сне устройства: в журнале Pixel 4 XL
+                // есть окна вида «4/4, avg=56836ms» — пробы удались, но между ними
+                // телефон спал почти минуту. По elapsedRealtime это выглядело бы как
+                // минута молчания узла, и здоровый узел получил бы худшую оценку за
+                // дозу Android. uptimeMillis во сне стоит, поэтому непронаблюдённое
+                // время просто не засчитывается: спавшее окно окажется слишком
+                // коротким и будет отброшено как непоказательное.
+                val holdStartedAtMs = SystemClock.uptimeMillis()
+                val hold = SessionHoldMetric.Accumulator(startedAtMs = holdStartedAtMs)
+                var holdFinishedAtMs = holdStartedAtMs
                 try {
                     val cm = getSystemService(android.net.ConnectivityManager::class.java)
                     while (
@@ -18630,10 +19175,32 @@ class NovaVpnService : OperaNativeVpnService() {
                             pingSuccesses += 1
                             latencyTotalMs += latency.toLong()
                         }
+                        if (SystemClock.elapsedRealtime() - startedAt <= holdWindowMs) {
+                            val holdNowMs = SystemClock.uptimeMillis()
+                            // Итерация без VPN-сети наружу ничего не отправила —
+                            // такую тишину узлу не приписываем, но и полноценным
+                            // окно после неё не считаем.
+                            if (vpnNet == null) {
+                                hold.noteSkipped(holdNowMs)
+                            } else {
+                                hold.note(succeeded = latency >= 0, atMs = holdNowMs)
+                            }
+                            holdFinishedAtMs = holdNowMs
+                        }
                     }
                 } catch (error: Throwable) {
                     LogManager.log("WARP quality sampling завершился ошибкой: ${error.message}")
                 } finally {
+                    recordWarpHoldWindow(
+                        clientData = clientData,
+                        attempt = attempt,
+                        window = hold.finish(
+                            minOf(
+                                holdFinishedAtMs.coerceAtLeast(holdStartedAtMs),
+                                holdStartedAtMs + holdWindowMs,
+                            )
+                        ),
+                    )
                     if (probeCount > 0) {
                         val avgPingMs = if (pingSuccesses > 0) {
                             latencyTotalMs.toDouble() / pingSuccesses.toDouble()
@@ -18862,16 +19429,23 @@ class NovaVpnService : OperaNativeVpnService() {
             Socket().use { socket ->
                 socket.connect(OperaProxyManager.getLoopbackProxyAddress(this), timeoutMs)
                 socket.soTimeout = timeoutMs
-                socket.getOutputStream().bufferedWriter().use { writer ->
-                    writer.write("GET http://api.ipify.org/ HTTP/1.1\r\n")
-                    writer.write("Host: api.ipify.org\r\n")
-                    writer.write("Connection: close\r\n\r\n")
-                    writer.flush()
-                }
-                socket.getInputStream().bufferedReader().use { reader ->
-                    val statusLine = reader.readLine().orEmpty()
-                    statusLine.contains("200")
-                }
+                // Поток закрывать нельзя: закрытие потока сокета закрывает и сам сокет.
+                //
+                // Дефект, который это чинит: `use` закрывал writer сразу после flush, и
+                // прокси видел обрыв клиента раньше, чем успевал сходить наружу. В его
+                // журнале это «HTTP fetch error: context canceled» через 2мс после
+                // запроса, а проба возвращала false всегда. На Opera она единственная,
+                // кто может подтвердить туннель: CONNECT на 53-й порт прокси не
+                // пропускает, поэтому DNS-проба там не проходит по определению, а
+                // системный VALIDATED без DNS не выставляется. Живой туннель, гонявший
+                // трафик, из-за этого раз за разом гасился как «не дал tunnel-probe».
+                val writer = socket.getOutputStream().bufferedWriter()
+                writer.write("GET http://api.ipify.org/ HTTP/1.1\r\n")
+                writer.write("Host: api.ipify.org\r\n")
+                writer.write("Connection: close\r\n\r\n")
+                writer.flush()
+                val statusLine = socket.getInputStream().bufferedReader().readLine().orEmpty()
+                statusLine.contains("200")
             }
         } catch (_: Exception) {
             false

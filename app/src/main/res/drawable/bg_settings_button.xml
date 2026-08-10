@@ -1,11 +1,34 @@
 <?xml version="1.0" encoding="utf-8"?>
-<shape xmlns:android="http://schemas.android.com/apk/res/android"
-    android:shape="rectangle">
-    <solid android:color="#60000000" />
-    <corners android:radius="8dp" />
-    <padding
-        android:left="8dp"
-        android:right="8dp"
-        android:top="4dp"
-        android:bottom="4dp" />
-</shape>
+<!--
+  Кнопка настроек: обычный вид и вид под фокусом пульта.
+
+  На телевизоре указателя нет — без явной рамки непонятно, на чём стоишь.
+  Отличаем не только цветом: рамка толще и подложка светлеет, чтобы выделение
+  читалось и на плохой матрице, и при дальтонизме.
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/tv_focus_fill" />
+            <corners android:radius="8dp" />
+            <stroke android:width="3dp" android:color="@color/tv_focus_stroke" />
+            <padding
+                    android:left="8dp"
+                    android:right="8dp"
+                    android:top="4dp"
+                    android:bottom="4dp" />
+        </shape>
+    </item>
+    <item>
+        <shape
+            android:shape="rectangle">
+            <solid android:color="#60000000" />
+            <corners android:radius="8dp" />
+            <padding
+                android:left="8dp"
+                android:right="8dp"
+                android:top="4dp"
+                android:bottom="4dp" />
+        </shape>
+    </item>
+</selector>

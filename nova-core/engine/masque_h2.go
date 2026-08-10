@@ -229,9 +229,11 @@ func (c *h2ConnectIPConn) writeLoop() error {
 }
 
 func (c *h2ConnectIPConn) readLoop() error {
-	reader := bufio.NewReader(c.body)
+	// quic-go 0.61 убрала разовый http3.ParseCapsule: состояние между капсулами
+	// теперь держит сам разборщик, поэтому он создаётся один раз до цикла.
+	parser := http3.NewCapsuleParser(bufio.NewReader(c.body))
 	for {
-		ct, capsuleReader, err := http3.ParseCapsule(reader)
+		ct, capsuleReader, err := parser.Next()
 		if err != nil {
 			return err
 		}

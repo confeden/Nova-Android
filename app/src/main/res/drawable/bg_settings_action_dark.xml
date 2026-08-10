@@ -1,14 +1,37 @@
 <?xml version="1.0" encoding="utf-8"?>
-<shape xmlns:android="http://schemas.android.com/apk/res/android"
-    android:shape="rectangle">
-    <solid android:color="#2A2A2A" />
-    <stroke
-        android:width="1dp"
-        android:color="#13A10E" />
-    <corners android:radius="12dp" />
-    <padding
-        android:left="14dp"
-        android:right="14dp"
-        android:top="8dp"
-        android:bottom="8dp" />
-</shape>
+<!--
+  Тёмная кнопка действия: обычный вид и вид под фокусом пульта.
+
+  На телевизоре указателя нет — без явной рамки непонятно, на чём стоишь.
+  Отличаем не только цветом: рамка толще и подложка светлеет, чтобы выделение
+  читалось и на плохой матрице, и при дальтонизме.
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/tv_focus_fill" />
+            <corners android:radius="12dp" />
+            <stroke android:width="3dp" android:color="@color/tv_focus_stroke" />
+            <padding
+                    android:left="14dp"
+                    android:right="14dp"
+                    android:top="8dp"
+                    android:bottom="8dp" />
+        </shape>
+    </item>
+    <item>
+        <shape
+            android:shape="rectangle">
+            <solid android:color="#2A2A2A" />
+            <stroke
+                android:width="1dp"
+                android:color="#13A10E" />
+            <corners android:radius="12dp" />
+            <padding
+                android:left="14dp"
+                android:right="14dp"
+                android:top="8dp"
+                android:bottom="8dp" />
+        </shape>
+    </item>
+</selector>

@@ -71,8 +71,12 @@ object VlessSubscriptionManager {
         val normalizedUrl = url.trim()
         if (normalizedUrl.isBlank()) return Outcome.Failed("адрес подписки пуст")
 
-        val previous = clientData.getVlessSubscription()
-            ?.takeIf { it.url.equals(normalizedUrl, ignoreCase = true) }
+        val stored = clientData.getVlessSubscription()
+        val previous = stored?.takeIf { it.url.equals(normalizedUrl, ignoreCase = true) }
+        // Смена адреса подписки — это тоже обновление состава, а не первый импорт.
+        // Пока состав прежней подписки не учитывался, её профили оставались в списке
+        // навсегда: новый адрес про них ничего не знает, и удалять их было некому.
+        val replacedSubscription = stored != null && previous == null
         val validators = if (force || previous == null) {
             VlessSubscriptionFetcher.Validators()
         } else {
@@ -116,9 +120,17 @@ object VlessSubscriptionManager {
                 val sync = clientData.syncVlessSubscriptionProfiles(
                     freshLinks = links,
                     // Первый импорт ничего не удаляет: состава прошлой загрузки нет,
-                    // и любой уже сохранённый профиль выглядел бы как «пропал».
-                    previousIdentities = previous?.knownIdentities.orEmpty(),
+                    // и любой уже сохранённый профиль выглядел бы как «пропал». А вот
+                    // состав прежней подписки при смене адреса учитываем — её узлы в
+                    // новой подписке не числятся, значит им место в удалённых.
+                    previousIdentities = (previous ?: stored)?.knownIdentities.orEmpty(),
                 )
+                if (replacedSubscription && sync.removed > 0) {
+                    LogManager.log(
+                        "Адрес подписки сменился: профили прежней подписки, которых нет " +
+                            "в новой, удалены (${sync.removed})."
+                    )
+                }
                 val changed = sync.added > 0 || sync.removed > 0
                 clientData.saveVlessSubscription(
                     VlessSubscriptionState(
@@ -126,8 +138,12 @@ object VlessSubscriptionManager {
                         title = result.metadata.title.ifBlank { previous?.title.orEmpty() },
                         etag = result.validators.etag,
                         lastModified = result.validators.lastModified,
-                        updateIntervalHours = result.metadata.updateIntervalHours
-                            .takeIf { it > 0 } ?: previous?.updateIntervalHours ?: 0,
+                        // Интервал по умолчанию задаём явно, а не нулём: ноль
+                        // разворачивался в те же 12 часов только внутри планировщика,
+                        // а в настройках подписки читался как «не задан».
+                        updateIntervalHours = result.metadata.updateIntervalHours.takeIf { it > 0 }
+                            ?: previous?.updateIntervalHours?.takeIf { it > 0 }
+                            ?: DEFAULT_INTERVAL_HOURS.toInt(),
                         lastCheckedAt = now,
                         lastChangedAt = if (changed) now else previous?.lastChangedAt ?: now,
                         lastStatus = if (changed) "обновлена" else "не менялась",

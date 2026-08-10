@@ -21,6 +21,14 @@
     <color name="liquid_glass_field_stroke">#306550A0</color>
     <color name="liquid_accent_green">#32D74B</color>
     <color name="liquid_accent_green_glow">#4032D74B</color>
+
+    <!-- Выделение фокуса для пульта: на телевизоре указателя нет, и без явной
+         рамки непонятно, на чём стоишь. Отличаем не только цветом — рамка вдвое
+         толще обычной и подложка светлеет, чтобы фокус читался и на плохой
+         матрице, и при дальтонизме. -->
+    <color name="tv_focus_stroke">#32D74B</color>
+    <color name="tv_focus_fill">#3332D74B</color>
+
     <color name="liquid_text_primary">#FFFFFF</color>
     <color name="liquid_text_secondary">#9DA2C3</color>
 </resources>

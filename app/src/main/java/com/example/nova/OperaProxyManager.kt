@@ -65,6 +65,11 @@ object OperaProxyManager {
         val fakeSni: String,
         val endpointOverride: String?,
         val apiProfile: OperaApiProfile,
+        /**
+         * Прокси только для вызовов API SurfEasy (`-api-proxy`). Туннель при этом
+         * по-прежнему набирается напрямую с адреса пользователя.
+         */
+        val apiRelay: String = "",
     )
 
     private const val BIND_HOST = "127.0.0.1"
@@ -72,6 +77,36 @@ object OperaProxyManager {
     private const val INTERNAL_PORT_RANGE_START = 20080
     private const val INTERNAL_PORT_RANGE_END = 40999
     private const val DEFAULT_COUNTRY = "EU"
+
+    /**
+     * Бюджет запуска на готовом адресе из кэша.
+     *
+     * Там нет ни discover, ни выбора сервера — только регистрация и открытие порта,
+     * а это доли секунды. Версия для ПК отводит такой попытке 2.5 секунды; здесь
+     * чуть больше из-за запуска отдельного процесса.
+     */
+    private const val CACHED_ENDPOINT_READY_TIMEOUT_MS = 4_000L
+
+    /**
+     * Потолок продления ожидания для попытки по готовому адресу из кэша.
+     *
+     * Discover здесь пропущен, а регистрация устройства в SurfEasy — нет: её
+     * `-override-proxy-address` не отменяет, и на медленной сети она занимает около
+     * семи секунд (см. [isOperaStartupProgressLine]). Поэтому потолок урезан не до
+     * символического значения: 4 + 6 = 10 с всё ещё покрывают живую регистрацию, но
+     * зависший запуск больше не стоит двенадцати. Оборвать регистрацию на середине
+     * дороже, чем подождать: следом идёт cooldown на 90 секунд, и рабочий адрес
+     * вылетел бы из кэша из-за одной медленной сети.
+     */
+    private const val CACHED_ENDPOINT_PROGRESS_MAX_EXTENSION_MS = 6_000L
+
+    /**
+     * Таймаут одной HTTP-пробы и общий бюджет пробы для попытки по кэшу.
+     *
+     * Живой узел отвечает с первого адреса; мёртвый одинаково мёртв и после шести.
+     */
+    private const val CACHED_ENDPOINT_PROBE_ATTEMPT_TIMEOUT_MS = 2_000
+    private const val CACHED_ENDPOINT_PROBE_BUDGET_MS = 4_000L
 
     /** Насколько свежей должна быть отметка о продвижении, чтобы продлевать ожидание. */
     private const val PROGRESS_GRACE_MS = 4_000L
@@ -90,6 +125,76 @@ object OperaProxyManager {
     private const val DEFAULT_API_USER_AGENT =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 OPR/114.0.0.0"
+
+    /** Адреса собственных релеев. Не секрет — секрет только пароль к ним. */
+    private val API_RELAY_ENDPOINTS = listOf(
+        "relay.nova-app.eu" to 8443,
+        "relay.nova-app.eu" to 2053,
+    )
+
+    private const val API_RELAY_USER = "nova"
+
+    /**
+     * Релеи для вызовов API SurfEasy, в порядке предпочтения.
+     *
+     * SurfEasy отдаёт разный набор endpoint'ов в зависимости от того, откуда пришёл
+     * discover, и набор для российских клиентов из России недостижим. Поэтому
+     * прямой discover — это не «обычный путь, который иногда режут», а путь,
+     * который здесь не приводит к рабочему туннелю в принципе: он честно отдаёт
+     * адреса, до которых потом не дозвониться. Релей переносит в Швецию только
+     * вызовы API — сам туннель набирается напрямую, страна выхода не меняется.
+     *
+     * Пароль приходит из сборки и в репозиторий не попадает. Без него список пуст:
+     * подставлять заглушку значило бы потратить попытку и получить 407, чтобы
+     * узнать то же самое.
+     */
+    private fun apiRelays(): List<String> {
+        val password = BuildConfig.OPERA_RELAY_PASSWORD.trim()
+        if (password.isEmpty()) return emptyList()
+        val user = encodeUserInfo(API_RELAY_USER)
+        val secret = encodeUserInfo(password)
+        return API_RELAY_ENDPOINTS.map { (host, port) -> "https://$user:$secret@$host:$port" }
+    }
+
+    /**
+     * Процент-кодирование для логина и пароля в ссылке.
+     *
+     * `URLEncoder` здесь не годится: он кодирует пробел как «+», а в userinfo это
+     * означает именно плюс, и пароль с пробелом молча превратился бы в другой.
+     */
+    private fun encodeUserInfo(value: String): String {
+        val allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+        return buildString {
+            for (byte in value.toByteArray(Charsets.UTF_8)) {
+                val char = byte.toInt().toChar()
+                if (char in allowed) append(char) else append("%%%02X".format(byte.toInt() and 0xFF))
+            }
+        }
+    }
+
+    /**
+     * `opera-proxy` понимает голый `host:port` как HTTP-прокси. Мы задаём релеи
+     * ссылкой со схемой, а голое значение трактуем как SOCKS5 — так же, как это
+     * делает Nova PC, чтобы одна и та же строка настройки работала в обоих
+     * клиентах одинаково.
+     */
+    private fun normalizeApiRelay(raw: String): String? {
+        val value = raw.trim().trim('"', '\'')
+        if (value.isEmpty() || value.startsWith("#")) return null
+        return if (value.contains("://")) value else "socks5://$value"
+    }
+
+    /**
+     * Журнал показывается пользователю и уходит в отчёты, а в ссылке релея лежит
+     * логин с паролем. Оставляем только схему и адрес — по ним отличима попытка
+     * через релей от прямой, а больше от строки в журнале ничего и не нужно.
+     */
+    private fun describeApiRelay(relay: String): String {
+        val scheme = relay.substringBefore("://", missingDelimiterValue = "")
+        val rest = relay.substringAfter("://", missingDelimiterValue = relay)
+        val hostPort = rest.substringAfterLast('@')
+        return if (scheme.isEmpty()) hostPort else "$scheme://$hostPort"
+    }
 
     private val operaApiProfiles = listOf(
         OperaApiProfile(
@@ -408,14 +513,20 @@ object OperaProxyManager {
             val cachedEndpoints = pinnedEndpoints
                 .filterNot { clientData.isOperaPinnedEndpointCoolingDown(requestedCountry, it) }
                 .take(2)
+            val apiRelays = apiRelays()
             val launchPlans = buildList {
                 val seenPlans = linkedSetOf<String>()
-                fun appendPlan(host: String, endpoint: String?, apiProfile: OperaApiProfile) {
+                fun appendPlan(
+                    host: String,
+                    endpoint: String?,
+                    apiProfile: OperaApiProfile,
+                    apiRelay: String = "",
+                ) {
                     val normalizedHost = host.trim()
                     val normalizedEndpoint = endpoint?.trim().orEmpty()
-                    val key = "${normalizedEndpoint}|${apiProfile.id}|$normalizedHost"
+                    val key = "${normalizedEndpoint}|${apiProfile.id}|$normalizedHost|$apiRelay"
                     if (seenPlans.add(key)) {
-                        add(OperaLaunchPlan(normalizedHost, endpoint, apiProfile))
+                        add(OperaLaunchPlan(normalizedHost, endpoint, apiProfile, apiRelay))
                     }
                 }
                 if (cachedEndpoints.isNotEmpty()) {
@@ -442,6 +553,25 @@ object OperaProxyManager {
                             "Пропускаем override и запускаем discovery/API."
                     )
                 }
+                // Discover через свой релей идёт раньше прямого: из России прямой
+                // discover отдаёт набор endpoint'ов, до которых потом не дозвониться,
+                // и все последующие попытки уходят в таймаут по очереди.
+                if (apiRelays.isNotEmpty()) {
+                    for (relay in apiRelays) {
+                        for (apiProfile in apiProfiles) {
+                            appendPlan("", null, apiProfile, relay)
+                        }
+                    }
+                    launchLogger(
+                        "Вызовы API SurfEasy для $requestedCountry сначала пробуем через свои релеи " +
+                            "(${apiRelays.size}): туннель при этом набирается напрямую."
+                    )
+                } else {
+                    launchLogger(
+                        "Релеи API SurfEasy не заданы в сборке — discover идёт напрямую. " +
+                            "Из России такой набор endpoint'ов обычно недостижим."
+                    )
+                }
                 val directHosts = candidateHosts.ifEmpty { listOf("") }
                 for (host in directHosts) {
                     for (apiProfile in apiProfiles) {
@@ -452,23 +582,45 @@ object OperaProxyManager {
                     }
                 }
             }.let { plans ->
+                // Порядок сначала по способу добычи endpoint'а, и только внутри него —
+                // по накопленной статистике. Иначе удачливый в прошлом прямой discover
+                // обгонял и кэш, и релей: статистика копилась на сети, где он ещё
+                // работал, а на текущей он отдаёт недостижимые адреса.
+                fun discoverTier(plan: OperaLaunchPlan): Int = when {
+                    !plan.endpointOverride.isNullOrBlank() -> 0
+                    plan.apiRelay.isNotEmpty() -> 1
+                    else -> 2
+                }
                 val rankedPlans = plans.withIndex()
                     .sortedWith(
-                        compareByDescending<IndexedValue<OperaLaunchPlan>> { indexedPlan ->
-                            val launchScore = clientData.getOperaLaunchPlanScore(
-                                country = requestedCountry,
-                                fakeSni = indexedPlan.value.fakeSni,
-                                endpoint = indexedPlan.value.endpointOverride,
-                                apiProfileId = indexedPlan.value.apiProfile.id,
-                            )
-                            val registrationScore = clientData.getOperaRegistrationPlanScore(
-                                country = requestedCountry,
-                                fakeSni = indexedPlan.value.fakeSni,
-                                endpoint = indexedPlan.value.endpointOverride,
-                                apiProfileId = indexedPlan.value.apiProfile.id,
-                            )
-                            registrationScore * 1.7 + launchScore
-                        }.thenBy { it.index }
+                        compareBy<IndexedValue<OperaLaunchPlan>> { discoverTier(it.value) }
+                            // Способ, который уже удерживал соединение двадцать секунд,
+                            // идёт раньше любой накопленной статистики: она считает
+                            // успехом и запуск, отвалившийся через секунду.
+                            .thenByDescending { indexedPlan ->
+                                clientData.getOperaLaunchPlanPromotedAt(
+                                    country = requestedCountry,
+                                    fakeSni = indexedPlan.value.fakeSni,
+                                    endpoint = indexedPlan.value.endpointOverride,
+                                    apiProfileId = indexedPlan.value.apiProfile.id,
+                                )
+                            }
+                            .thenByDescending { indexedPlan ->
+                                val launchScore = clientData.getOperaLaunchPlanScore(
+                                    country = requestedCountry,
+                                    fakeSni = indexedPlan.value.fakeSni,
+                                    endpoint = indexedPlan.value.endpointOverride,
+                                    apiProfileId = indexedPlan.value.apiProfile.id,
+                                )
+                                val registrationScore = clientData.getOperaRegistrationPlanScore(
+                                    country = requestedCountry,
+                                    fakeSni = indexedPlan.value.fakeSni,
+                                    endpoint = indexedPlan.value.endpointOverride,
+                                    apiProfileId = indexedPlan.value.apiProfile.id,
+                                )
+                                registrationScore * 1.7 + launchScore
+                            }
+                            .thenBy { it.index }
                     )
                     .map { it.value }
                 if (rankedPlans.isNotEmpty()) {
@@ -502,7 +654,21 @@ object OperaProxyManager {
                 val limit = maxLaunchPlans?.coerceAtLeast(1)
                 if (limit != null && rankedPlans.size > limit) rankedPlans.take(limit) else rankedPlans
             }
+            // Если в остывании оба профиля API, отсеется каждый план, и цикл закончится,
+            // не начавшись. В живом логе это выглядело так: план построен, следом за 2мс
+            // «Opera fallback недоступен» — и служба уходит в холостой повтор раз в
+            // 2.6 секунды, ни разу ничего не попробовав. Остывание — это подсказка, что
+            // пробовать первым, а не запрет подключаться вообще.
+            val allApiProfilesCoolingDown = apiProfiles.isNotEmpty() &&
+                apiProfiles.all { clientData.isOperaApiProfileCoolingDown(requestedCountry, it.id) }
+            if (allApiProfilesCoolingDown) {
+                launchLogger(
+                    "Все профили API SurfEasy сейчас в остывании после отказов. " +
+                        "Игнорируем его: иначе попыток не будет вовсе."
+                )
+            }
             val failedEndpointOverrides = linkedSetOf<String>()
+            var attemptedPlans = 0
             for ((attemptIndex, plan) in launchPlans.withIndex()) {
                 if (abortIfRequested()) {
                     return ReadyState.FAILED
@@ -514,10 +680,14 @@ object OperaProxyManager {
                 if (normalizedEndpointOverride.isNotBlank() && normalizedEndpointOverride in failedEndpointOverrides) {
                     continue
                 }
-                if (clientData.isOperaApiProfileCoolingDown(requestedCountry, apiProfile.id)) {
+                if (
+                    !allApiProfilesCoolingDown &&
+                    clientData.isOperaApiProfileCoolingDown(requestedCountry, apiProfile.id)
+                ) {
                     continue
                 }
                 val planStartedAt = System.currentTimeMillis()
+                attemptedPlans += 1
                 bindPort = allocateInternalProxyPort(appContext, preferredPort = bindPort)
                 onAttemptState?.invoke(attemptIndex + 1, launchPlans.size, fakeSni)
                 val args = mutableListOf(
@@ -551,6 +721,20 @@ object OperaProxyManager {
                 if (!endpointOverride.isNullOrBlank()) {
                     args += listOf("-override-proxy-address", endpointOverride)
                 }
+                var bridgedRelay = ""
+                if (plan.apiRelay.isNotEmpty()) {
+                    // Только вызовы API. Туннель остаётся прямым, иначе выход уехал бы
+                    // в страну релея, а просили EU/US.
+                    //
+                    // Имя релея передаём не бинарнику, а мосту: резолвер Go на Android
+                    // без настроек и уходит в [::1]:53, см. [OperaApiRelayBridge].
+                    bridgedRelay = OperaApiRelayBridge.start(plan.apiRelay, launchLogger).orEmpty()
+                    if (bridgedRelay.isEmpty()) {
+                        launchLogger("Релей API недоступен, попытку через него пропускаем.")
+                        continue
+                    }
+                    args += listOf("-api-proxy", bridgedRelay)
+                }
 
                 launchLogger("Поднимаем встроенный Opera proxy для $purposeLabel... попытка ${attemptIndex + 1}/${launchPlans.size}")
                 launchLogger("Opera bootstrap DNS: $bootstrapLabel")
@@ -563,8 +747,40 @@ object OperaProxyManager {
                 if (!endpointOverride.isNullOrBlank()) {
                     launchLogger("Встроенный Opera proxy: endpoint override = $endpointOverride")
                 }
+                if (plan.apiRelay.isNotEmpty()) {
+                    launchLogger("Встроенный Opera proxy: API SurfEasy через релей ${describeApiRelay(plan.apiRelay)}")
+                }
+                if (plan.apiRelay.isEmpty()) {
+                    // Прошлая попытка могла оставить мост поднятым, а этой он не нужен:
+                    // открытый прокси к своему релею не должен жить дольше, чем нужен.
+                    OperaApiRelayBridge.stop(launchLogger)
+                }
+                // Попытке по кэшу деваться некуда: discover пропущен, остаётся поднять
+                // порт на готовом адресе. Пока ей отводился общий бюджет, каждый
+                // протухший адрес стоил пятнадцати секунд — в живом логе два таких
+                // подряд съели полминуты перед первой попыткой через релей. Продление
+                // по признаку продвижения при этом никуда не делось: узел, который
+                // действительно регистрируется, своё время получит.
+                val planReadyTimeoutMs = if (!endpointOverride.isNullOrBlank()) {
+                    minOf(readyTimeoutMs, CACHED_ENDPOINT_READY_TIMEOUT_MS)
+                } else {
+                    readyTimeoutMs
+                }
+                // Продление по признаку продвижения кэшированному плану нужно: discover
+                // пропущен, но регистрация в SurfEasy идёт и здесь. Урезаем потолок, а не
+                // отменяем его. Для AM всё остаётся как было.
+                val planProgressExtensionMs = if (
+                    !endpointOverride.isNullOrBlank() && requestedCountry != "AM"
+                ) {
+                    CACHED_ENDPOINT_PROGRESS_MAX_EXTENSION_MS
+                } else {
+                    PROGRESS_MAX_EXTENSION_MS
+                }
                 val launchModes = buildLaunchModes()
                 var hostSucceeded = false
+                // Один отказ — один штраф: ветка провала HTTP-probe уже записала исход,
+                // и повторный учёт ниже завысил бы durationMs и перекосил ранжирование.
+                var planOutcomeRecorded = false
                 var successfulEndpoint = endpointOverride
                 val startupTimeoutObserved = java.util.concurrent.atomic.AtomicBoolean(false)
                 for ((launchVariantIndex, launchMode) in launchModes.withIndex()) {
@@ -640,37 +856,65 @@ object OperaProxyManager {
                     if (waitUntilReady(
                             process = process,
                             bindPort = bindPort,
-                            timeoutMs = readyTimeoutMs,
+                            timeoutMs = planReadyTimeoutMs,
                             logger = launchLogger,
                             shouldAbort = shouldAbort,
                             lastProgressAtMs = { lastStartupProgressAt.get() },
+                            maxExtensionMs = planProgressExtensionMs,
                         )
                     ) {
                         val selectedOrOverride = endpointOverride ?: selectedEndpoint.get()
                         val requireHttpProbe = requestedCountry == "AM" || !endpointOverride.isNullOrBlank()
-                        if (requireHttpProbe && !probeLocalProxyHttpConnectivity(bindPort, 2600)) {
-                            launchLogger("Кэшированный Opera endpoint $endpointOverride поднял локальный порт, но не дал HTTP-probe. Пробуем следующий endpoint.")
-                            clientData.recordOperaLaunchPlanOutcome(
-                                country = requestedCountry,
-                                fakeSni = fakeSni,
-                                endpoint = selectedOrOverride ?: endpointOverride,
-                                apiProfileId = apiProfile.id,
-                                success = false,
-                                durationMs = System.currentTimeMillis() - planStartedAt,
+                        // AM ходит своей веткой и другого способа проверить выход не имеет:
+                        // там проба остаётся во всю длину. Кэшированному адресу столько
+                        // не нужно — живой отвечает с первого URL.
+                        val probeAttemptTimeoutMs = if (requestedCountry == "AM") {
+                            2600
+                        } else {
+                            CACHED_ENDPOINT_PROBE_ATTEMPT_TIMEOUT_MS
+                        }
+                        val probeBudgetMs = if (requestedCountry == "AM") {
+                            Long.MAX_VALUE
+                        } else {
+                            CACHED_ENDPOINT_PROBE_BUDGET_MS
+                        }
+                        if (
+                            requireHttpProbe &&
+                            !probeLocalProxyHttpConnectivity(bindPort, probeAttemptTimeoutMs, probeBudgetMs)
+                        ) {
+                            launchLogger(
+                                "Opera endpoint ${selectedOrOverride ?: "<discover>"} поднял локальный порт, " +
+                                    "но не дал HTTP-probe. Переходим к следующему плану."
                             )
-                            if (!selectedOrOverride.isNullOrBlank()) {
-                                clientData.demoteOperaPinnedEndpoint(requestedCountry, selectedOrOverride)
-                                clientData.markOperaPinnedEndpointFailure(
-                                    requestedCountry,
-                                    selectedOrOverride,
-                                    cooldownMs = if (requestedCountry == "AM") 30L * 60L * 1000L else 90_000L,
+                            // Прерывание — не отказ узла: пока сворачивается стек или
+                            // сменилось поколение подключения, репутацию не портим.
+                            if (shouldAbort?.invoke() != true) {
+                                planOutcomeRecorded = true
+                                clientData.recordOperaLaunchPlanOutcome(
+                                    country = requestedCountry,
+                                    fakeSni = fakeSni,
+                                    endpoint = selectedOrOverride,
+                                    apiProfileId = apiProfile.id,
+                                    success = false,
+                                    durationMs = System.currentTimeMillis() - planStartedAt,
                                 )
+                                if (!selectedOrOverride.isNullOrBlank()) {
+                                    clientData.demoteOperaPinnedEndpoint(requestedCountry, selectedOrOverride)
+                                    clientData.markOperaPinnedEndpointFailure(
+                                        requestedCountry,
+                                        selectedOrOverride,
+                                        cooldownMs = if (requestedCountry == "AM") 30L * 60L * 1000L else 90_000L,
+                                    )
+                                }
                             }
                             stopManaged(launchLogger)
                             if (requestedCountry == "AM") {
                                 return ReadyState.FAILED
                             }
-                            continue
+                            // Именно break, а не continue: порт уже открылся, значит способ
+                            // запуска ни при чём, и второй проход по launchModes на arm32
+                            // прогнал бы тот же мёртвый адрес ещё раз.
+                            break
                         }
                         clearFailedHostForSession(
                             country = requestedCountry,
@@ -770,14 +1014,16 @@ object OperaProxyManager {
                     success = false,
                     poolHint = candidatePool,
                 )
-                clientData.recordOperaLaunchPlanOutcome(
-                    country = requestedCountry,
-                    fakeSni = fakeSni,
-                    endpoint = endpointOverride,
-                    apiProfileId = apiProfile.id,
-                    success = false,
-                    durationMs = System.currentTimeMillis() - planStartedAt,
-                )
+                if (!planOutcomeRecorded) {
+                    clientData.recordOperaLaunchPlanOutcome(
+                        country = requestedCountry,
+                        fakeSni = fakeSni,
+                        endpoint = endpointOverride,
+                        apiProfileId = apiProfile.id,
+                        success = false,
+                        durationMs = System.currentTimeMillis() - planStartedAt,
+                    )
+                }
                 if (!endpointOverride.isNullOrBlank()) {
                     clientData.demoteOperaPinnedEndpoint(requestedCountry, endpointOverride)
                     clientData.markOperaPinnedEndpointFailure(
@@ -797,6 +1043,15 @@ object OperaProxyManager {
                     }
                     Thread.sleep(450L)
                 }
+            }
+            if (attemptedPlans == 0) {
+                // Отличать «пробовали и не вышло» от «пробовать было нечего» важно:
+                // второе означает, что отсеялись все планы, и повтор цикла ничего не
+                // изменит, сколько его ни крути.
+                launchLogger(
+                    "Ни один план запуска Opera не был выполнен: все ${launchPlans.size} " +
+                        "отсеялись до попытки. Повтор цикла здесь не поможет."
+                )
             }
             lastFailureApiCode = detectedApiCode.get()
             ReadyState.FAILED
@@ -822,7 +1077,8 @@ object OperaProxyManager {
             managedApiProfileId = null
         }
         publishLocalProxyAddressToCore(null, logger)
-        
+        OperaApiRelayBridge.stop(logger)
+
         contextToClear?.let { ctx ->
             runCatching { ClientData(ctx).setOperaInternalProxyPort(null) }
         }
@@ -842,6 +1098,50 @@ object OperaProxyManager {
             } finally {
                 logger("Встроенный Opera proxy остановлен.")
             }
+        }
+    }
+
+    /**
+     * Поднимает наверх очереди тот способ запуска, которым сейчас держится туннель.
+     *
+     * Вызывается не по факту подключения, а когда соединение уже продержалось: до
+     * этого момента отличить рабочий выход от поднявшего локальный порт и сразу
+     * отвалившегося нельзя. Заодно поднимается сам endpoint и профиль API — в
+     * следующий раз перебор начнётся ровно с того, что сработало.
+     *
+     * @return строка для журнала или пустая, если поднимать нечего.
+     */
+    fun promoteCurrentLaunchPlan(context: Context): String {
+        val country: String?
+        val fakeSni: String?
+        val endpoint: String?
+        val apiProfileId: String?
+        synchronized(lock) {
+            country = managedCountry
+            fakeSni = managedFakeSni
+            endpoint = managedEndpoint
+            apiProfileId = managedApiProfileId
+        }
+        val normalizedCountry = country?.trim().orEmpty()
+        if (normalizedCountry.isEmpty()) return ""
+        val clientData = ClientData(context.applicationContext)
+        clientData.promoteOperaLaunchPlan(
+            country = normalizedCountry,
+            fakeSni = fakeSni,
+            endpoint = endpoint,
+            apiProfileId = apiProfileId,
+        )
+        endpoint?.takeIf { it.isNotBlank() }?.let { clientData.promoteOperaPinnedEndpoint(normalizedCountry, it) }
+        apiProfileId?.takeIf { it.isNotBlank() }?.let {
+            clientData.setPreferredOperaApiProfile(normalizedCountry, it)
+        }
+        return buildString {
+            append("API=")
+            append(apiProfileId?.takeIf { it.isNotBlank() } ?: "по умолчанию")
+            append(", endpoint=")
+            append(endpoint?.takeIf { it.isNotBlank() } ?: "из discover")
+            append(", SNI=")
+            append(fakeSni?.takeIf { it.isNotBlank() } ?: "без маскировки")
         }
     }
 
@@ -909,8 +1209,21 @@ object OperaProxyManager {
         val apiProfiles = orderedOperaApiProfiles(clientData, requestedCountry)
         val collected = linkedSetOf<String>()
         var detectedCode = 0
-        for (apiProfile in apiProfiles) {
-            val profileHosts = maskHostsForApiProfile(apiProfile, candidateHosts)
+        // Свой релей идёт первым по той же причине, что и при запуске туннеля: список
+        // endpoint'ов зависит от того, откуда пришёл запрос, и российскому адресу
+        // выдаётся набор, до которого потом всё равно не дозвониться. Пустая строка в
+        // конце — прежний прямой путь, он остаётся запасным.
+        val discoveryPasses = (apiRelays() + "").flatMap { relay ->
+            apiProfiles.map { profile -> relay to profile }
+        }
+        for ((apiRelay, apiProfile) in discoveryPasses) {
+            // Через релей маскировать SNI незачем: соединение с API идёт до релея,
+            // а имя api2.sec-tunnel.com в открытый эфир не выходит вовсе.
+            val profileHosts = if (apiRelay.isNotEmpty()) {
+                listOf("")
+            } else {
+                maskHostsForApiProfile(apiProfile, candidateHosts)
+            }
             for ((index, fakeSni) in profileHosts.withIndex()) {
                 if (shouldAbort?.invoke() == true) break
                 val args = mutableListOf(
@@ -940,10 +1253,19 @@ object OperaProxyManager {
                 if (fakeSni.isNotBlank()) {
                     args += listOf("-fake-SNI", fakeSni)
                 }
+                if (apiRelay.isNotEmpty()) {
+                    val bridged = OperaApiRelayBridge.start(apiRelay, logger)
+                    if (bridged.isNullOrEmpty()) {
+                        logger("Релей API недоступен, discovery через него пропускаем.")
+                        continue
+                    }
+                    args += listOf("-api-proxy", bridged)
+                }
                 logger(
                     "Opera endpoint discovery через текущую сеть/VPN: $requestedCountry " +
                         "попытка ${index + 1}/${profileHosts.size}, API=${apiProfile.label}, DNS=$bootstrapLabel" +
-                        if (fakeSni.isNotBlank()) ", SNI=$fakeSni" else ", без SNI"
+                        (if (fakeSni.isNotBlank()) ", SNI=$fakeSni" else ", без SNI") +
+                        if (apiRelay.isNotEmpty()) ", релей ${describeApiRelay(apiRelay)}" else ""
                 )
 
                 for (launchMode in buildLaunchModes()) {
@@ -984,14 +1306,27 @@ object OperaProxyManager {
                     runCatching { readerThread.join(800L) }
                     if (collected.isNotEmpty()) {
                         val endpoints = collected.toList()
-                        clientData.saveOperaPinnedEndpoints(requestedCountry, endpoints)
+                        // Складываем, а не заменяем: проверенный адрес должен остаться
+                        // наверху очереди, иначе фоновая проверка отменяет подъём,
+                        // сделанный после двадцати секунд удержания.
+                        val knownBefore = clientData.getOperaPinnedEndpoints(requestedCountry)
+                        val mergedCache = clientData.mergeDiscoveredOperaPinnedEndpoints(requestedCountry, endpoints)
                         clientData.setPreferredOperaApiProfile(requestedCountry, apiProfile.id)
                         logger("Opera endpoints сохранены для $requestedCountry через ${apiProfile.label}: ${endpoints.joinToString(",")}")
+                        // Печатаем итог слияния целиком: строка «Есть кэш Opera endpoints»
+                        // показывает только первые два адреса вне остывания, и по ней
+                        // нельзя отличить сложенный список от заменённого.
+                        logger(
+                            "Кэш Opera endpoints для $requestedCountry после слияния: " +
+                                "было ${knownBefore.size}, discover дал ${endpoints.size}, " +
+                                "стало ${mergedCache.size}: ${mergedCache.joinToString(",")}"
+                        )
                         clientData.recordTrafficMaskAttempt(
                             fakeSni.takeIf { it.isNotBlank() },
                             success = true,
                             poolHint = candidatePool,
                         )
+                        OperaApiRelayBridge.stop(logger)
                         return DiscoveryResult(endpoints = endpoints, apiCode = detectedCode.takeIf { it > 0 })
                     }
                 }
@@ -1003,6 +1338,7 @@ object OperaProxyManager {
                 )
             }
         }
+        OperaApiRelayBridge.stop(logger)
         return DiscoveryResult(apiCode = detectedCode.takeIf { it > 0 })
     }
 
@@ -1071,7 +1407,22 @@ object OperaProxyManager {
         return "$host:$port"
     }
 
-    private fun probeLocalProxyHttpConnectivity(port: Int, timeoutMs: Int): Boolean {
+    /**
+     * Проверяет, что локальный порт не просто открыт, а действительно проксирует.
+     *
+     * Перебор шести адресов подряд стоил шести таймаутов: на протухшем endpoint'е TCP
+     * до 127.0.0.1 устанавливается мгновенно, а ответа на CONNECT не приходит, и
+     * каждая проба честно ждала свой таймаут — шесть по 2.6 с. Попытка по кэшу из-за
+     * этого растягивалась на пятнадцать секунд при бюджете плана в четыре: проба жила
+     * снаружи этого бюджета и ничем не ограничивалась. Теперь у неё есть свой: адреса
+     * перебираются, пока он не исчерпан, а таймаут каждой попытки не превышает остатка.
+     */
+    private fun probeLocalProxyHttpConnectivity(
+        port: Int,
+        timeoutMs: Int,
+        budgetMs: Long = Long.MAX_VALUE,
+    ): Boolean {
+        val startedAt = System.currentTimeMillis()
         val proxy = Proxy(Proxy.Type.HTTP, InetSocketAddress(BIND_HOST, port))
         val probeUrls = listOf(
             "https://cp.cloudflare.com/generate_204",
@@ -1082,11 +1433,15 @@ object OperaProxyManager {
             "http://api.ipify.org",
         )
         for (url in probeUrls) {
+            val remainingMs = budgetMs - (System.currentTimeMillis() - startedAt)
+            // Меньше полусекунды — это уже не проба, а лишний таймаут.
+            if (remainingMs < 500L) break
+            val attemptTimeoutMs = minOf(timeoutMs.toLong(), remainingMs).toInt()
             try {
                 val connection = URL(url).openConnection(proxy) as HttpURLConnection
                 connection.instanceFollowRedirects = false
-                connection.connectTimeout = timeoutMs
-                connection.readTimeout = timeoutMs
+                connection.connectTimeout = attemptTimeoutMs
+                connection.readTimeout = attemptTimeoutMs
                 connection.useCaches = false
                 connection.requestMethod = "GET"
                 connection.setRequestProperty("User-Agent", "NovaAndroid/1.21")
@@ -1122,7 +1477,9 @@ object OperaProxyManager {
      * нельзя: регистрация в Opera на медленной сети идёт дольше, и обрыв на середине
      * означает, что следующая попытка начнёт её заново. Поэтому, пока прокси пишет в
      * лог о продвижении (см. [isOperaStartupProgressLine]), ожидание продлевается — но
-     * не более чем на [PROGRESS_MAX_EXTENSION_MS], чтобы зависший запуск не держал
+     * не более чем на [maxExtensionMs] (по умолчанию [PROGRESS_MAX_EXTENSION_MS], а
+     * попытке по готовому адресу из кэша отводится
+     * [CACHED_ENDPOINT_PROGRESS_MAX_EXTENSION_MS]), чтобы зависший запуск не держал
      * подключение бесконечно.
      */
     private fun waitUntilReady(
@@ -1132,10 +1489,11 @@ object OperaProxyManager {
         logger: (String) -> Unit,
         shouldAbort: (() -> Boolean)? = null,
         lastProgressAtMs: (() -> Long)? = null,
+        maxExtensionMs: Long = PROGRESS_MAX_EXTENSION_MS,
     ): Boolean {
         val startedAt = System.currentTimeMillis()
         val baseDeadline = startedAt + timeoutMs
-        val hardDeadline = baseDeadline + PROGRESS_MAX_EXTENSION_MS
+        val hardDeadline = baseDeadline + maxExtensionMs
         var extensionLogged = false
         while (true) {
             val now = System.currentTimeMillis()
@@ -1147,7 +1505,7 @@ object OperaProxyManager {
                     extensionLogged = true
                     logger(
                         "Встроенный Opera proxy ещё регистрируется — продлеваем ожидание " +
-                            "до ${PROGRESS_MAX_EXTENSION_MS / 1000} с вместо перезапуска с нуля."
+                            "ещё на ${maxExtensionMs / 1000} с вместо перезапуска с нуля."
                     )
                 }
             }
@@ -1167,7 +1525,9 @@ object OperaProxyManager {
                 )
                 return false
             }
-            Thread.sleep(400L)
+            // Опрос вдвое чаще: на закрытом локальном порту connect падает мгновенно по
+            // ECONNREFUSED, поэтому шаг ничего не стоит и снимает до 0.4 с с запуска.
+            Thread.sleep(200L)
         }
     }
 

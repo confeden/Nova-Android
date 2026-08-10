@@ -99,6 +99,29 @@ class ConfigsAdapter(
                 else -> "$displayMode @ ${item.host}:${item.port}"
             }
             tvCurrent.visibility = if (isCurrent) View.VISIBLE else View.GONE
+            // Удержание печатается снаружи ветки с пинговой статистикой: замер
+            // может быть, а пинговых данных — нет, и тогда показатель, который
+            // двигает профиль по списку, пропал бы с экрана вовсе. Сортировка без
+            // объяснения на экране — уже записанная в дорожной карте ловушка.
+            val holdStallMs = clientData.warpConfigHoldStallMs(item)
+            val holdText = if (item.manual || holdStallMs < 0.0) {
+                ""
+            } else {
+                val label = when (clientData.warpConfigHoldGrade(item)) {
+                    SessionHoldMetric.GRADE_STEADY -> "держит"
+                    SessionHoldMetric.GRADE_SHAKY -> "проседает"
+                    SessionHoldMetric.GRADE_LOSING -> "теряет поток"
+                    else -> ""
+                }
+                if (label.isBlank()) {
+                    ""
+                } else {
+                    // Коротко: слово задаёт направление, число — величину. Полная
+                    // формулировка «тишина N мс за окно M мс» живёт в журнале, а на
+                    // карточке она вытесняла сама себя за край строки.
+                    "Удержание: $label ${"%.1f".format(holdStallMs / 1000.0)} с"
+                }
+            }
             tvMeta.text = buildString {
                 if (meta != null && !item.manual && meta.lastCheckedAt > 0L && meta.probeCount > 0) {
                     val successRate = meta.pingSuccesses.toDouble() / meta.probeCount
@@ -112,9 +135,21 @@ class ConfigsAdapter(
                     if (meta.avgPingMs > 0.0) {
                         append("   •   Ping: ${meta.avgPingMs.toInt()} ms")
                     }
+                    // Удержание сессии — отдельная величина от пинга: узел с хорошим
+                    // пингом может пересобирать рукопожатие втрое чаще нормы, и по
+                    // одному «Качеству» этого было не видно.
+                    if (holdText.isNotBlank()) {
+                        append("   •   $holdText")
+                    }
+                    if (item.churnWindows >= 2) {
+                        val perWindow = item.churnRekeys.toDouble() / item.churnWindows
+                        append("   •   Рукопожатий: ${"%.1f".format(perWindow)}/окно")
+                    }
                     if (!item.userImported && item.endpointSource.isNotBlank()) {
                         append("   •   ${item.endpointSource}")
                     }
+                } else if (holdText.isNotBlank()) {
+                    append(holdText)
                 } else {
                     append(
                         when {
@@ -153,9 +188,15 @@ class ConfigsAdapter(
             }
             btnDelete.setOnClickListener {
                 expandedIds.remove(item.id)
-                clientData.removeWarpVerifiedConfig(item.id)
+                // Профили VLESS лежат отдельно от хранилища WARP, поэтому удаление идёт
+                // через общий вход, а не через removeWarpVerifiedConfig напрямую.
+                val removed = clientData.removeImportedConfig(item.id)
                 onDataChanged()
-                Toast.makeText(activity, "Конфигурация удалена", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    activity,
+                    if (removed) "Конфигурация удалена" else "Не удалось удалить конфигурацию",
+                    Toast.LENGTH_SHORT,
+                ).show()
             }
             btnMoveTop.setOnClickListener { onMove(item.id, Move.TOP) }
             btnMoveUp.setOnClickListener { onMove(item.id, Move.UP) }

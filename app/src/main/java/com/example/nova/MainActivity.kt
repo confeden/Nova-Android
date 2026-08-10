@@ -77,6 +77,27 @@ class MainActivity : AppCompatActivity() {
          */
         private const val ACTION_ADB_SET_VLESS_PROFILE = "SET_VLESS_PROFILE"
         private const val EXTRA_ADB_VLESS_LINK = "vless_link"
+
+        /**
+         * Отладочный ключ для опыта по нестабильности WARP: убрать junk-пакеты AWG.
+         *
+         * Своего экрана у него нет намеренно — это инструмент для одного замера,
+         * а не настройка, которую стоит показывать.
+         */
+        private const val ACTION_ADB_SET_AWG_JUNK = "SET_AWG_JUNK"
+        private const val EXTRA_ADB_AWG_JUNK_DISABLED = "junk_disabled"
+
+        /** Как часто проверять, умер ли обречённый `:vpn`. */
+        private const val DOOMED_RESTART_POLL_MS = 150L
+
+        /**
+         * Сколько всего ждать смерть обречённого `:vpn`.
+         *
+         * Фитиль библиотеки — две секунды; на устройстве от `tun2proxy_stop` до
+         * `Process ... has died` прошло 2.26 с. Запас взят с четырёхкратным
+         * перекрытием: лучше подождать лишнее, чем поднять сессию под `exit(-1)`.
+         */
+        private const val DOOMED_RESTART_WAIT_MS = 8_000L
     }
 
     private data class TraceInfo(
@@ -142,6 +163,23 @@ class MainActivity : AppCompatActivity() {
     private var missingVpnSinceMs = 0L
     private var manualStopUiSuppressedUntilMs = 0L
     private var lastForegroundHealthRecheckAtMs = 0L
+
+    /**
+     * Последний явный запуск, отправленный службе. Нужен, чтобы повторить его в свежем
+     * процессе, когда `:vpn` объявил себя обречённым после `tun2proxy_stop`.
+     */
+    private var lastExplicitStartIntent: Intent? = null
+    private var doomedRestartArmed = false
+    private var doomedRestartDeadlineMs = 0L
+
+    /**
+     * Дошёл ли текущий пуск до службы.
+     *
+     * Отделяет «цикл готовит конфигурацию» от «служба уже получила intent». До
+     * передачи любое STOPPED — хвост предыдущей сессии, и отменять им новый пуск
+     * нельзя.
+     */
+    private var startFlowHandedToService = false
     private var firstLaunchAutoConnectTriggered = false
     private var backgroundRevealAnimator: Animator? = null
     private val lowEndUiAnimationDevice by lazy(LazyThreadSafetyMode.NONE) {
@@ -183,6 +221,7 @@ class MainActivity : AppCompatActivity() {
      */
     /** Транспорт, под который сейчас показан счётчик попыток. */
     private var lastSeenServiceTransport = ""
+    private var lastSeenServiceBackend = ""
 
     /** Момент смены фазы: пока он свеж, числа прошлой фазы не показываем. */
     private var progressPhaseSwitchAtMs = 0L
@@ -293,6 +332,57 @@ class MainActivity : AppCompatActivity() {
                 }
                 updateUiByState(effectiveState)
                 updateAttemptProgressDisplay()
+            }
+        }
+    }
+
+    /**
+     * Служба сообщает, что процесс `:vpn` обречён: в её остановке звали `tun2proxy_stop`,
+     * и библиотека через две секунды выполнит `exit(-1)`. Нажатый «Пуск» в этом процессе
+     * уже не поднимут, а перезапуск средствами Android приходит с его собственной
+     * задержкой — на устройстве было 51 секунда. Повторяем запуск сами, как только
+     * обречённый процесс действительно умрёт.
+     */
+    private val vpnProcessDoomedReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: Intent?) {
+            if (intent?.action != NovaVpnService.ACTION_VPN_PROCESS_DOOMED) return
+            armDoomedProcessRestart()
+        }
+    }
+
+    private val doomedRestartRunnable = object : Runnable {
+        override fun run() {
+            if (!doomedRestartArmed) return
+            if (isVpnProcessAlive()) {
+                if (SystemClock.elapsedRealtime() >= doomedRestartDeadlineMs) {
+                    doomedRestartArmed = false
+                    LogManager.log(
+                        "Обречённый процесс :vpn не умер за ${DOOMED_RESTART_WAIT_MS} мс. " +
+                            "Свой перезапуск отменяем: поднимать сессию поверх горящего " +
+                            "фитиля — это ровно тот убитый туннель, от которого уходим."
+                    )
+                    return
+                }
+                statusHandler.postDelayed(this, DOOMED_RESTART_POLL_MS)
+                return
+            }
+            doomedRestartArmed = false
+            val pending = lastExplicitStartIntent
+            if (pending == null) {
+                LogManager.log("Процесс :vpn умер, но повторять нечего: явного запуска не сохранено.")
+                return
+            }
+            LogManager.log(
+                "Обречённый процесс :vpn умер. Повторяем запуск сами: " +
+                    "${pending.action ?: "WARP"}."
+            )
+            runCatching {
+                ContextCompat.startForegroundService(this@MainActivity, Intent(pending))
+            }.onFailure {
+                LogManager.log(
+                    "Повторить запуск после смерти :vpn не удалось: ${it.message}. " +
+                        "Остаётся перезапуск средствами Android с его задержкой."
+                )
             }
         }
     }
@@ -906,6 +996,12 @@ class MainActivity : AppCompatActivity() {
         } else {
              registerReceiver(vpnStateReceiver, filter)
         }
+        val doomedFilter = android.content.IntentFilter(NovaVpnService.ACTION_VPN_PROCESS_DOOMED)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+             registerReceiver(vpnProcessDoomedReceiver, doomedFilter, android.content.Context.RECEIVER_NOT_EXPORTED)
+        } else {
+             registerReceiver(vpnProcessDoomedReceiver, doomedFilter)
+        }
         val discoveryFilter = android.content.IntentFilter(NovaVpnService.ACTION_WARP_CONFIG_DISCOVERY)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
              registerReceiver(warpDiscoveryReceiver, discoveryFilter, android.content.Context.RECEIVER_NOT_EXPORTED)
@@ -923,6 +1019,7 @@ class MainActivity : AppCompatActivity() {
     override fun onStop() {
         super.onStop()
         try { unregisterReceiver(vpnStateReceiver) } catch (e: Exception) {}
+        try { unregisterReceiver(vpnProcessDoomedReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(warpDiscoveryReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(updateStateReceiver) } catch (_: Exception) {}
     }
@@ -930,6 +1027,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         releaseVpnNetwork()
+        cancelDoomedProcessRestart("экран закрыт")
         statusHandler.removeCallbacks(deferredNotificationPermissionRunnable)
         startFlowExecutor.shutdown()
         ipExecutor.shutdown()
@@ -993,6 +1091,68 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Отправляет службе явный запуск и запоминает его.
+     *
+     * Запоминаем именно здесь: когда процесс `:vpn` объявит себя обречённым, повторить
+     * будет нечего — служба умрёт вместе со своим состоянием, а восстанавливать намерение
+     * пользователя из файлов дороже и менее точно, чем сохранить сам intent.
+     */
+    private fun startExplicitVpnService(intent: Intent) {
+        lastExplicitStartIntent = Intent(intent)
+        ContextCompat.startForegroundService(this, intent)
+        startFlowHandedToService = true
+    }
+
+    /**
+     * Жив ли ещё процесс `:vpn`.
+     *
+     * С Android 8 список отдаёт только процессы своего приложения — а нужен как раз свой.
+     * Когда ответа нет вовсе, отвечаем «жив»: неизвестность здесь стоит дороже ожидания.
+     * Запуск поверх живого фитиля — это ровно тот убитый через полторы секунды туннель,
+     * от которого уходим, а лишнее ожидание всего лишь возвращает нас к перезапуску
+     * средствами Android.
+     */
+    private fun isVpnProcessAlive(): Boolean {
+        val am = getSystemService(ActivityManager::class.java) ?: return true
+        val target = "$packageName:vpn"
+        return runCatching {
+            am.runningAppProcesses?.any { it.processName == target } ?: true
+        }.getOrDefault(true)
+    }
+
+    private fun armDoomedProcessRestart() {
+        if (lastExplicitStartIntent == null) {
+            LogManager.log(
+                "Служба сообщила об обречённом :vpn, но повторять нечего: " +
+                    "явного запуска из этого экрана не было."
+            )
+            return
+        }
+        if (isManualStopUiSuppressed()) {
+            LogManager.log(
+                "Служба сообщила об обречённом :vpn, но пользователь остановил VPN. " +
+                    "Перезапуск не планируем."
+            )
+            return
+        }
+        LogManager.log(
+            "Служба сообщила: процесс :vpn обречён. Ждём его смерти и повторяем запуск " +
+                "сами — перезапуск средствами Android приходит со своей задержкой."
+        )
+        doomedRestartArmed = true
+        doomedRestartDeadlineMs = SystemClock.elapsedRealtime() + DOOMED_RESTART_WAIT_MS
+        statusHandler.removeCallbacks(doomedRestartRunnable)
+        statusHandler.postDelayed(doomedRestartRunnable, DOOMED_RESTART_POLL_MS)
+    }
+
+    private fun cancelDoomedProcessRestart(reason: String) {
+        if (!doomedRestartArmed) return
+        doomedRestartArmed = false
+        statusHandler.removeCallbacks(doomedRestartRunnable)
+        LogManager.log("Перезапуск после обречённого :vpn отменён: $reason.")
+    }
+
     private fun markServiceStoppedLocally() {
         isStartFlowActive = false
         currentAttemptOrdinal = 0
@@ -1039,7 +1199,7 @@ class MainActivity : AppCompatActivity() {
                 applyCurrentPreferenceExtras(this)
                 putExtra(NovaVpnService.EXTRA_EXIT_REGION, region)
             }
-            ContextCompat.startForegroundService(this, serviceIntent)
+            startExplicitVpnService(serviceIntent)
             return
         }
         if (intent.getBooleanExtra("run_warp_diagnostics", false)) {
@@ -1679,6 +1839,20 @@ class MainActivity : AppCompatActivity() {
                 finish()
                 return true
             }
+            ACTION_ADB_SET_AWG_JUNK -> {
+                val disabled = intent?.getBooleanExtra(EXTRA_ADB_AWG_JUNK_DISABLED, false) ?: false
+                clientData.setAwgJunkDisabled(disabled)
+                LogManager.log(
+                    if (disabled) {
+                        "ADB debug: junk-пакеты AWG (Jc/Jmin/Jmax/I1..I5) отключены — " +
+                            "следующее подключение уйдёт без них."
+                    } else {
+                        "ADB debug: junk-пакеты AWG возвращены в конфигурацию."
+                    }
+                )
+                finish()
+                return true
+            }
             ACTION_ADB_SET_VLESS_PROFILE -> {
                 val link = intent?.getStringExtra(EXTRA_ADB_VLESS_LINK)?.trim().orEmpty()
                 if (link.isEmpty()) {
@@ -2160,13 +2334,27 @@ class MainActivity : AppCompatActivity() {
                     // секунды через SOCKS-инбаунд ядра, а экран этот путь повторить не
                     // может: при раздельном туннелировании он снаружи VPN и своей же
                     // сети VPN не видит, а порт инбаунда служба выбирает на лету.
-                    latency = clientData.getTransportLatency()?.latencyMs ?: -1
+                    // Фильтр по метке обязателен: файл замера пишут два транспорта, а
+                    // getTransportLatency отбирает только по свежести.
+                    latency = clientData.getTransportLatency()
+                        ?.takeIf { it.transport.equals(NovaVpnService.TRANSPORT_VLESS, ignoreCase = true) }
+                        ?.latencyMs
+                        ?: -1
                 } else if (isTunnelConnected() && isOperaBackend(resolvedBackend)) {
-                    if (tunnelNetwork != null) {
+                    // Замер берём у службы, как у VLESS. Свой путь экран повторить не
+                    // может: в режиме Opera пакет Nova всегда вне VPN, сети VPN он не
+                    // видит, а порт локального прокси служба выбирает на лету в :vpn.
+                    // Прежнее условие tunnelNetwork != null поэтому не выполнялось
+                    // никогда, и «Ping» для EU/US оставался пустым у всех.
+                    latency = clientData.getTransportLatency()
+                        ?.takeIf { it.transport.equals(NovaVpnService.TRANSPORT_OPERA, ignoreCase = true) }
+                        ?.latencyMs
+                        ?: -1
+                    if (latency < 0) {
                         latency = measureLatencyViaOperaProxy(timeout)
-                        if (latency < 0) {
-                            latency = measureLatencyViaTunnelNetwork(tunnelNetwork, timeout)
-                        }
+                    }
+                    if (latency < 0 && tunnelNetwork != null) {
+                        latency = measureLatencyViaTunnelNetwork(tunnelNetwork, timeout)
                     }
                 } else {
                     if (isTunnelConnected() && tunnelNetwork == null) {
@@ -2339,6 +2527,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun beginStartFlow(initialStatus: String): Int {
         manualStopUiSuppressedUntilMs = 0L
+        startFlowHandedToService = false
         currentTunnelBackend = resolvePendingConnectBackend()
         pendingStatusText = initialStatus
         isStartFlowActive = true
@@ -2367,7 +2556,12 @@ class MainActivity : AppCompatActivity() {
                 "${NovaVpnService.BACKEND_OPERA}-${clientData.getPreferredOperaLabel()}"
             preference == "eu" || preference == "us" ->
                 "${NovaVpnService.BACKEND_OPERA}-${preference.uppercase()}"
-            isOperaBackend(currentTunnelBackend) && preference != "ru" && preference != "auto" ->
+            preference == "vless" -> NovaVpnService.BACKEND_VLESS
+            // Остаточный бэкенд прошлой сессии годится только там, где выбор не назван
+            // явно. Пока сюда попадал и VLESS, подключение к нему подписывалось «EU» от
+            // недавнего сеанса Opera.
+            isOperaBackend(currentTunnelBackend) &&
+                preference != "ru" && preference != "auto" && preference != "masque" ->
                 currentTunnelBackend
             else -> NovaVpnService.BACKEND_WARP
         }
@@ -2396,6 +2590,30 @@ class MainActivity : AppCompatActivity() {
         return isStartFlowActive && startFlowGeneration.get() == generation
     }
 
+    /**
+     * Объясняет, почему цикл подключения оборвался до отправки intent'а службе.
+     *
+     * Отсечки по [isStartFlowCurrent] были молчаливыми: в журнале обрывались три
+     * строки подготовки, и отличить «пользователь передумал» от «поколение сбил
+     * кто-то посторонний» было нечем. Служба такой разбор уже умеет
+     * (`logConnectAbortedBeforeStart`), экран — нет.
+     *
+     * Печатаем всё, что входит в решение, а не только вердикт: причина здесь
+     * складывается из состояния флага, номера поколения и подавления после
+     * ручной остановки, и по одному вердикту виновника не назвать.
+     */
+    private fun logStartFlowAborted(stage: String, generation: Int) {
+        LogManager.log(
+            "Цикл подключения оборван на этапе «$stage»: " +
+                "поколение=${startFlowGeneration.get()} ожидалось=$generation " +
+                "startFlowActive=$isStartFlowActive " +
+                "manualStopSuppressed=${isManualStopUiSuppressed()} " +
+                "transientPending=${clientData.isTransientConnectingPending()} " +
+                "softReapplyPending=${clientData.isSoftReapplyPending()} " +
+                "serviceRunning=${isNovaVpnServiceRunning()}"
+        )
+    }
+
     private fun cancelStartFlow() {
         if (isStartFlowActive) {
             try {
@@ -2413,6 +2631,7 @@ class MainActivity : AppCompatActivity() {
             isStartFlowActive = false
             startFlowGeneration.incrementAndGet()
         }
+        startFlowHandedToService = false
         pendingVpnPermissionFlowGeneration = null
         pendingStatusText = "ПОДКЛЮЧЕНИЕ..."
     }
@@ -2705,7 +2924,16 @@ class MainActivity : AppCompatActivity() {
             return "ПОДКЛЮЧЕНИЕ... $importedBackend"
         }
         val preference = clientData.getExitRegionPreference().trim().lowercase()
+        // Названный пользователем выход идёт раньше остаточного бэкенда: тот остаётся
+        // от прошлой сессии, и подключение к VLESS подписывалось «EU» от недавнего
+        // сеанса Opera. Ветка Opera ниже нужна режиму «Авто», где регион не назван и
+        // определяется тем, что реально поднимается.
         return when {
+            preference == "ru" -> "ПОДКЛЮЧЕНИЕ... WARP"
+            preference == "eu" -> "ПОДКЛЮЧЕНИЕ... EU"
+            preference == "us" -> "ПОДКЛЮЧЕНИЕ... US"
+            preference == "masque" -> "ПОДКЛЮЧЕНИЕ... MASQUE"
+            preference == "vless" -> "ПОДКЛЮЧЕНИЕ... VLESS"
             isOperaBackend(currentTunnelBackend) -> {
                 val normalized = currentTunnelBackend.trim().uppercase()
                 val region = when {
@@ -2713,15 +2941,10 @@ class MainActivity : AppCompatActivity() {
                         normalized.substringAfter('-').ifBlank { "EU" }
                     normalized.startsWith("${NovaVpnService.BACKEND_OPERA}:") ->
                         normalized.substringAfter(':').trim().ifBlank { "EU" }
-                    preference == "us" -> "US"
                     else -> "EU"
                 }
                 "ПОДКЛЮЧЕНИЕ... $region"
             }
-            preference == "ru" -> "ПОДКЛЮЧЕНИЕ... WARP"
-            preference == "eu" -> "ПОДКЛЮЧЕНИЕ... EU"
-            preference == "us" -> "ПОДКЛЮЧЕНИЕ... US"
-            preference == "masque" -> "ПОДКЛЮЧЕНИЕ... MASQUE"
             else -> "ПОДКЛЮЧЕНИЕ... AUTO"
         }
     }
@@ -2798,7 +3021,7 @@ class MainActivity : AppCompatActivity() {
                         action = NovaVpnService.ACTION_START_OPERA_ONLY
                         applyCurrentPreferenceExtras(this)
                     }
-                    ContextCompat.startForegroundService(this@MainActivity, intent)
+                    startExplicitVpnService(intent)
                 } catch (e: Exception) {
                     markServiceStoppedLocally()
                     cancelStartFlow()
@@ -2820,7 +3043,10 @@ class MainActivity : AppCompatActivity() {
                     { LogManager.log(it) },
                     { !isStartFlowCurrent(flowGeneration) }
                 )
-                if (!isStartFlowCurrent(flowGeneration)) return@execute
+                if (!isStartFlowCurrent(flowGeneration)) {
+                    logStartFlowAborted("подготовка WARP-клиента", flowGeneration)
+                    return@execute
+                }
 
                 val resolvedConfig = clientData.resolveWarpConfigForReuse(repairWithBootstrap = true)
                 var config = resolvedConfig?.config
@@ -2894,7 +3120,10 @@ class MainActivity : AppCompatActivity() {
                         attempt++
                         LogManager.log("Повтор регистрации ($attempt/$maxAttempts)...")
                         updatePendingStartStatus("РЕГИСТРАЦИЯ ($attempt/$maxAttempts)...", flowGeneration)
-                        if (!sleepWithCancellation(3000, flowGeneration)) return@execute
+                        if (!sleepWithCancellation(3000, flowGeneration)) {
+                            logStartFlowAborted("пауза между попытками регистрации", flowGeneration)
+                            return@execute
+                        }
                         config = warpClient.register(
                             onProgress = { progress ->
                                 updatePendingStartStatus("РЕГИСТРАЦИЯ ($attempt/$maxAttempts)... $progress%", flowGeneration)
@@ -2908,9 +3137,15 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                if (!isStartFlowCurrent(flowGeneration)) return@execute
+                if (!isStartFlowCurrent(flowGeneration)) {
+                    logStartFlowAborted("конфигурация готова, отправка службе", flowGeneration)
+                    return@execute
+                }
                 runOnUiThread {
-                    if (!isStartFlowCurrent(flowGeneration)) return@runOnUiThread
+                    if (!isStartFlowCurrent(flowGeneration)) {
+                        logStartFlowAborted("выход на главный поток", flowGeneration)
+                        return@runOnUiThread
+                    }
                     if (config != null) {
                         val currentPort = clientData.getLastSuccessPort()
                         val currentProtocol = clientData.getLastSuccessProtocol()
@@ -2931,7 +3166,7 @@ class MainActivity : AppCompatActivity() {
                                 putExtra("PROTOCOL", currentProtocol)
                                 applyCurrentPreferenceExtras(this)
                             }
-                            ContextCompat.startForegroundService(this@MainActivity, intent)
+                            startExplicitVpnService(intent)
                         } catch (e: Exception) {
                             markServiceStoppedLocally()
                             cancelStartFlow()
@@ -2972,7 +3207,7 @@ class MainActivity : AppCompatActivity() {
                                     action = NovaVpnService.ACTION_START_OPERA_ONLY
                                     applyCurrentPreferenceExtras(this)
                                 }
-                                ContextCompat.startForegroundService(this@MainActivity, intent)
+                                startExplicitVpnService(intent)
                             } catch (e: Exception) {
                                 markServiceStoppedLocally()
                                 tvStatus.text = "ОШИБКА"
@@ -3022,6 +3257,7 @@ class MainActivity : AppCompatActivity() {
         val hadOnlyLocalStartFlow = isStartFlowActive &&
             getPersistedServiceState() == NovaVpnService.STATE_STOPPED
         cancelStartFlow()
+        cancelDoomedProcessRestart("пользователь остановил VPN")
         noteManualStopUiSuppression()
         clientData.clearTransientConnectingPending()
         clientData.clearRestartSession()
@@ -3091,8 +3327,15 @@ class MainActivity : AppCompatActivity() {
         } else {
             persistedState
         }
+        // Пока intent не ушёл службе, никакой STOPPED не может относиться к этому
+        // пуску: сообщать о нём попросту нечему. Значит это хвост предыдущей
+        // остановки — той самой, поверх которой пользователь и нажал «Пуск».
+        // Без этой оговорки хвост звал cancelStartFlow, поколение уезжало, и цикл
+        // умирал молча между «Подготовка к подключению...» и отправкой intent'а.
+        // У службы такая защита давно есть, у экрана не было.
+        val startFlowAwaitingHandoff = isStartFlowActive && !startFlowHandedToService
         val hasPendingLocalStart = isStartFlowActive &&
-            rawPersistedState == NovaVpnService.STATE_STOPPED
+            (rawPersistedState == NovaVpnService.STATE_STOPPED || startFlowAwaitingHandoff)
         if (hasPendingLocalStart) {
             vpnState = NovaVpnService.STATE_CONNECTING
             renderStartFlowState()
@@ -3473,15 +3716,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateAttemptProgressDisplay() {
-        // Пока идёт фаза MASQUE, счётчик не должен показывать размер списка
-        // встроенных WARP-профилей: у MASQUE свой, куда более короткий перебор,
-        // и «1/50» создавал впечатление, что подключение идёт по WARP.
+        // Метка транспорта — единственное, чем фаза называет себя интерфейсу:
+        // по ней счётчик и решает, чей перебор он сейчас показывает.
         val serviceTransport = clientData.getServiceTransport()
-        if (serviceTransport != lastSeenServiceTransport) {
+        // Бэкенд смотрим наравне с транспортом: при переходе Opera → VLESS метка
+        // транспорта в файле состояния меняется не мгновенно, и до её обновления
+        // экран честно показывал знаменатель прошлой фазы — «x/54» от плана запуска
+        // Opera на подключении по VLESS.
+        val serviceBackend = clientData.getServiceBackend()
+        if (serviceTransport != lastSeenServiceTransport || serviceBackend != lastSeenServiceBackend) {
             // Смена фазы — это новый счётчик. Без сброса знаменатель прошлой фазы
             // выигрывал у нового через maxOf, и выбранный MASQUE так и показывал
             // «1/50» от списка встроенных профилей WARP.
             lastSeenServiceTransport = serviceTransport
+            lastSeenServiceBackend = serviceBackend
             resetAttemptProgressTracking()
             currentAttemptOrdinal = 0
             currentAttemptTotal = 0
@@ -3492,13 +3740,21 @@ class MainActivity : AppCompatActivity() {
         // фаза не сообщила свой прогресс, старые числа не показываем.
         val progressPhaseSwitching =
             SystemClock.elapsedRealtime() - progressPhaseSwitchAtMs < PROGRESS_PHASE_SWITCH_QUIET_MS
-        val masquePhaseActive = serviceTransport == NovaVpnService.TRANSPORT_MASQUE
-        val importedConfigProgressTotal = if (clientData.isImportedConfigSourceActive() && !masquePhaseActive) {
+        // Заглушка по длине списка профилей годится только той фазе, которая этот
+        // список и перебирает. У EU/US перебирает Opera: сначала мелькало «1/50» от
+        // встроенных профилей WARP, потом «1/54» от плана запуска Opera — читалось
+        // как «подключение всё-таки идёт по WARP».
+        val warpProfileListPhase = RegionTransportPolicy.countsWarpProfileList(
+            transportLabel = serviceTransport,
+            backendLabel = currentTunnelBackend,
+            regionPreference = clientData.getExitRegionPreference(),
+        )
+        val importedConfigProgressTotal = if (clientData.isImportedConfigSourceActive() && warpProfileListPhase) {
             importedConfigProgressTotal()
         } else {
             0
         }
-        val builtInConfigProgressTotal = if (!clientData.isImportedConfigSourceActive() && !masquePhaseActive) {
+        val builtInConfigProgressTotal = if (!clientData.isImportedConfigSourceActive() && warpProfileListPhase) {
             builtInConfigProgressTotal()
         } else {
             0
@@ -3593,7 +3849,11 @@ class MainActivity : AppCompatActivity() {
                 if (displayedAttemptTotal <= 0) {
                     resetAttemptProgressTracking()
                 }
-            } else if (!holdManualProfileSwitchProgress) {
+            } else if (!holdManualProfileSwitchProgress && !progressPhaseSwitching) {
+                // Пока фаза сменилась, а новая ещё не назвала свой перебор, числа в
+                // файле состояния принадлежат прошлой. Раньше их сюда пускали, и
+                // знаменатель прошлой фазы оседал в счётчике через maxOf: подключение
+                // по VLESS показывало «x/54» от плана запуска Opera.
                 acceptAttemptProgress(
                     maxOf(currentAttemptOrdinal, persistedOrdinal),
                     maxOf(currentAttemptTotal, persistedTotal),

@@ -43,8 +43,33 @@
         <item name="android:activityCloseExitAnimation">@anim/no_anim</item>
     </style>
 
+    <!--
+        Переключатель задан целиком своими размерами и своими состояниями.
+
+        Так он выглядел раньше: крупный и без подписи. Обновление appcompat до
+        1.7.0 и material до 1.12.0 в этой серии поменяло умолчания библиотеки —
+        переключатели стали мелкими, а внутри бегунка появилось «ВКЛ»/«ВЫКЛ».
+        Полагаться на умолчания больше нельзя: следующая версия поменяет их снова.
+        `showText` выключен в обоих пространствах имён, потому что `<Switch>` в
+        разметке разворачивается в `SwitchCompat`, и он читает атрибут без
+        префикса `android:`, а платформенный `Switch` — с префиксом.
+    -->
     <style name="LiquidGlassSwitch" parent="Widget.MaterialComponents.CompoundButton.Switch">
-        <item name="thumbTint">@color/liquid_accent_green</item>
-        <item name="trackTint">#4032D74B</item>
+        <item name="android:thumb">@drawable/switch_thumb_liquid</item>
+        <item name="track">@drawable/switch_track_liquid</item>
+        <item name="android:track">@drawable/switch_track_liquid</item>
+        <item name="thumbTint">@color/switch_thumb_tint_liquid</item>
+        <item name="android:thumbTint">@color/switch_thumb_tint_liquid</item>
+        <item name="trackTint">@color/switch_track_tint_liquid</item>
+        <item name="android:trackTint">@color/switch_track_tint_liquid</item>
+        <item name="showText">false</item>
+        <item name="android:showText">false</item>
+        <item name="android:textOn"></item>
+        <item name="android:textOff"></item>
+        <item name="android:switchMinWidth">52dp</item>
+        <item name="android:minWidth">52dp</item>
+        <item name="android:minHeight">29dp</item>
+        <item name="android:thumbTextPadding">0dp</item>
+        <item name="android:background">@null</item>
     </style>
 </resources>

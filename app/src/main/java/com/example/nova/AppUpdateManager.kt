@@ -155,6 +155,40 @@ object AppUpdateManager {
         return getReadyDownloadedUpdate(context)?.version.orEmpty()
     }
 
+    /**
+     * Версия, о которой известно из ленты, но которая ещё не скачана.
+     *
+     * Нужна, чтобы плашка на главном экране появлялась сразу, как только вышло
+     * обновление. Раньше она показывала только уже скачанное — и это работало лишь
+     * потому, что приложение качало APK само. Автозагрузку убрали (из-за неё Play
+     * Protect считал приложение вредоносным), и единственным сигналом осталось
+     * уведомление, а оно молчит, если человек запретил уведомления. Обновление
+     * становилось невидимым совсем.
+     */
+    fun getAvailableUpdateVersion(context: Context): String {
+        val appContext = context.applicationContext
+        val clientData = ClientData(appContext)
+        if (getReadyDownloadedUpdate(appContext, clientData) != null) return ""
+        val version = clientData.getLastUpdateVersion().trim()
+        if (version.isBlank() || clientData.getLastUpdateUrl().isBlank()) return ""
+        if (!isNewerVersion(version, getInstalledVersion(appContext))) return ""
+        return version
+    }
+
+    /**
+     * Начинает загрузку по явному действию человека.
+     *
+     * Именно нажатие и есть то «пользователь начал загрузку», из-за отсутствия
+     * которого приложение попадало под категорию hostile downloader.
+     */
+    fun startUserRequestedDownload(context: Context): Boolean {
+        val appContext = context.applicationContext
+        val clientData = ClientData(appContext)
+        val metadata = buildStoredMetadata(clientData) ?: return false
+        if (!isNewerVersion(metadata.version, getInstalledVersion(appContext))) return false
+        return enqueueDownload(appContext, metadata, allowMetered = true)
+    }
+
     fun syncSchedule(context: Context) {
         val appContext = context.applicationContext
         val clientData = ClientData(appContext)
@@ -1595,10 +1629,17 @@ object AppUpdateManager {
     private fun signedBySameCertificate(context: Context, apkFile: File): Boolean {
         return try {
             val packageManager = context.packageManager
+            // Просим оба набора сразу.
+            //
+            // `getPackageArchiveInfo` не всегда заполняет `signingInfo`, даже когда
+            // запрошены `GET_SIGNING_CERTIFICATES`: разборщик файла на части версий
+            // отдаёт только старое поле `signatures`. Проверено на Android 9 —
+            // проверка подписи отвергала законное обновление, подписанное тем же
+            // ключом. Читаем что дали: сначала новое поле, потом старое.
+            @Suppress("DEPRECATION")
             val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                PackageManager.GET_SIGNING_CERTIFICATES
+                PackageManager.GET_SIGNING_CERTIFICATES or PackageManager.GET_SIGNATURES
             } else {
-                @Suppress("DEPRECATION")
                 PackageManager.GET_SIGNATURES
             }
             val downloaded = packageManager.getPackageArchiveInfo(apkFile.absolutePath, flags)
@@ -1618,7 +1659,7 @@ object AppUpdateManager {
 
     private fun certificateFingerprints(info: android.content.pm.PackageInfo?): Set<String> {
         if (info == null) return emptySet()
-        val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        val modern = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             info.signingInfo?.let { signingInfo ->
                 if (signingInfo.hasMultipleSigners()) {
                     signingInfo.apkContentsSigners
@@ -1627,9 +1668,10 @@ object AppUpdateManager {
                 }
             }
         } else {
-            @Suppress("DEPRECATION")
-            info.signatures
+            null
         }
+        @Suppress("DEPRECATION")
+        val signatures = modern?.takeIf { it.isNotEmpty() } ?: info.signatures
         return signatures.orEmpty().mapNotNull { signature ->
             runCatching {
                 MessageDigest.getInstance("SHA-256")

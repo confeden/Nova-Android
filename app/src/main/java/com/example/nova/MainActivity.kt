@@ -782,7 +782,17 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnInstallUpdate.setOnClickListener {
-            AppUpdateManager.installReadyUpdate(this)
+            if (AppUpdateManager.getReadyDownloadedVersion(this).isNotBlank()) {
+                AppUpdateManager.installReadyUpdate(this)
+                return@setOnClickListener
+            }
+            // Загрузку начинает это нажатие — и только оно.
+            if (AppUpdateManager.startUserRequestedDownload(this)) {
+                Toast.makeText(this, "Скачиваем обновление", Toast.LENGTH_SHORT).show()
+                refreshInstallUpdateButton()
+            } else {
+                Toast.makeText(this, "Не удалось начать загрузку обновления", Toast.LENGTH_SHORT).show()
+            }
         }
         // Экран рисуется под системными панелями, а плашка прижата к верхнему краю:
         // без отступа она уезжала под часы и заряд и читалась как мусор поверх статус-бара.
@@ -1072,6 +1082,18 @@ class MainActivity : AppCompatActivity() {
             // Версию показываем ту, что реально лежит на диске: подпись — это обещание,
             // и оно должно совпадать с тем, что установится по нажатию.
             tvUpdateCaption.text = "Обновить до ${formatVersionLabel(readyVersion)}"
+            btnInstallUpdate.visibility = View.VISIBLE
+            return
+        }
+        // Обновление вышло, но ещё не скачано — плашка всё равно нужна.
+        //
+        // Пока приложение качало APK само, плашка появлялась только на скачанное и
+        // этого хватало. Автозагрузку убрали, и без этой ветки единственным сигналом
+        // осталось бы уведомление — а оно не показывается вовсе, если человек
+        // запретил уведомления. Подпись честно называет, что сделает нажатие.
+        val availableVersion = AppUpdateManager.getAvailableUpdateVersion(this)
+        if (availableVersion.isNotBlank()) {
+            tvUpdateCaption.text = "Скачать ${formatVersionLabel(availableVersion)}"
             btnInstallUpdate.visibility = View.VISIBLE
         } else {
             btnInstallUpdate.visibility = View.GONE

@@ -5,8 +5,8 @@ plugins {
     alias(libs.plugins.jetbrains.kotlin.android)
 }
 
-val appVersionCode = 139
-val appVersionName = "1.27"
+val appVersionCode = 140
+val appVersionName = "1.28"
 
 val keystoreProperties = Properties()
 val keystorePropertiesFile = rootProject.file("keystore.properties")

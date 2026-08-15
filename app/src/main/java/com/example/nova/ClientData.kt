@@ -5048,17 +5048,37 @@ class ClientData(context: Context) {
             val existing = getWarpVerifiedConfigs().associateBy { it.id }.toMutableMap()
             val normalizedScope = inferWarpVerifiedScope(normalizedMode, scope)
             val configId = buildWarpConfigId(normalizedMode, normalizedHost, port, normalizedScope)
-            val previous = existing[configId]
-            val normalizedSource = endpointSource.trim().ifBlank { previous?.endpointSource ?: "runtime-success" }
-            Log.w("NovaAdapt", "recordWarpVerifiedRuntimeOutcome: mode=$normalizedMode host=$normalizedHost port=$port src=$normalizedSource success=$success prevExists=${previous != null}")
+            val previousStored = existing[configId]
+            val normalizedSource = endpointSource.trim().ifBlank { previousStored?.endpointSource ?: "runtime-success" }
+            Log.w("NovaAdapt", "recordWarpVerifiedRuntimeOutcome: mode=$normalizedMode host=$normalizedHost port=$port src=$normalizedSource success=$success prevExists=${previousStored != null}")
             if (!isPersistableWarpVerifiedConfig(
                     normalizedEngine,
                     normalizedHost,
-                    previous?.manual ?: false,
-                    previous?.userImported ?: false,
+                    previousStored?.manual ?: false,
+                    previousStored?.userImported ?: false,
                     normalizedSource,
                 )
             ) return
+            // Узел MASQUE заводим при первом же исходе.
+            //
+            // Список проверенных конфигураций наполняется встроенными профилями, а у
+            // MASQUE их нет: адреса приходят из ответа enroll. Запись без заготовки
+            // просто выбрасывалась, поэтому `recordWarpConfigHoldWindow` каждый раз
+            // отвечал «узла нет в списке» — качество MASQUE не копилось между сессиями
+            // и в рейтинге не участвовало.
+            val previous = previousStored ?: WarpVerifiedConfig(
+                id = configId,
+                engine = normalizedEngine,
+                mode = normalizedMode,
+                host = normalizedHost,
+                port = port,
+                endpointSource = normalizedSource,
+                rawConfig = "",
+                createdAt = nowMs,
+                lastVerifiedAt = 0L,
+                successCount = 0,
+                scope = normalizedScope,
+            ).takeIf { isOwnIssuedMasqueEndpointSource(normalizedEngine, normalizedSource) }
             if (previous == null) return
 
 
@@ -7323,7 +7343,25 @@ class ClientData(context: Context) {
     ): Boolean {
         if (!isAllowedVerifiedWarpEndpoint(engine, host, manual, userImported, endpointSource)) return false
         if (manual || userImported) return true
+        if (isOwnIssuedMasqueEndpointSource(engine, endpointSource)) return true
         return endpointSource.equals("bundled-seed", ignoreCase = true)
+    }
+
+    /**
+     * Адрес MASQUE, выданный нам самим enroll-ом.
+     *
+     * Список проверенных конфигураций задуман под встроенные профили, поэтому в него
+     * пускали только `bundled-seed`. У MASQUE встроенных профилей нет, адреса приходят
+     * из ответа enroll (`masque-v4`/`masque-v6`) — и из-за этого правила ни один узел
+     * MASQUE в список не попадал: замеры удержания отваливались с «узла нет в списке
+     * проверенных конфигураций», а качество между сессиями не накапливалось вовсе.
+     *
+     * Сканированные адреса сюда не относятся намеренно: узел прикреплён по
+     * `endpoint_pub_key` из enroll, чужой адрес не пройдёт проверку в принципе.
+     */
+    private fun isOwnIssuedMasqueEndpointSource(engine: String, endpointSource: String): Boolean {
+        if (!normalizeToken(engine).equals("masque", ignoreCase = true)) return false
+        return normalizeToken(endpointSource) in setOf("masque-v4", "masque-v6")
     }
 
     private fun isAllowedWarpVerifiedMode(mode: String?): Boolean {

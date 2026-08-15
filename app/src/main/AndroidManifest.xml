@@ -14,6 +14,13 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!--
+        Нужно, чтобы уведомление «Nova обновлена» могло само открыть экран.
+        Без этого разрешения полноэкранное намерение молча понижается до обычного
+        уведомления, и после самообновления приложение не запускается. На Android 14+
+        разрешение выдаётся не всем, поэтому уведомление остаётся запасным путём.
+    -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
     <uses-feature
         android:name="android.hardware.touchscreen"

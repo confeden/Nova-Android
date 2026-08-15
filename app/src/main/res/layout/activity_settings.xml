@@ -314,6 +314,102 @@
             </LinearLayout>
 
             <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:background="@drawable/bg_settings_item"
+                android:backgroundTint="#20FFFFFF"
+                android:minHeight="64dp"
+                android:paddingLeft="12dp"
+                android:paddingTop="8dp"
+                android:paddingRight="12dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="16dp">
+
+                <TextView
+                    android:id="@+id/tv_connection_selector_title"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Выбор протокола"
+                    android:textColor="#F3C94A"
+                    android:textSize="16sp"
+                    android:textStyle="bold"
+                    android:layout_marginBottom="2dp"/>
+
+                <RadioGroup
+                    android:id="@+id/rg_exit_region"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginBottom="0dp">
+
+                    <RadioButton
+                        android:id="@+id/rb_exit_auto"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="AUTO"
+                        android:textColor="#FFFFFF"
+                        android:textSize="12sp"
+                        android:paddingStart="0dp"
+                        android:paddingEnd="2dp"
+                        android:buttonTint="#F3C94A"/>
+
+                    <RadioButton
+                        android:id="@+id/rb_exit_ru"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="WARP"
+                        android:textColor="#FFFFFF"
+                        android:textSize="12sp"
+                        android:paddingStart="0dp"
+                        android:paddingEnd="2dp"
+                        android:buttonTint="#F3C94A"/>
+
+                    <RadioButton
+                        android:id="@+id/rb_exit_eu"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="EU"
+                        android:textColor="#FFFFFF"
+                        android:textSize="12sp"
+                        android:paddingStart="0dp"
+                        android:paddingEnd="2dp"
+                        android:buttonTint="#F3C94A"/>
+
+                    <RadioButton
+                        android:id="@+id/rb_exit_us"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="US"
+                        android:textColor="#FFFFFF"
+                        android:textSize="12sp"
+                        android:paddingStart="0dp"
+                        android:paddingEnd="2dp"
+                        android:buttonTint="#F3C94A"/>
+
+                    <RadioButton
+                        android:id="@+id/rb_exit_masque"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="MASQUE"
+                        android:textColor="#FFFFFF"
+                        android:textSize="12sp"
+                        android:paddingStart="0dp"
+                        android:paddingEnd="2dp"
+                        android:buttonTint="#F3C94A"/>
+                </RadioGroup>
+
+                <TextView
+                    android:id="@+id/tv_exit_last"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Последний выход: неизвестно"
+                    android:textColor="#AAAAAA"
+                    android:textSize="12sp"
+                    android:visibility="gone"/>
+            </LinearLayout>
+
+            <LinearLayout
                 android:id="@+id/row_main_background"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -514,101 +610,6 @@
                     android:textStyle="bold" />
             </LinearLayout>
 
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
-                android:minHeight="64dp"
-                android:paddingLeft="12dp"
-                android:paddingTop="8dp"
-                android:paddingRight="12dp"
-                android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp">
-
-                <TextView
-                    android:id="@+id/tv_connection_selector_title"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Выбор протокола"
-                    android:textColor="#F3C94A"
-                    android:textSize="16sp"
-                    android:textStyle="bold"
-                    android:layout_marginBottom="2dp"/>
-
-                <RadioGroup
-                    android:id="@+id/rg_exit_region"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:layout_marginBottom="0dp">
-
-                    <RadioButton
-                        android:id="@+id/rb_exit_auto"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="AUTO"
-                        android:textColor="#FFFFFF"
-                        android:textSize="12sp"
-                        android:paddingStart="0dp"
-                        android:paddingEnd="2dp"
-                        android:buttonTint="#F3C94A"/>
-
-                    <RadioButton
-                        android:id="@+id/rb_exit_ru"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="WARP"
-                        android:textColor="#FFFFFF"
-                        android:textSize="12sp"
-                        android:paddingStart="0dp"
-                        android:paddingEnd="2dp"
-                        android:buttonTint="#F3C94A"/>
-
-                    <RadioButton
-                        android:id="@+id/rb_exit_eu"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="EU"
-                        android:textColor="#FFFFFF"
-                        android:textSize="12sp"
-                        android:paddingStart="0dp"
-                        android:paddingEnd="2dp"
-                        android:buttonTint="#F3C94A"/>
-
-                    <RadioButton
-                        android:id="@+id/rb_exit_us"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="US"
-                        android:textColor="#FFFFFF"
-                        android:textSize="12sp"
-                        android:paddingStart="0dp"
-                        android:paddingEnd="2dp"
-                        android:buttonTint="#F3C94A"/>
-
-                    <RadioButton
-                        android:id="@+id/rb_exit_masque"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="MASQUE"
-                        android:textColor="#FFFFFF"
-                        android:textSize="12sp"
-                        android:paddingStart="0dp"
-                        android:paddingEnd="2dp"
-                        android:buttonTint="#F3C94A"/>
-                </RadioGroup>
-
-                <TextView
-                    android:id="@+id/tv_exit_last"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Последний выход: неизвестно"
-                    android:textColor="#AAAAAA"
-                    android:textSize="12sp"
-                    android:visibility="gone"/>
-            </LinearLayout>
 
             <LinearLayout
                 android:id="@+id/row_local_proxy"

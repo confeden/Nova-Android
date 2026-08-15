@@ -5,9 +5,7 @@ import android.graphics.BlurMaskFilter
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.RadialGradient
 import android.graphics.RectF
-import android.graphics.Shader
 import android.util.AttributeSet
 import androidx.appcompat.widget.AppCompatTextView
 
@@ -87,7 +85,11 @@ class StrokeTextView @JvmOverloads constructor(
 
     override fun onDraw(canvas: Canvas) {
         if (pillEnabled) {
-            drawPill(canvas)
+            if (pillOvalGlow) {
+                drawLineHalo(canvas)
+            } else {
+                drawPill(canvas)
+            }
         }
 
         val originalColor = currentTextColor
@@ -115,6 +117,77 @@ class StrokeTextView @JvmOverloads constructor(
         textPaint.clearShadowLayer()
     }
 
+    /**
+     * Мягкое облако света с ядром вдоль строки — как у неоновой вывески.
+     *
+     * Три подхода до этого были неверны каждый по-своему, и все три различимы на
+     * тёмном фоне: стопка скруглённых прямоугольников давала ступеньки на стыках
+     * слоёв (видны как полосы); радиальный градиент — яркую точку в геометрическом
+     * центре; размытие самих букв — ореол по форме глифов, то есть подсветку букв, а
+     * не фона под ними.
+     *
+     * Вывеска светит трубкой: источник вытянут вдоль строки, а не собран в точку.
+     * Поэтому ядро здесь — узкая горизонтальная полоса по средней линии текста, и
+     * она размывается всё шире с падающей непрозрачностью. Свет ложится на фон
+     * из-под букв, оставляя сам текст нетронутым.
+     */
+    private fun drawLineHalo(canvas: Canvas) {
+        if (Color.alpha(pillGlowColor) <= 0) return
+        val red = Color.red(pillGlowColor)
+        val green = Color.green(pillGlowColor)
+        val blue = Color.blue(pillGlowColor)
+        val baseAlpha = Color.alpha(pillGlowColor)
+
+        val rawText = text?.toString().orEmpty().ifBlank { " " }
+        val textWidth = paint.measureText(rawText)
+        val fontMetrics = paint.fontMetrics
+        val textHeight = (fontMetrics.descent - fontMetrics.ascent).coerceAtLeast(dp(18f))
+        val cx = width / 2f
+        val cy = height / 2f
+
+        // Ядро — полоса заметно ниже строки: именно её вытянутость и читается как
+        // трубка. Полная высота текста дала бы прямоугольное пятно.
+        val coreHalfW = textWidth / 2f
+        val coreHalfH = textHeight * 0.16f
+        val core = RectF(cx - coreHalfW, cy - coreHalfH, cx + coreHalfW, cy + coreHalfH)
+        val coreRadius = core.height() / 2f
+
+        pillBlurPaint.reset()
+        pillBlurPaint.isAntiAlias = true
+        pillBlurPaint.isDither = true
+        pillBlurPaint.style = Paint.Style.FILL
+
+        // Восемь проходов: размытие от широкого к узкому, непрозрачность наоборот.
+        // Слои перекрываются размытыми пятнами, а не силуэтами с краем, поэтому
+        // ступенек между ними не видно.
+        val layers = arrayOf(
+            floatArrayOf(1.00f, 0.21f),
+            floatArrayOf(0.78f, 0.26f),
+            floatArrayOf(0.58f, 0.32f),
+            floatArrayOf(0.42f, 0.39f),
+            floatArrayOf(0.29f, 0.47f),
+            floatArrayOf(0.19f, 0.56f),
+            floatArrayOf(0.11f, 0.66f),
+            floatArrayOf(0.05f, 0.76f),
+        )
+        val widest = pillBlurRadius.coerceAtMost(dp(64f))
+        for (layer in layers) {
+            val blur = (widest * layer[0]).coerceAtLeast(1f)
+            val alpha = (baseAlpha * layer[1]).toInt().coerceIn(0, 255)
+            if (alpha <= 0) continue
+            // Форма у всех слоёв одна, меняется только размытие.
+            //
+            // Когда полоса расширялась вместе с радиусом, у каждого слоя был свой
+            // силуэт, и на дальнем крае облака проступали кольца — тем заметнее, чем
+            // ярче свечение. При общей форме размытия разного радиуса накладываются
+            // друг на друга без границ, а объём даёт сам радиус.
+            pillBlurPaint.color = Color.argb(alpha, red, green, blue)
+            pillBlurPaint.maskFilter = BlurMaskFilter(blur, BlurMaskFilter.Blur.NORMAL)
+            canvas.drawRoundRect(core, coreRadius, coreRadius, pillBlurPaint)
+        }
+        pillBlurPaint.maskFilter = null
+    }
+
     private fun drawPill(canvas: Canvas) {
         val rawText = text?.toString().orEmpty().ifBlank { " " }
         val textWidth = paint.measureText(rawText)
@@ -136,40 +209,7 @@ class StrokeTextView @JvmOverloads constructor(
         pillBlurPaint.style = Paint.Style.FILL
 
         if (Color.alpha(pillGlowColor) > 0) {
-            val red = Color.red(pillGlowColor)
-            val green = Color.green(pillGlowColor)
-            val blue = Color.blue(pillGlowColor)
-            val baseAlpha = Color.alpha(pillGlowColor)
-
-            if (pillOvalGlow) {
-                // Равномерное свечение по форме текста (Stadium / Capsule)
-                // 4 слоя от огромного/прозрачного до маленького/яркого
-                val layers = arrayOf(
-                    floatArrayOf(dp(16f), dp(56f), 0.25f), // Outer soft glow
-                    floatArrayOf(dp(8f),  dp(28f), 0.50f), // Mid soft glow
-                    floatArrayOf(dp(0f),  dp(12f), 0.90f), // Inner bright glow
-                    floatArrayOf(dp(-4f), dp(4f),  1.00f)  // Core brightest
-                )
-
-                for (layer in layers) {
-                    val expand = layer[0]
-                    val blur = layer[1]
-                    val alphaScale = layer[2]
-
-                    val layerRect = RectF(
-                        rect.left - expand,
-                        rect.top - expand,
-                        rect.right + expand,
-                        rect.bottom + expand
-                    )
-                    val layerRadius = layerRect.height() / 2f
-                    
-                    pillBlurPaint.color = Color.argb((baseAlpha * alphaScale).toInt().coerceIn(0, 255), red, green, blue)
-                    pillBlurPaint.maskFilter = BlurMaskFilter(blur.coerceAtLeast(1f), BlurMaskFilter.Blur.NORMAL)
-                    canvas.drawRoundRect(layerRect, layerRadius, layerRadius, pillBlurPaint)
-                }
-                pillBlurPaint.maskFilter = null
-            } else {
+            run {
                 pillBlurPaint.color = pillGlowColor
                 pillBlurPaint.maskFilter = BlurMaskFilter(pillBlurRadius, BlurMaskFilter.Blur.NORMAL)
                 canvas.drawRoundRect(rect, cornerRadius, cornerRadius, pillBlurPaint)

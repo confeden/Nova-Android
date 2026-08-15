@@ -71,6 +71,9 @@ class NovaVpnService : OperaNativeVpnService() {
      * `tls: access denied` до всякой передачи данных.
      */
     private var masqueDataPlaneBlockedObserved = false
+
+    /** Сколько раз имя рукопожатия подводило на конкретном узле MASQUE. */
+    private val masqueSniFailures = mutableMapOf<String, Int>()
     @Volatile
     private var masqueLastAuthError: String? = null
     private val cleanupInProgress = AtomicBoolean(false)
@@ -1882,7 +1885,7 @@ class NovaVpnService : OperaNativeVpnService() {
             )
             return
         }
-        val recorded = runCatching {
+        fun writeWindow(): Boolean = runCatching {
             clientData.recordWarpConfigHoldWindow(
                 host = attempt.endpointHost,
                 port = attempt.port,
@@ -1891,6 +1894,24 @@ class NovaVpnService : OperaNativeVpnService() {
         }.onFailure {
             LogManager.log("Не удалось записать удержание узла $label: ${it.message}")
         }.getOrDefault(false)
+
+        var recorded = writeWindow()
+        if (!recorded && attempt.mode.engine.equals("masque", ignoreCase = true)) {
+            // Узел MASQUE заводится по итогу попытки, а удержание меряется раньше —
+            // на живой сессии. Первый замер каждого адреса поэтому падал в «узла нет
+            // в списке», и в рейтинг попадала только вторая сессия. Заводим запись
+            // сразу и повторяем: адрес выдан нам enroll-ом, придумывать нечего.
+            clientData.recordWarpVerifiedRuntimeOutcome(
+                engine = attempt.mode.engine,
+                mode = attempt.mode.name,
+                host = attempt.endpointHost,
+                port = attempt.port,
+                success = true,
+                endpointSource = attempt.endpointSource,
+                rawConfig = buildWarpConfigDescription(attempt),
+            )
+            recorded = writeWindow()
+        }
         if (!recorded) {
             LogManager.log(
                 "Удержание $label не записано: узла нет в списке проверенных конфигураций."
@@ -10995,6 +11016,15 @@ class NovaVpnService : OperaNativeVpnService() {
                 if (handshakeObserved.get() && !inboundEverObserved.get()) {
                     masquePortsWithoutInbound.add(currentPort)
                 }
+                // Имя могло быть виновато: либо рукопожатие не прошло, либо прошло и
+                // трафика нет. Отказ по ключу к имени отношения не имеет.
+                if (
+                    outcome != AttemptOutcome.SUCCESS &&
+                    normalizedFailureReason != "access_denied" &&
+                    !inboundEverObserved.get()
+                ) {
+                    noteMasqueSniFailure(transportMode, currentHost, currentPort)
+                }
                 val protectedMasqueFastPathExhausted =
                     protectedMasqueFastPathKeys.isEmpty() ||
                         protectedMasqueFastPathKeys.all { it in triedMasqueFastPathKeys }
@@ -18019,17 +18049,37 @@ class NovaVpnService : OperaNativeVpnService() {
         port: Int,
     ): String {
         val adaptive = camouflageHost.trim()
-        if (adaptive.isNotBlank() && !isCloudflareMasqueSni(adaptive)) {
+        // Имя, которое уже подводило на этом адресе, второй раз не берём.
+        //
+        // Выбор был чисто детерминированным — от адреса, порта и режима, — поэтому
+        // попавшее под фильтр имя возвращалось на каждой попытке к этому узлу и
+        // отказ выглядел как отказ узла. Счётчик неудач сдвигает выбор по набору,
+        // так что повтор пробует следующее имя.
+        val failures = masqueSniFailures[masqueSniKey(mode, host, port)] ?: 0
+        if (adaptive.isNotBlank() && !isCloudflareMasqueSni(adaptive) && failures == 0) {
             return adaptive
         }
-        // Ветки «чистое рукопожатие» намеренно оставляют маскировку пустой. Раньше это
-        // означало имя Cloudflare, то есть заведомо отрезанную попытку; теперь пустое
-        // значение выбирает нейтральное имя из запасного набора — своё на каждый
-        // адрес и режим, чтобы попытки не повторяли друг друга.
         val seed = "$host:$port:${mode.name}".hashCode()
-        val index = ((seed % MASQUE_NEUTRAL_SNI_POOL.size) + MASQUE_NEUTRAL_SNI_POOL.size) %
-            MASQUE_NEUTRAL_SNI_POOL.size
+        val size = MASQUE_NEUTRAL_SNI_POOL.size
+        val index = (((seed % size) + size) % size + failures) % size
         return MASQUE_NEUTRAL_SNI_POOL[index]
+    }
+
+    private fun masqueSniKey(mode: TransportMode, host: String, port: Int): String =
+        "${mode.name}|${host.trim()}|$port"
+
+    /**
+     * Отмечает, что попытка с выбранным именем не дала трафика.
+     *
+     * Считается только для MASQUE и только когда отказ мог быть вызван именем:
+     * рукопожатие не прошло или прошло, но данные не пошли. Отказ по ключу
+     * (`tls: access denied`) к имени отношения не имеет и счётчик не двигает.
+     */
+    private fun noteMasqueSniFailure(mode: TransportMode, host: String, port: Int) {
+        if (!mode.engine.equals("masque", ignoreCase = true)) return
+        val key = masqueSniKey(mode, host, port)
+        val next = ((masqueSniFailures[key] ?: 0) + 1) % MASQUE_NEUTRAL_SNI_POOL.size
+        masqueSniFailures[key] = next
     }
 
     private fun isCloudflareMasqueSni(value: String): Boolean {

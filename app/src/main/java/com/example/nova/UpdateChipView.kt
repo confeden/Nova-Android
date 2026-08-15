@@ -34,7 +34,14 @@ class UpdateChipView @JvmOverloads constructor(
     private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val rect = RectF()
 
-    private val inset = dp(7f)
+    // Свечению нужно место внутри самого вида.
+    //
+    // Холст вида обрезан его границами, поэтому размытие, выходящее за них, срезалось
+    // ровным прямоугольником — вокруг плашки был виден светлый короб с углами. Отступ
+    // должен покрывать самый широкий слой целиком: расширение плюс радиус размытия.
+    // Внутренние поля в разметке увеличены на столько же, чтобы сама плашка осталась
+    // прежнего размера.
+    private val inset = dp(16f)
     private var pulse = 0f
     private var pulseAnimator: ValueAnimator? = null
 
@@ -72,36 +79,25 @@ class UpdateChipView @JvmOverloads constructor(
         if (rect.width() <= 0f || rect.height() <= 0f) return
         val radius = rect.height() / 2f
 
-        // Три слоя от широкого и прозрачного к узкому и яркому: один размытый
-        // прямоугольник даёт плоское пятно, а не свечение.
+        // Ореол — одна размытая капсула, повторяющая форму плашки.
+        //
+        // Слоёв было три, и на стыках яркость менялась ступенькой; вместе с обрезкой
+        // по границам вида это и читалось как светлый короб. Один слой с широким
+        // размытием даёт ровное рассеивание, а форма остаётся капсулой — углов у неё
+        // нет по определению.
         val breath = 0.55f + 0.45f * pulse
-        val layers = arrayOf(
-            floatArrayOf(dp(5f), dp(18f), 0.22f),
-            floatArrayOf(dp(1f), dp(9f), 0.40f),
-            floatArrayOf(dp(-2f), dp(4f), 0.62f),
+        glowPaint.reset()
+        glowPaint.isAntiAlias = true
+        glowPaint.isDither = true
+        glowPaint.style = Paint.Style.FILL
+        glowPaint.color = Color.argb(
+            (150 * breath).toInt().coerceIn(0, 255),
+            GLOW_R,
+            GLOW_G,
+            GLOW_B,
         )
-        for (layer in layers) {
-            val expand = layer[0]
-            val blur = layer[1]
-            val alphaScale = layer[2] * breath
-            glowPaint.reset()
-            glowPaint.isAntiAlias = true
-            glowPaint.style = Paint.Style.FILL
-            glowPaint.color = Color.argb(
-                (255 * alphaScale).toInt().coerceIn(0, 255),
-                GLOW_R,
-                GLOW_G,
-                GLOW_B,
-            )
-            glowPaint.maskFilter = BlurMaskFilter(blur.coerceAtLeast(1f), BlurMaskFilter.Blur.NORMAL)
-            val layerRect = RectF(
-                rect.left - expand,
-                rect.top - expand,
-                rect.right + expand,
-                rect.bottom + expand,
-            )
-            canvas.drawRoundRect(layerRect, layerRect.height() / 2f, layerRect.height() / 2f, glowPaint)
-        }
+        glowPaint.maskFilter = BlurMaskFilter(dp(11f), BlurMaskFilter.Blur.NORMAL)
+        canvas.drawRoundRect(rect, radius, radius, glowPaint)
         glowPaint.maskFilter = null
 
         fillPaint.reset()

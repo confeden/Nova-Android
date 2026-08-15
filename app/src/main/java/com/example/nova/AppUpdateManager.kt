@@ -92,6 +92,8 @@ object AppUpdateManager {
         "https://raw.githubusercontent.com/confeden/nova_updates/main/apk_version.json",
         "https://confeden.github.io/nova_updates/apk_version.json",
     )
+    private const val GITHUB_LATEST_RELEASE_URL =
+        "https://api.github.com/repos/confeden/Nova-Android/releases/latest"
     private const val PERIODIC_WORK_NAME = "nova_update_check_periodic"
     private const val REPAIR_WORK_NAME = "nova_update_repair"
     private const val CHANNEL_ID = "nova_updates"
@@ -611,7 +613,51 @@ object AppUpdateManager {
                 continue
             }
         }
-        return null
+        return fetchLatestGithubRelease()
+    }
+
+    /**
+     * Спрашивает последний релиз публичного репозитория напрямую.
+     *
+     * Запасной путь к `apk_version.json`: репозиторий исходников публичный, и релиз
+     * появляется в нём раньше, чем кто-либо обновит ленту, — а если лента отстанет
+     * или окажется недоступна, обновление иначе не найдётся вовсе.
+     *
+     * Контрольной суммы у релиза нет, и это осознанный размен: без неё проверка
+     * скачанного APK опирается на имя пакета, версию и подпись самого Android при
+     * установке. Лента с `sha256` остаётся первой по очереди именно поэтому.
+     */
+    private fun fetchLatestGithubRelease(): ApkUpdateMetadata? {
+        return try {
+            val connection = URL(GITHUB_LATEST_RELEASE_URL).openConnection() as HttpURLConnection
+            connection.connectTimeout = 6000
+            connection.readTimeout = 6000
+            connection.instanceFollowRedirects = true
+            connection.useCaches = false
+            connection.setRequestProperty("User-Agent", "NovaAndroidUpdater/1.12")
+            connection.setRequestProperty("Accept", "application/vnd.github+json")
+            val body = connection.inputStream.bufferedReader().use { it.readText() }
+            val json = JSONObject(body)
+            if (json.optBoolean("draft") || json.optBoolean("prerelease")) return null
+            val version = json.optString("tag_name").trim().removePrefix("v").removePrefix("V")
+            val assets = json.optJSONArray("assets")
+            var apkUrl = ""
+            if (assets != null) {
+                for (index in 0 until assets.length()) {
+                    val asset = assets.optJSONObject(index) ?: continue
+                    val name = asset.optString("name").trim()
+                    if (!name.endsWith(".apk", ignoreCase = true)) continue
+                    apkUrl = asset.optString("browser_download_url").trim()
+                    if (apkUrl.isNotBlank()) break
+                }
+            }
+            if (version.isBlank() || apkUrl.isBlank()) return null
+            LogManager.log("Метаданные обновления взяты из релизов GitHub: $version")
+            ApkUpdateMetadata(version = version, url = apkUrl, sha256 = "")
+        } catch (error: Exception) {
+            LogManager.log("Релизы GitHub недоступны: ${error.message}")
+            null
+        }
     }
 
     private fun enqueueDownload(

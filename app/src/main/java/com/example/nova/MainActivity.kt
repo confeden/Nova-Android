@@ -4193,7 +4193,7 @@ class MainActivity : AppCompatActivity() {
         val blue = Color.blue(textGlowColor)
         val cloudColor = Color.argb(255, red, green, blue) // Яркое базовое свечение
         tvStatus.letterSpacing = 0.096f
-        tvStatus.setStroke(6.2f, Color.parseColor("#EEF8A6"))
+        tvStatus.setStroke(7.4f, Color.parseColor("#EEF8A6"))
         
         // Отключаем свечение у самого текста
         tvStatus.setStrokeGlow(0f, Color.TRANSPARENT)

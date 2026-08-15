@@ -27,9 +27,14 @@ object OperaProxyManager {
     private val startLock = Any()
     private val sessionFailedLock = Any()
 
+    /**
+     * Способ запуска бинаря. Остался один — прямой.
+     *
+     * Ветка через `/system/bin/sh -c` убрана: она ничего не давала сверх прямого
+     * запуска, а выглядела как выполнение команд оболочки.
+     */
     private enum class LaunchMode {
         DIRECT,
-        SHELL,
     }
 
     enum class ReadyState {
@@ -272,46 +277,8 @@ object OperaProxyManager {
         }
     }
 
-    private fun shellQuote(value: String): String {
-        return "'" + value.replace("'", "'\"'\"'") + "'"
-    }
 
-    private fun appendStartupDiagnostic(context: Context, message: String) {
-        runCatching {
-            val target = File(context.getExternalFilesDir(null) ?: context.filesDir, "operaproxy_diag.txt")
-            target.parentFile?.mkdirs()
-            target.appendText("${System.currentTimeMillis()} $message\n")
-        }
-    }
 
-    private fun prepareExecutableBinary(
-        context: Context,
-        sourceBinary: File,
-        logger: (String) -> Unit,
-    ): File {
-        val abiSuffix = Build.SUPPORTED_ABIS.firstOrNull().orEmpty().ifBlank { "unknown" }
-        val binDir = File(context.codeCacheDir ?: context.filesDir, "embedded-bin").apply { mkdirs() }
-        val stagedBinary = File(binDir, "operaproxy-$abiSuffix")
-        val needsRefresh =
-            !stagedBinary.exists() ||
-                stagedBinary.length() != sourceBinary.length() ||
-                stagedBinary.lastModified() < sourceBinary.lastModified()
-        if (needsRefresh) {
-            sourceBinary.inputStream().use { input ->
-                stagedBinary.outputStream().use { output ->
-                    input.copyTo(output)
-                }
-            }
-            stagedBinary.setReadable(true, true)
-            stagedBinary.setWritable(true, true)
-            stagedBinary.setExecutable(true, true)
-            stagedBinary.setLastModified(sourceBinary.lastModified())
-            logger("Подготовили исполняемый Opera proxy binary: ${stagedBinary.absolutePath}")
-        } else if (!stagedBinary.canExecute()) {
-            stagedBinary.setExecutable(true, true)
-        }
-        return stagedBinary
-    }
 
     fun isRegistrationSupportedOnDevice(context: Context): Boolean {
         val nativeLibDir = File(context.applicationInfo.nativeLibraryDir.orEmpty())
@@ -392,10 +359,7 @@ object OperaProxyManager {
                     ?: LEGACY_BIND_PORT
                 currentCountry = managedCountry
             }
-            val launchLogger: (String) -> Unit = { message ->
-                logger(message)
-                appendStartupDiagnostic(appContext, "[$requestedCountry:$bindPort] $message")
-            }
+            val launchLogger: (String) -> Unit = { message -> logger(message) }
             fun abortIfRequested(stopManagedProxy: Boolean = true): Boolean {
                 if (shouldAbort?.invoke() != true) return false
                 if (stopManagedProxy) {
@@ -1769,15 +1733,17 @@ object OperaProxyManager {
         }
     }
 
-    private fun buildLaunchModes(): List<LaunchMode> {
-        val isLegacyArm32Only = Build.SUPPORTED_64_BIT_ABIS.isEmpty() &&
-            Build.SUPPORTED_ABIS.any { it.contains("armeabi-v7a") || it == "armeabi" }
-        return if (isLegacyArm32Only) {
-            listOf(LaunchMode.DIRECT, LaunchMode.SHELL)
-        } else {
-            listOf(LaunchMode.SHELL)
-        }
-    }
+    /**
+     * Бинарь запускается напрямую, без оболочки.
+     *
+     * Раньше на 64-битных устройствах единственным способом был `SHELL`: команда
+     * собиралась строкой в рантайме и отдавалась в `/system/bin/sh -c`. Работает это
+     * не лучше прямого запуска, а со стороны выглядит как «приложение выполняет
+     * команды оболочки» — самостоятельный признак вредоносного поведения для
+     * сканеров. Путь `DIRECT` давно написан и используется на arm32; здесь он
+     * становится единственным.
+     */
+    private fun buildLaunchModes(): List<LaunchMode> = listOf(LaunchMode.DIRECT)
 
     private fun startOperaProcess(
         args: List<String>,
@@ -1786,13 +1752,6 @@ object OperaProxyManager {
     ): Process {
         val processBuilder = when (launchMode) {
             LaunchMode.DIRECT -> ProcessBuilder(args)
-            LaunchMode.SHELL -> {
-                val shellCommand = buildString {
-                    append("exec ")
-                    append(args.joinToString(" ") { shellQuote(it) })
-                }
-                ProcessBuilder("/system/bin/sh", "-c", shellCommand)
-            }
         }
         processBuilder.redirectErrorStream(true)
         val environment = processBuilder.environment()

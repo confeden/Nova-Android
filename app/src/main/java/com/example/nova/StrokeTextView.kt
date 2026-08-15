@@ -145,10 +145,10 @@ class StrokeTextView @JvmOverloads constructor(
         val cx = width / 2f
         val cy = height / 2f
 
-        // Ядро — полоса заметно ниже строки: именно её вытянутость и читается как
-        // трубка. Полная высота текста дала бы прямоугольное пятно.
-        val coreHalfW = textWidth / 2f
-        val coreHalfH = textHeight * 0.16f
+        // Ядро — капсула по строке, тех же пропорций, что были в 1.26: свет идёт
+        // линией из-под букв, а не точкой из середины.
+        val coreHalfW = textWidth / 2f + dp(12f)
+        val coreHalfH = textHeight / 2f + dp(6f)
         val core = RectF(cx - coreHalfW, cy - coreHalfH, cx + coreHalfW, cy + coreHalfH)
         val coreRadius = core.height() / 2f
 
@@ -157,20 +157,26 @@ class StrokeTextView @JvmOverloads constructor(
         pillBlurPaint.isDither = true
         pillBlurPaint.style = Paint.Style.FILL
 
-        // Восемь проходов: размытие от широкого к узкому, непрозрачность наоборот.
-        // Слои перекрываются размытыми пятнами, а не силуэтами с краем, поэтому
-        // ступенек между ними не видно.
+        // Сила и охват — как в 1.26: у ядра почти полная непрозрачность, у самого
+        // дальнего слоя размытие во всю заданную величину. Отличие только в числе
+        // ступеней: там их было четыре, и на стыках яркость менялась скачком —
+        // отсюда полосы. Здесь двенадцать, с плавно спадающей кривой, поэтому
+        // переход к краю сплошной.
         val layers = arrayOf(
-            floatArrayOf(1.00f, 0.21f),
-            floatArrayOf(0.78f, 0.26f),
-            floatArrayOf(0.58f, 0.32f),
-            floatArrayOf(0.42f, 0.39f),
-            floatArrayOf(0.29f, 0.47f),
-            floatArrayOf(0.19f, 0.56f),
-            floatArrayOf(0.11f, 0.66f),
-            floatArrayOf(0.05f, 0.76f),
+            floatArrayOf(1.00f, 0.14f),
+            floatArrayOf(0.84f, 0.18f),
+            floatArrayOf(0.70f, 0.23f),
+            floatArrayOf(0.58f, 0.29f),
+            floatArrayOf(0.47f, 0.36f),
+            floatArrayOf(0.37f, 0.44f),
+            floatArrayOf(0.29f, 0.53f),
+            floatArrayOf(0.22f, 0.63f),
+            floatArrayOf(0.16f, 0.73f),
+            floatArrayOf(0.11f, 0.83f),
+            floatArrayOf(0.07f, 0.92f),
+            floatArrayOf(0.04f, 1.00f),
         )
-        val widest = pillBlurRadius.coerceAtMost(dp(64f))
+        val widest = pillBlurRadius
         for (layer in layers) {
             val blur = (widest * layer[0]).coerceAtLeast(1f)
             val alpha = (baseAlpha * layer[1]).toInt().coerceIn(0, 255)

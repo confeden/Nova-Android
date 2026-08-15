@@ -40,6 +40,7 @@ import java.net.URL
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.random.Random
 
 data class ApkUpdateMetadata(
     val version: String,
@@ -161,12 +162,18 @@ object AppUpdateManager {
         cleanupStaleUpdateDownloads(appContext, keepDownloadId = clientData.getUpdateDownloadId())
         val workManager = WorkManager.getInstance(appContext)
         if (clientData.getAutoAppUpdate()) {
+            // Восемь часов плюс случайные минуты.
+            //
+            // Ровный интервал обращений к одному и тому же набору адресов сам по себе
+            // выглядит как признак: так ходят не приложения, а закладки. Разброс
+            // ничего не стоит и убирает регулярность.
             val request = PeriodicWorkRequestBuilder<UpdateCheckWorker>(8, TimeUnit.HOURS)
                 .setConstraints(
                     Constraints.Builder()
                         .setRequiredNetworkType(NetworkType.CONNECTED)
                         .build()
                 )
+                .setInitialDelay(Random.nextLong(10L, 90L), TimeUnit.MINUTES)
                 .build()
             workManager.enqueueUniquePeriodicWork(
                 PERIODIC_WORK_NAME,
@@ -224,14 +231,16 @@ object AppUpdateManager {
             LogManager.log("Новая версия не требуется: ${metadata.version} не новее $installedVersion.")
             return false
         }
-        return if (wifiTransport) {
-            // При активном VPN DownloadManager может видеть только VPN-сеть без флага NOT_METERED.
-            // Решение о "только по Wi‑Fi" принимаем сами по underlying transport.
-            enqueueDownload(appContext, metadata, allowMetered = true, automatic = true)
-        } else {
-            showAvailableNotification(appContext, metadata)
-            true
-        }
+        // Сами APK больше не качаем — только сообщаем, что версия вышла.
+        //
+        // Загрузка без действия человека — это и есть признак, по которому Play
+        // Protect выносит вердикт: у категории «hostile downloader» единственное
+        // исключение сделано для тех, у кого «все загрузки инициированы согласившимся
+        // пользователем», а фоновая проверка раз в восемь часов под него не подходит.
+        // Установка осталась на месте, но запускает её нажатие: «Скачать» в
+        // уведомлении или плашка на главном экране.
+        showAvailableNotification(appContext, metadata)
+        return true
         } finally {
             updateCheckInProgress.set(false)
         }
@@ -299,7 +308,6 @@ object AppUpdateManager {
                 context = appContext,
                 metadata = metadata,
                 allowMetered = true,
-                automatic = false,
             )
             return if (started) {
                 ManualUpdateCheckResult(
@@ -497,7 +505,7 @@ object AppUpdateManager {
                     sha256 = intent.getStringExtra(EXTRA_SHA256).orEmpty(),
                 )
                 if (metadata.version.isNotBlank() && metadata.url.isNotBlank()) {
-                    enqueueDownload(appContext, metadata, allowMetered = true, automatic = false)
+                    enqueueDownload(appContext, metadata, allowMetered = true)
                 }
                 NotificationManagerCompat.from(appContext).cancel(NOTIFICATION_AVAILABLE_ID)
             }
@@ -664,7 +672,6 @@ object AppUpdateManager {
         context: Context,
         metadata: ApkUpdateMetadata,
         allowMetered: Boolean,
-        automatic: Boolean,
     ): Boolean {
         val clientData = ClientData(context)
         if (getReadyDownloadedUpdate(context, clientData)?.version == metadata.version) {
@@ -704,8 +711,7 @@ object AppUpdateManager {
         val request = DownloadManager.Request(Uri.parse(metadata.url))
             .setTitle("Nova ${metadata.version}")
             .setDescription(
-                if (automatic) "Загружаем обновление Nova по Wi‑Fi"
-                else "Доступна новая версия Nova"
+                "Доступна новая версия Nova"
             )
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
             .setAllowedOverMetered(allowMetered)
@@ -715,7 +721,7 @@ object AppUpdateManager {
         val manager = context.getSystemService(DownloadManager::class.java) ?: return false
         val downloadId = manager.enqueue(request)
         LogManager.log(
-            "Запустили загрузку обновления ${metadata.version}: automatic=$automatic, " +
+            "Запустили загрузку обновления ${metadata.version} по запросу человека: " +
                 "allowMetered=$allowMetered, id=$downloadId"
         )
         clientData.setUpdateDownloadId(downloadId)
@@ -1574,6 +1580,65 @@ object AppUpdateManager {
         ).takeIf { it.packageName.isNotBlank() && it.versionName.isNotBlank() }
     }
 
+    /**
+     * Подписан ли скачанный APK тем же ключом, что и установленное приложение.
+     *
+     * Это единственная проверка, которая действительно закрывает подмену файла между
+     * скачиванием и установкой: APK лежит во внешнем хранилище, а на Android 7–9 туда
+     * пишет любое приложение с разрешением на запись. Совпадения версии и имени
+     * пакета подделываются тривиально, подпись — нет.
+     *
+     * Android откажется ставить чужую подпись и сам, но откажется уже в системном
+     * диалоге, показав человеку невнятную ошибку. Здесь отказ происходит раньше и
+     * называется своим именем.
+     */
+    private fun signedBySameCertificate(context: Context, apkFile: File): Boolean {
+        return try {
+            val packageManager = context.packageManager
+            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                PackageManager.GET_SIGNING_CERTIFICATES
+            } else {
+                @Suppress("DEPRECATION")
+                PackageManager.GET_SIGNATURES
+            }
+            val downloaded = packageManager.getPackageArchiveInfo(apkFile.absolutePath, flags)
+            val installed = packageManager.getPackageInfo(context.packageName, flags)
+            val downloadedCerts = certificateFingerprints(downloaded)
+            val installedCerts = certificateFingerprints(installed)
+            if (downloadedCerts.isEmpty() || installedCerts.isEmpty()) {
+                LogManager.log("Не удалось прочитать подпись APK обновления. Считаем проверку непройденной.")
+                return false
+            }
+            downloadedCerts == installedCerts
+        } catch (error: Exception) {
+            LogManager.log("Проверка подписи APK обновления сорвалась: ${error.message}")
+            false
+        }
+    }
+
+    private fun certificateFingerprints(info: android.content.pm.PackageInfo?): Set<String> {
+        if (info == null) return emptySet()
+        val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.signingInfo?.let { signingInfo ->
+                if (signingInfo.hasMultipleSigners()) {
+                    signingInfo.apkContentsSigners
+                } else {
+                    signingInfo.signingCertificateHistory
+                }
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            info.signatures
+        }
+        return signatures.orEmpty().mapNotNull { signature ->
+            runCatching {
+                MessageDigest.getInstance("SHA-256")
+                    .digest(signature.toByteArray())
+                    .joinToString("") { "%02x".format(it) }
+            }.getOrNull()
+        }.toSet()
+    }
+
     private fun validateDownloadedApk(
         context: Context,
         apkFile: File,
@@ -1592,6 +1657,11 @@ object AppUpdateManager {
         if (expectedVersion.isNotBlank() && parsedApk.versionName != expectedVersion) {
             return DownloadedApkValidationResult(
                 failureReason = "Скачанный APK имеет неожиданную версию ${parsedApk.versionName} вместо $expectedVersion. Удаляем файл и ждём новую загрузку.",
+            )
+        }
+        if (!signedBySameCertificate(context, apkFile)) {
+            return DownloadedApkValidationResult(
+                failureReason = "Скачанный APK подписан не тем ключом, что установленное приложение. Удаляем его.",
             )
         }
         val normalizedExpectedSha256 = normalizeSha256(expectedSha256)

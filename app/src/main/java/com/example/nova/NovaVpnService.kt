@@ -1935,9 +1935,15 @@ class NovaVpnService : OperaNativeVpnService() {
     private fun beginConnectGeneration(stopExisting: Boolean = true): Int {
         val generationId = connectGeneration.incrementAndGet()
         lastStoppedStateCleanupAtMs = 0L
-        // Новый цикл ничего ещё не пробовал: и транспорт, и пояснение о подмене
-        // транспорта от прошлого цикла к нему не относятся.
-        currentTransportLabel = ""
+        // Метку транспорта здесь НЕ обнуляем.
+        //
+        // Обнуление ломало бейдж: экран отказывается затирать известный транспорт
+        // пустым значением (иначе на живом MASQUE писалось «WARP»), поэтому пустая
+        // публикация оставляла показанным прошлый транспорт — и на встроенном WARP
+        // иногда висело «MASQUE» от прошлого цикла. Обнулять и незачем: метку
+        // выставляет каждая попытка (`setCurrentTransportForAttempt`), фаза MASQUE и
+        // фаза WARP делают это явно в самом начале, а полная очистка идёт на
+        // остановке. Пояснение о подмене к новому циклу и правда не относится.
         currentTransportNotice = ""
         runCatching { ClientData(this).setLastTransportNotice("") }
         clearPreparedTransportState()

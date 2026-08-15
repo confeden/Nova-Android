@@ -24,6 +24,13 @@ class NovaBootReceiver : BroadcastReceiver() {
         val action = intent?.action.orEmpty()
         if (action !in HANDLED_ACTIONS) return
 
+        // После самообновления возвращаем человека в приложение. Делаем это до
+        // восстановления туннеля: подъём VPN занимает секунды, а экран должен
+        // появиться сразу, иначе обновление выглядит как «ничего не произошло».
+        if (action == Intent.ACTION_MY_PACKAGE_REPLACED) {
+            AppUpdateManager.onPackageReplaced(appContext)
+        }
+
         val clientData = ClientData(appContext)
         val persistedState = clientData.getServiceState()
         val vpnWasOn = persistedState == NovaVpnService.STATE_CONNECTED ||

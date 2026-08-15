@@ -33,6 +33,9 @@ type SocketProtector interface {
 
 var protector SocketProtector
 
+// masqueProtector — отдельный протектор для сокета MASQUE; nil означает «общий».
+var masqueProtector SocketProtector
+
 // SetSocketProtector registers the Java callback
 func SetSocketProtector(p SocketProtector) {
 	protector = p
@@ -114,6 +117,69 @@ func SetMasqueFakeBurstEnabled(enabled bool) {
 	novaengine.SetMasqueFakeBurstEnabled(enabled)
 }
 
+// SetMasqueAwaitSettingsEnabled toggles waiting for the server's HTTP/3 SETTINGS as a
+// separate step before the CONNECT-IP request. Diagnostic only: it is the last structural
+// difference between our dial and the reference probe, which sends the request at once.
+//
+// Doc comments on exported bindings must stay ASCII: gomobile copies them into
+// generated Java, and javac reads that file as windows-1252.
+func SetMasqueAwaitSettingsEnabled(enabled bool) {
+	novaengine.SetMasqueAwaitSettingsEnabled(enabled)
+}
+
+// SetMasqueProtectSocketEnabled toggles marking the MASQUE UDP socket so it bypasses our
+// own VPN. Diagnostic only: the reference probe never installs a socket protector, and
+// this is the last thing it does not replicate. Leave it on in production, otherwise the
+// dial would be routed into the tunnel it is trying to build.
+//
+// Doc comments on exported bindings must stay ASCII: gomobile copies them into
+// generated Java, and javac reads that file as windows-1252.
+func SetMasqueProtectSocketEnabled(enabled bool) {
+	novaengine.SetMasqueProtectSocketEnabled(enabled)
+}
+
+// SetMasqueConnectIPOpenTimeoutMs overrides the budget for HTTP/3 SETTINGS plus the
+// CONNECT-IP request. Pass 0 for the built-in value. Diagnostic: every failure lands
+// exactly on the built-in budget, and it was only ever excluded from another process.
+//
+// Doc comments on exported bindings must stay ASCII: gomobile copies them into
+// generated Java, and javac reads that file as windows-1252.
+func SetMasqueConnectIPOpenTimeoutMs(ms int) {
+	novaengine.SetMasqueConnectIPOpenTimeoutMs(ms)
+}
+
+// SetMasqueSocketPreprobeEnabled toggles the pre-handshake reachability packet (a QUIC
+// datagram with a deliberately unknown version). Off by default: on the wire the node
+// answers it with Version Negotiation and then goes completely silent right after the
+// CONNECT-IP request, while the reference probe, which never sends it, is served.
+//
+// Doc comments on exported bindings must stay ASCII: gomobile copies them into
+// generated Java, and javac reads that file as windows-1252.
+func SetMasqueSocketPreprobeEnabled(enabled bool) {
+	novaengine.SetMasqueSocketPreprobeEnabled(enabled)
+}
+
+// SetMasqueSocketProtector installs a MASQUE-specific way to keep the dial off our own
+// VPN. VpnService.protect() breaks the CONNECT-IP response on this path (measured), while
+// it works for WireGuard, so MASQUE binds the socket to the underlying network instead.
+// Leave it unset to fall back to the shared protector.
+//
+// Doc comments on exported bindings must stay ASCII: gomobile copies them into
+// generated Java, and javac reads that file as windows-1252.
+func SetMasqueSocketProtector(p SocketProtector) {
+	masqueProtector = p
+	if p == nil {
+		novaengine.MasqueProtector = nil
+		return
+	}
+	novaengine.MasqueProtector = func(fd int) bool {
+		if masqueProtector != nil {
+			return masqueProtector.Protect(fd)
+		}
+		return false
+	}
+}
+
 // StartVPN starts the WireGuard engine for Android.
 func StartVPN(fd int, config string) error {
 	return novaengine.StartWireGuard(fd, config)
@@ -144,8 +210,59 @@ func GetVPNStats() string {
 }
 
 // EnsureMasqueConfig returns a cached-or-enrolled MASQUE identity JSON.
+//
+// Only one enrollment per device id runs at a time. A second concurrent call joins the
+// first instead of issuing a second key: the server keeps only the last key, so two
+// enrollments in one connect cycle leave the saved identity dead on arrival.
+//
+// Doc comments on exported bindings must stay ASCII: gomobile copies them into
+// generated Java, and javac reads that file as windows-1252.
 func EnsureMasqueConfig(existingConfigJSON string, accessToken string, deviceID string, deviceName string) (string, error) {
 	return novaengine.EnsureMasqueConfig(existingConfigJSON, accessToken, deviceID, deviceName)
+}
+
+// LastMasqueEnrollResult returns the identity JSON of the most recent enrollment without
+// making any request, or an empty string when there is none.
+//
+// It exists so that a caller whose own wait timed out can still pick up the key that was
+// issued meanwhile. Dropping it would leave the public key on the server with its private
+// half gone, which reads exactly like "the endpoint accepts TLS and never answers
+// CONNECT-IP".
+//
+// Doc comments on exported bindings must stay ASCII: gomobile copies them into
+// generated Java, and javac reads that file as windows-1252.
+func LastMasqueEnrollResult(deviceID string) string {
+	return novaengine.LastMasqueEnrollResult(deviceID)
+}
+
+// ForgetMasqueEnrollResult drops the remembered enrollment so that the next call issues a
+// genuinely fresh key. Pass an empty device id to drop every remembered key.
+//
+// Doc comments on exported bindings must stay ASCII: gomobile copies them into
+// generated Java, and javac reads that file as windows-1252.
+func ForgetMasqueEnrollResult(deviceID string) {
+	novaengine.ForgetMasqueEnrollResult(deviceID)
+}
+
+// ProbeMasqueHandshake dials MASQUE up to the tunnel-request response and closes the
+// connection. Diagnostic only: it separates a refusal by the Cloudflare service from
+// interference by our own VPN process. No data plane is brought up.
+//
+// Doc comments on exported bindings must stay ASCII: gomobile copies them into
+// generated Java, and javac reads that file as windows-1252.
+func ProbeMasqueHandshake(identityJSON string, endpointHost string, endpointPort int, sni string) string {
+	return novaengine.ProbeMasqueHandshake(identityJSON, endpointHost, endpointPort, sni)
+}
+
+// SetPlainCloudflareApiPreferred makes Cloudflare API calls go through a plain HTTPS
+// request first, before the obfuscated transport. Turn it on only while a tunnel is
+// already up: inside the tunnel the SNI block does not apply, and a MASQUE key issued
+// over the obfuscated transport is never served by the tunnel endpoint.
+//
+// Doc comments on exported bindings must stay ASCII: gomobile copies them into
+// generated Java, and javac reads that file as windows-1252.
+func SetPlainCloudflareApiPreferred(enabled bool) {
+	novaengine.SetPlainCloudflareAPIPreferredInternal(enabled)
 }
 
 // RegisterWarp performs obfuscated WARP registration and returns raw API JSON.

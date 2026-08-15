@@ -10,5 +10,5 @@ if %errorLevel% neq 0 (
 )
 
 echo Starting Android Environment Setup...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\setup_android_tools.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup_android_sdk.ps1"
 pause

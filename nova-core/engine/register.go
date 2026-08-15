@@ -226,6 +226,22 @@ func doCloudflareAPIRequestWithContext(baseCtx context.Context, req cloudflareAP
 		return nil, false
 	}
 
+	if plainCloudflareAPIPreferred.Load() {
+		log.Printf("Cloudflare API %s: trying plain request through the active tunnel", req.label)
+		if resp, err := doCloudflareAPIRequestPlain(baseCtx, req); err != nil {
+			failures = append(failures, "plain: "+err.Error())
+			log.Printf("Cloudflare API %s: plain request failed: %v", req.label, err)
+		} else {
+			log.Printf("Cloudflare API %s: HTTP %s via plain tunnel request", req.label, resp.Status)
+			if resp.StatusCode == http.StatusOK {
+				return resp, nil
+			}
+			if firstResponse == nil {
+				firstResponse = resp
+			}
+		}
+	}
+
 	if preferLocalProxy {
 		if resp, ok := tryLocalProxy(); ok {
 			return resp, nil
@@ -274,9 +290,21 @@ func doCloudflareAPIRequestWithContext(baseCtx context.Context, req cloudflareAP
 	return nil, fmt.Errorf("all Cloudflare API attempts failed: %s", strings.Join(failures, " | "))
 }
 
+// shouldPreferLocalProxyForCloudflareRequest больше не выделяет запросы MASQUE.
+//
+// Раньше `masque-enroll` намеренно шёл через локальный Opera-прокси — то есть ключ
+// выпускался с чужого выхода (Нидерланды/США), а туннель потом поднимался с самого
+// телефона. Замер 2026-08-12 показал, к чему это приводит: устройство, ключ которого
+// выпущен так, сервер принимает по TLS и по HTTP/3, но на запрос CONNECT-IP не
+// отвечает никогда — на любом порту и с любого адреса. Тот же аккаунт, ключ которого
+// выпущен напрямую (через уже поднятый туннель), обслуживается сразу.
+//
+// Проверено подстановкой: приложению отдали устройство, только что подтверждённое
+// эталонной пробой на трёх портах; приложение перевыпустило на нём ключ через прокси —
+// и снова получило молчание. Прокси остаётся запасным путём: если прямой запрос не
+// пройдёт (api.cloudflareclient.com режут по SNI), цикл ниже всё равно попробует его.
 func shouldPreferLocalProxyForCloudflareRequest(req cloudflareAPIRequest) bool {
-	label := strings.ToLower(strings.TrimSpace(req.label))
-	return strings.Contains(label, "masque")
+	return false
 }
 
 func defaultCloudflareProfiles() []registrationProfile {
@@ -423,6 +451,18 @@ func doCloudflareAPIRequestViaIP(baseCtx context.Context, ip netip.Addr, apiReq 
 		_ = tcpConn.SetNoDelay(true)
 	}
 
+	// Печатаем локальный адрес соединения.
+	//
+	// Без него нельзя отличить «запрос ушёл через туннель» от «ушёл мимо него по Wi-Fi»,
+	// а для ключа MASQUE это разные вещи: ключ, выпущенный с одного адреса, может не
+	// обслуживаться при наборе с другого. Строка `HTTP 200 OK via …` про это молчала, и
+	// одно расследование уже пошло не туда, приняв «запрос обычным HTTPS при поднятом
+	// туннеле» за «запрос внутри туннеля».
+	log.Printf(
+		"Cloudflare API %s: сокет %s -> %s (%s)",
+		apiReq.label, rawConn.LocalAddr(), rawConn.RemoteAddr(), profile.label,
+	)
+
 	conn := rawConn
 	if len(profile.splitPlan) > 0 || (profile.fragmentSize > 0 && profile.fragmentBytes > 0) {
 		conn = &fragmentedConn{
@@ -477,6 +517,62 @@ func doCloudflareAPIRequestViaIP(baseCtx context.Context, ip netip.Addr, apiReq 
 		Status:     resp.Status,
 		Body:       respBody,
 		Via:        ip.String() + "/" + profile.label,
+	}, nil
+}
+
+// plainCloudflareAPIPreferred включается на время работы через уже поднятый туннель.
+//
+// Внутри туннеля имя api.cloudflareclient.com не видно провайдеру, и обфускация там
+// не нужна. Больше того, она вредит: замер 2026-08-12 показал, что устройство,
+// которому ключ MASQUE выпустили обфусцированным транспортом, сервер принимает по
+// TLS и HTTP/3, но на запрос CONNECT-IP не отвечает никогда. Регистрация тем же
+// устройством проходит обычным запросом — и она работает. Поэтому внутри туннеля
+// ходим обычным клиентом, а обфускация остаётся запасным путём.
+var plainCloudflareAPIPreferred atomic.Bool
+
+// SetPlainCloudflareAPIPreferredInternal переключает предпочтение обычного пути.
+func SetPlainCloudflareAPIPreferredInternal(enabled bool) {
+	plainCloudflareAPIPreferred.Store(enabled)
+}
+
+func doCloudflareAPIRequestPlain(baseCtx context.Context, apiReq cloudflareAPIRequest) (*cloudflareAPIResponse, error) {
+	transport := &http.Transport{
+		Proxy:                 nil,
+		ForceAttemptHTTP2:     false,
+		DisableKeepAlives:     true,
+		DisableCompression:    true,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 12 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	defer transport.CloseIdleConnections()
+
+	client := &http.Client{Transport: transport, Timeout: 16 * time.Second}
+
+	ctx, cancel := context.WithTimeout(baseCtx, 16*time.Second)
+	defer cancel()
+
+	req, err := newCloudflareAPIHTTPRequest(ctx, apiReq)
+	if err != nil {
+		return nil, fmt.Errorf("build request failed: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("plain request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+	if err != nil {
+		return nil, fmt.Errorf("plain body read failed: %w", err)
+	}
+
+	return &cloudflareAPIResponse{
+		StatusCode: resp.StatusCode,
+		Status:     resp.Status,
+		Body:       respBody,
+		Via:        "plain-tunnel",
 	}, nil
 }
 
@@ -737,10 +833,13 @@ func (c *fragmentedConn) Write(p []byte) (int, error) {
 
 // SetWarpLicense привязывает лицензию WARP+ к устройству.
 //
-// Бесплатная анонимная регистрация выходит с `account_type: "free"`, и служба MASQUE её
-// не обслуживает: соединение принимается, а на запрос туннеля не отвечает — позже и вовсе
-// закрывается алертом `tls: access denied`. Лицензия меняет тип аккаунта, поэтому её надо
-// уметь задать, не переустанавливая приложение.
+// ВАЖНО: для MASQUE лицензия НЕ нужна. Здесь раньше стоял вывод «бесплатный аккаунт
+// служба MASQUE не обслуживает» — он опровергнут замером 2026-08-12
+// (nova-core/cmd/masqueprobe, тестовый телефон, Россия): свежая анонимная регистрация
+// с `account_type: "free"` после включения `warp_enabled` получает на запрос туннеля
+// `200 OK`. Настоящей причиной отказов был порт — 443 и 4500 на той сети не отвечают,
+// а 500, 1701 и 8443 отвечают сразу. Лицензия остаётся как способ получить WARP+
+// (скорость и маршруты), а не как условие работы MASQUE.
 //
 // Возвращает тип аккаунта, каким его видит сервер после запроса, — по нему видно, приняли
 // ключ или нет. «HTTP 200 OK» тут недостаточно: на неизвестное поле Cloudflare отвечает

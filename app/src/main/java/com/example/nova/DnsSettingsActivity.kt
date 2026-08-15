@@ -340,8 +340,12 @@ class DnsSettingsActivity : AppCompatActivity() {
             action = NovaVpnService.ACTION_REAPPLY_CURRENT_SESSION
             putExtra(NovaVpnService.EXTRA_EXIT_REGION, clientData.getExitRegionPreference())
             putExtra(
+                // Именно сырой флаг, а не производное isImportedConfigSourceActive():
+                // производное значение ложно, когда импортированных семей временно нет,
+                // и служба записывала им ноль в саму настройку — режим «только
+                // импортированные» выключался сам собой при правке правил DNS.
                 NovaVpnService.EXTRA_IMPORTED_CONFIG_SOURCE_ENABLED,
-                clientData.isImportedConfigSourceActive()
+                clientData.isImportedWarpOnlyModeEnabled()
             )
             putExtra(
                 NovaVpnService.EXTRA_IMPORTED_PROTOCOL_PREFERENCE,

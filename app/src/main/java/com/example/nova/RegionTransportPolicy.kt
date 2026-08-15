@@ -37,40 +37,12 @@ object RegionTransportPolicy {
     fun allowsTransportSubstitution(regionPreference: String?): Boolean =
         !isExplicitChoice(regionPreference)
 
-    /**
-     * Идёт ли фаза, чей счётчик попыток — это список встроенных WARP-профилей.
-     *
-     * У Opera (EU/US), MASQUE и VLESS перебор свой и куда короче, поэтому заглушка
-     * по длине встроенного списка для них не просто неточна, а обманчива: «1/50»
-     * читается как «идёт перебор профилей WARP».
-     *
-     * Регион проверяется отдельно от транспорта потому, что в первые доли секунды
-     * цикла фаза ещё не назвала себя: служба только собирается стартовать Opera, а
-     * метки транспорта нет. Выбранный EU/US — достаточное основание не показывать
-     * счётчик WARP уже тогда.
-     */
-    fun countsWarpProfileList(
-        transportLabel: String?,
-        backendLabel: String?,
-        regionPreference: String?,
-    ): Boolean {
-        val transport = transportLabel?.trim()?.uppercase(Locale.US).orEmpty()
-        if (transport in OWN_COUNTER_TRANSPORTS) return false
-        if (backendLabel?.trim()?.uppercase(Locale.US)?.startsWith(NovaVpnService.BACKEND_OPERA) == true) {
-            return false
-        }
-        return when (normalize(regionPreference)) {
-            "eu", "us" -> false
-            else -> true
-        }
-    }
-
-    /** Транспорты, у которых перебор собственный, а не список встроенных профилей. */
-    private val OWN_COUNTER_TRANSPORTS = setOf(
-        NovaVpnService.TRANSPORT_MASQUE,
-        NovaVpnService.TRANSPORT_OPERA,
-        NovaVpnService.TRANSPORT_VLESS,
-    )
+    // `countsWarpProfileList` удалён: экран больше не угадывает знаменатель.
+    //
+    // Он гасил заглушку «длина списка встроенных профилей» там, где перебор ведёт не
+    // WARP (EU/US, MASQUE, VLESS). Заглушки больше нет вовсе — длину очереди называет
+    // та фаза, которая её и перебирает, а до первого снимка службы экран показывает
+    // «...». Возвращать функцию не нужно: вернётся заодно и причина скачков.
 
     private fun normalize(value: String?): String =
         value?.trim()?.lowercase(Locale.US)?.takeIf { it.isNotEmpty() } ?: AUTO

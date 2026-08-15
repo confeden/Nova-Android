@@ -1,0 +1,151 @@
+diff --git a/go.mod b/go.mod
+index e412418..58741fa 100644
+--- a/go.mod
++++ b/go.mod
+@@ -62,6 +62,7 @@ require (
+ 	github.com/google/nftables v0.1.1-0.20230115205135-9aa6fdf5a28c // indirect
+ 	github.com/google/pprof v0.0.0-20211214055906-6f57359322fd // indirect
+ 	github.com/google/uuid v1.6.0 // indirect
++	github.com/gorilla/websocket v1.5.3 // indirect
+ 	github.com/grafov/m3u8 v0.0.0-20171211212457-6ab8f28ed427 // indirect
+ 	github.com/josharian/native v1.1.1-0.20230202152459-5c7d0dd6ab86 // indirect
+ 	github.com/jsimonetti/rtnetlink v1.3.5 // indirect
+diff --git a/go.sum b/go.sum
+index 6f3afd7..a34bec9 100644
+--- a/go.sum
++++ b/go.sum
+@@ -130,6 +130,8 @@ github.com/google/pprof v0.0.0-20211214055906-6f57359322fd/go.mod h1:KgnwoLYCZ8I
+ github.com/google/uuid v1.3.1/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
+ github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
+ github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
++github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=
++github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
+ github.com/grafov/m3u8 v0.0.0-20171211212457-6ab8f28ed427 h1:xh96CCAZTX8LJPFoOVRgTwZbn2DvJl8fyCyivohhSIg=
+ github.com/grafov/m3u8 v0.0.0-20171211212457-6ab8f28ed427/go.mod h1:PdjzaU/pJUo4jTIn2rcgMFs+HqBGl/sPJLr8BI0Xq/I=
+ github.com/hashicorp/golang-lru v1.0.2 h1:dV3g9Z/unq5DpblPpw+Oqcv4dU/1omnb4Ok8iPY6p1c=
+diff --git a/wireguard/tun/netstack/tun.go b/wireguard/tun/netstack/tun.go
+index 8592aec..cdc2f85 100644
+--- a/wireguard/tun/netstack/tun.go
++++ b/wireguard/tun/netstack/tun.go
+@@ -19,6 +19,7 @@ import (
+ 	"regexp"
+ 	"strconv"
+ 	"strings"
++	"sync"
+ 	"syscall"
+ 	"time"
+ 
+@@ -47,6 +48,8 @@ type netTun struct {
+ 	mtu            int
+ 	dnsServers     []netip.Addr
+ 	hasV4, hasV6   bool
++	addrMu         sync.Mutex
++	localAddrs     map[netip.Addr]struct{}
+ }
+ 
+ type Net netTun
+@@ -64,6 +67,7 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device,
+ 		incomingPacket: make(chan *buffer.View),
+ 		dnsServers:     dnsServers,
+ 		mtu:            mtu,
++		localAddrs:     make(map[netip.Addr]struct{}),
+ 	}
+ 	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
+ 	tcpipErr := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
+@@ -76,24 +80,8 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device,
+ 		return nil, nil, fmt.Errorf("CreateNIC: %v", tcpipErr)
+ 	}
+ 	for _, ip := range localAddresses {
+-		var protoNumber tcpip.NetworkProtocolNumber
+-		if ip.Is4() {
+-			protoNumber = ipv4.ProtocolNumber
+-		} else if ip.Is6() {
+-			protoNumber = ipv6.ProtocolNumber
+-		}
+-		protoAddr := tcpip.ProtocolAddress{
+-			Protocol:          protoNumber,
+-			AddressWithPrefix: tcpip.AddrFromSlice(ip.AsSlice()).WithPrefix(),
+-		}
+-		tcpipErr := dev.stack.AddProtocolAddress(1, protoAddr, stack.AddressProperties{})
+-		if tcpipErr != nil {
+-			return nil, nil, fmt.Errorf("AddProtocolAddress(%v): %v", ip, tcpipErr)
+-		}
+-		if ip.Is4() {
+-			dev.hasV4 = true
+-		} else if ip.Is6() {
+-			dev.hasV6 = true
++		if err := dev.ensureLocalAddressLocked(ip); err != nil {
++			return nil, nil, err
+ 		}
+ 	}
+ 	if dev.hasV4 {
+@@ -107,6 +95,50 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device,
+ 	return dev, (*Net)(dev), nil
+ }
+ 
++func (tun *netTun) ensureLocalAddressLocked(ip netip.Addr) error {
++	if !ip.IsValid() {
++		return errors.New("invalid netstack local address")
++	}
++	if _, exists := tun.localAddrs[ip]; exists {
++		return nil
++	}
++
++	var protoNumber tcpip.NetworkProtocolNumber
++	switch {
++	case ip.Is4():
++		protoNumber = ipv4.ProtocolNumber
++	case ip.Is6():
++		protoNumber = ipv6.ProtocolNumber
++	default:
++		return fmt.Errorf("unsupported netstack address family: %v", ip)
++	}
++
++	protoAddr := tcpip.ProtocolAddress{
++		Protocol:          protoNumber,
++		AddressWithPrefix: tcpip.AddrFromSlice(ip.AsSlice()).WithPrefix(),
++	}
++	if tcpipErr := tun.stack.AddProtocolAddress(1, protoAddr, stack.AddressProperties{}); tcpipErr != nil {
++		return fmt.Errorf("AddProtocolAddress(%v): %v", ip, tcpipErr)
++	}
++	tun.localAddrs[ip] = struct{}{}
++
++	if ip.Is4() && !tun.hasV4 {
++		tun.hasV4 = true
++		tun.stack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: 1})
++	} else if ip.Is6() && !tun.hasV6 {
++		tun.hasV6 = true
++		tun.stack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: 1})
++	}
++	return nil
++}
++
++func (net *Net) EnsureLocalAddress(ip netip.Addr) error {
++	tun := (*netTun)(net)
++	tun.addrMu.Lock()
++	defer tun.addrMu.Unlock()
++	return tun.ensureLocalAddressLocked(ip)
++}
++
+ func (tun *netTun) Name() (string, error) {
+ 	return "go", nil
+ }
+diff --git a/wiresocks/proxy.go b/wiresocks/proxy.go
+index e2c48a7..2b3eb50 100644
+--- a/wiresocks/proxy.go
++++ b/wiresocks/proxy.go
+@@ -64,8 +64,12 @@ func StartProxy(ctx context.Context, l *slog.Logger, tnet *netstack.Net, bindAdd
+ }
+ 
+ func (vt *VirtualTun) generalHandler(req *statute.ProxyRequest) error {
+-	vt.Logger.Debug("handling connection", "protocol", req.Network, "destination", req.Destination)
+-	conn, err := vt.Tnet.Dial(req.Network, req.Destination)
++	vt.Logger.Info("handling connection", "protocol", req.Network, "destination", req.Destination)
++
++	var conn net.Conn
++	var err error
++
++	conn, err = vt.Tnet.Dial(req.Network, req.Destination)
+ 	if err != nil {
+ 		return err
+ 	}

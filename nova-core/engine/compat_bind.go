@@ -31,6 +31,17 @@ func SetSocketProtector(protector SocketProtector) {
 	}
 }
 
+// MasqueProtector — отдельный способ увести сокет MASQUE мимо своего VPN.
+//
+// Замер 2026-08-13: `VpnService.protect()` на UDP-сокете MASQUE рушит запрос CONNECT-IP —
+// QUIC встаёт, HTTP/3 SETTINGS приходят, а ответа на CONNECT-IP нет; тот же ключ с
+// непомеченного сокета обслуживается на всех портах. Для WireGuard тот же вызов работает
+// годами, поэтому общий протектор трогать нельзя — MASQUE получает свой, который
+// привязывает сокет к нижележащей сети (`Network.bindSocket`), а не помечает его.
+//
+// nil означает «пользуйся общим»: так ведут себя старые сборки и утилиты.
+var MasqueProtector func(fd int) bool
+
 func GeneratePrivateKey() (string, error) {
 	key, err := warp.GeneratePrivateKey()
 	if err != nil {

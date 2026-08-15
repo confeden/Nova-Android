@@ -57,6 +57,20 @@ class NovaTileService : TileService() {
             val intent = Intent(this, NovaVpnService::class.java).apply {
                 action = NovaVpnService.ACTION_CONNECT_SMART
                 putExtra(NovaVpnService.EXTRA_EXIT_REGION, clientData.getExitRegionPreference())
+                // Выбор источника профилей едет вместе с регионом.
+                //
+                // Без него плитка сообщала службе только регион, служба применяла его
+                // через commit() — и этот commit сбрасывал на диск весь устаревший срез
+                // настроек процесса `:vpn`, включая режим импортированных. Запуск из
+                // шторки поднимал встроенный WARP и заодно стирал выбор пользователя.
+                putExtra(
+                    NovaVpnService.EXTRA_IMPORTED_CONFIG_SOURCE_ENABLED,
+                    clientData.isImportedWarpOnlyModeEnabled(),
+                )
+                putExtra(
+                    NovaVpnService.EXTRA_IMPORTED_PROTOCOL_PREFERENCE,
+                    clientData.getImportedProtocolPreference(),
+                )
                 putExtra(NovaVpnService.EXTRA_REAPPLY_SPLIT_MODE, clientData.getSplitMode())
                 putStringArrayListExtra(
                     NovaVpnService.EXTRA_REAPPLY_SPLIT_APPS,

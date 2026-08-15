@@ -87,7 +87,13 @@ def build_seed(path: Path, seed_order: int) -> dict[str, object]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", default=r"E:\Downloads\awg")
+    # Каталог с исходными .conf задаётся при запуске: путь зависит от машины, а
+    # значение по умолчанию из чужой файловой системы только сбивает с толку.
+    parser.add_argument(
+        "--source",
+        required=True,
+        help="каталог с 50 файлами AmneziaWG .conf",
+    )
     parser.add_argument("--output", default=r"app/src/main/assets/warp_verified_seeds.json")
     args = parser.parse_args()
 

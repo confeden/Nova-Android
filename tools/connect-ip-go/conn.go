@@ -61,6 +61,8 @@ type Conn struct {
 	str    http3Stream
 	writes chan writeCapsule
 
+	supportsControlCapsules bool
+
 	assignedAddressNotify chan struct{}
 	availableRoutesNotify chan struct{}
 
@@ -75,35 +77,46 @@ type Conn struct {
 }
 
 func newProxiedConn(str http3Stream) *Conn {
+	return newConn(str, true)
+}
+
+func newDatagramOnlyConn(str http3Stream) *Conn {
+	return newConn(str, false)
+}
+
+func newConn(str http3Stream, supportsControlCapsules bool) *Conn {
 	c := &Conn{
-		str:                   str,
-		writes:                make(chan writeCapsule),
-		assignedAddressNotify: make(chan struct{}, 1),
-		availableRoutesNotify: make(chan struct{}, 1),
-		closeChan:             make(chan struct{}),
+		str:                     str,
+		writes:                  make(chan writeCapsule),
+		supportsControlCapsules: supportsControlCapsules,
+		assignedAddressNotify:   make(chan struct{}, 1),
+		availableRoutesNotify:   make(chan struct{}, 1),
+		closeChan:               make(chan struct{}),
 	}
-	go func() {
-		if err := c.readFromStream(); err != nil {
-			log.Printf("handling stream failed: %v", err)
-			c.mu.Lock()
-			if c.closeErr == nil {
-				c.closeErr = &CloseError{Remote: true}
-				close(c.closeChan)
+	if supportsControlCapsules {
+		go func() {
+			if err := c.readFromStream(); err != nil {
+				log.Printf("handling stream failed: %v", err)
+				c.mu.Lock()
+				if c.closeErr == nil {
+					c.closeErr = &CloseError{Remote: true}
+					close(c.closeChan)
+				}
+				c.mu.Unlock()
 			}
-			c.mu.Unlock()
-		}
-	}()
-	go func() {
-		if err := c.writeToStream(); err != nil {
-			log.Printf("writing to stream failed: %v", err)
-			c.mu.Lock()
-			if c.closeErr == nil {
-				c.closeErr = &CloseError{Remote: true}
-				close(c.closeChan)
+		}()
+		go func() {
+			if err := c.writeToStream(); err != nil {
+				log.Printf("writing to stream failed: %v", err)
+				c.mu.Lock()
+				if c.closeErr == nil {
+					c.closeErr = &CloseError{Remote: true}
+					close(c.closeChan)
+				}
+				c.mu.Unlock()
 			}
-			c.mu.Unlock()
-		}
-	}()
+		}()
+	}
 	return c
 }
 
@@ -137,6 +150,10 @@ func (c *Conn) AssignAddresses(ctx context.Context, prefixes []netip.Prefix) err
 }
 
 func (c *Conn) sendCapsule(ctx context.Context, capsule appendable) error {
+	if !c.supportsControlCapsules {
+		return errors.New("connect-ip: control capsules are not supported by this transport")
+	}
+
 	res := make(chan error, 1)
 	select {
 	case c.writes <- writeCapsule{
@@ -261,20 +278,31 @@ func (c *Conn) writeToStream() error {
 }
 
 func (c *Conn) ReadPacket(b []byte, allowAny bool) (n int, err error) {
+	packet, err := c.ReadPacketZeroCopy(allowAny)
+	if err != nil {
+		return 0, err
+	}
+	return copy(b, packet), nil
+}
+
+// ReadPacketZeroCopy reads and validates an IP packet, returning a slice backed
+// by the transport's receive buffer. The caller must finish using the returned
+// packet before calling ReadPacketZeroCopy again.
+func (c *Conn) ReadPacketZeroCopy(allowAny bool) ([]byte, error) {
 start:
 	data, err := c.str.ReceiveDatagram(context.Background())
 	if err != nil {
 		select {
 		case <-c.closeChan:
-			return 0, c.closeErr
+			return nil, c.closeErr
 		default:
-			return 0, err
+			return nil, err
 		}
 	}
 	contextID, n, err := quicvarint.Parse(data)
 	if err != nil {
 		// TODO: close connection
-		return 0, fmt.Errorf("connect-ip: malformed datagram: %w", err)
+		return nil, fmt.Errorf("connect-ip: malformed datagram: %w", err)
 	}
 	if contextID != 0 {
 		// Drop this datagram. We currently only support proxying of IP payloads.
@@ -284,7 +312,7 @@ start:
 		log.Printf("dropping proxied packet: %s", err)
 		goto start
 	}
-	return copy(b, data[n:]), nil
+	return data[n:], nil
 }
 
 func (c *Conn) handleIncomingProxiedPacket(data []byte, allowAny bool) error {
@@ -370,10 +398,35 @@ func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
 		log.Printf("dropping proxied packet (%d bytes) that can't be proxied: %s", len(b), err)
 		return nil, nil
 	}
+	return c.sendComposedDatagram(data, b)
+}
+
+// WritePacketBuffer writes an IP packet from buf[packetOffset:packetOffset+packetLen].
+// If packetOffset leaves enough room for the DATAGRAM context ID, the packet is
+// sent in place without allocating or copying the packet payload.
+func (c *Conn) WritePacketBuffer(buf []byte, packetOffset, packetLen int) (icmp []byte, err error) {
+	if packetOffset < 0 || packetLen < 0 || packetOffset+packetLen > len(buf) {
+		return nil, fmt.Errorf("connect-ip: invalid packet bounds")
+	}
+	if packetOffset < len(contextIDZero) {
+		return c.WritePacket(buf[packetOffset : packetOffset+packetLen])
+	}
+
+	packet := buf[packetOffset : packetOffset+packetLen]
+	if err := validateOutgoingPacket(packet); err != nil {
+		log.Printf("dropping proxied packet (%d bytes) that can't be proxied: %s", len(packet), err)
+		return nil, nil
+	}
+	copy(buf[packetOffset-len(contextIDZero):packetOffset], contextIDZero)
+	data := buf[packetOffset-len(contextIDZero) : packetOffset+packetLen]
+	return c.sendComposedDatagram(data, packet)
+}
+
+func (c *Conn) sendComposedDatagram(data, packet []byte) (icmp []byte, err error) {
 	if err := c.str.SendDatagram(data); err != nil {
 		var errDTL *quic.DatagramTooLargeError
 		if errors.As(err, &errDTL) {
-			icmpPacket, err := composeICMPTooLargePacket(b, minMTU)
+			icmpPacket, err := composeICMPTooLargePacket(packet, minMTU)
 			if err != nil {
 				log.Printf("failed to compose ICMP too large packet: %s", err)
 			}
@@ -390,38 +443,55 @@ func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
 }
 
 func (c *Conn) composeDatagram(b []byte) ([]byte, error) {
+	return ComposeDatagramPayload(b)
+}
+
+// ComposeDatagramPayload собирает полезную нагрузку датаграммы CONNECT-IP:
+// идентификатор контекста 0, следом сам IP-пакет с уменьшенным TTL.
+//
+// Вынесено наружу ради единственной копии обрамления: у Nova два транспорта
+// MASQUE, и второй когда-то собирал датаграмму своей копией этого кода, разойдясь
+// с оригиналом в контрольной сумме IPv4. Пакет правится на месте.
+func ComposeDatagramPayload(b []byte) ([]byte, error) {
+	if err := validateOutgoingPacket(b); err != nil {
+		return nil, err
+	}
+	data := make([]byte, 0, len(contextIDZero)+len(b))
+	data = append(data, contextIDZero...)
+	data = append(data, b...)
+	return data, nil
+}
+
+func validateOutgoingPacket(b []byte) error {
 	// TODO: implement src, dst and ipproto checks
 	if len(b) == 0 {
-		return nil, nil
+		return errors.New("connect-ip: empty packet")
 	}
 	switch v := ipVersion(b); v {
 	default:
-		return nil, fmt.Errorf("connect-ip: unknown IP versions: %d", v)
+		return fmt.Errorf("connect-ip: unknown IP versions: %d", v)
 	case 4:
 		if len(b) < ipv4.HeaderLen {
-			return nil, fmt.Errorf("connect-ip: IPv4 packet too short")
+			return fmt.Errorf("connect-ip: IPv4 packet too short")
 		}
 		ttl := b[8]
 		if ttl <= 1 {
-			return nil, fmt.Errorf("connect-ip: datagram TTL too small: %d", ttl)
+			return fmt.Errorf("connect-ip: datagram TTL too small: %d", ttl)
 		}
 		b[8]-- // decrement TTL
 		// recalculate the checksum
 		binary.BigEndian.PutUint16(b[10:12], calculateIPv4Checksum(([ipv4.HeaderLen]byte)(b[:ipv4.HeaderLen])))
 	case 6:
 		if len(b) < ipv6.HeaderLen {
-			return nil, fmt.Errorf("connect-ip: IPv6 packet too short")
+			return fmt.Errorf("connect-ip: IPv6 packet too short")
 		}
 		hopLimit := b[7]
 		if hopLimit <= 1 {
-			return nil, fmt.Errorf("connect-ip: datagram Hop Limit too small: %d", hopLimit)
+			return fmt.Errorf("connect-ip: datagram Hop Limit too small: %d", hopLimit)
 		}
 		b[7]-- // Decrement Hop Limit
 	}
-	data := make([]byte, 0, len(contextIDZero)+len(b))
-	data = append(data, contextIDZero...)
-	data = append(data, b...)
-	return data, nil
+	return nil
 }
 
 func (c *Conn) Close() error {

@@ -40,6 +40,7 @@ object WarpIdentityBackfill {
         logger: (String) -> Unit,
         tunnelStillUp: () -> Boolean,
         ignoreCooldown: Boolean = false,
+        onIdentityReady: () -> Unit = {},
     ) {
         val clientData = ClientData(context)
         if (!clientData.shouldAttemptWarpIdentityBackfill(ignoreCooldown = ignoreCooldown)) return
@@ -87,8 +88,10 @@ object WarpIdentityBackfill {
                     //
                     // Личность приложение перевыпускает само при отказе Cloudflare, а
                     // введённый пользователем ключ живёт отдельно и переживает эти
-                    // перевыпуски. Без этого шага каждое новое устройство снова выходило бы
-                    // бесплатным, а бесплатные аккаунты служба MASQUE не обслуживает.
+                    // перевыпуски. Для самого MASQUE лицензия не нужна — бесплатный
+                    // аккаунт служба обслуживает (замер 2026-08-12, см. register.go), —
+                    // но заданный пользователем ключ надо переносить на новое устройство,
+                    // иначе оплаченные скорость и маршруты теряются при перевыпуске.
                     val license = clientData.getWarpPlusLicense()
                     val knownAccountType = clientData.getWarpAccountType()
                     val alreadyLicensed = !registeredNow &&
@@ -114,13 +117,42 @@ object WarpIdentityBackfill {
                     // masque. Делаем это только над собственной запасной
                     // личностью: над активной это сменило бы тип туннеля прямо
                     // под работающим соединением.
+                    // Ключ выпускаем обычным запросом, а не обфусцированным транспортом.
+                    //
+                    // Внутри туннеля имя api.cloudflareclient.com провайдеру не видно, и
+                    // обфускация там не нужна. Она ещё и вредит: замер 2026-08-12 —
+                    // устройство, которому ключ выпустили обфусцированным транспортом,
+                    // сервер принимает по TLS и HTTP/3, но на запрос CONNECT-IP не
+                    // отвечает никогда. Регистрация того же устройства идёт обычным
+                    // запросом (OkHttp) — и она работает.
+                    // Условие проверяется ещё раз, вплотную к выпуску ключа.
+                    //
+                    // Между проверкой в начале потока и этим местом лежит регистрация через
+                    // туннель, а она идёт минутами. За это время цикл подключения мог сам
+                    // добыть ключ — и тогда фоновый выпуск отобрал бы его: сервер хранит
+                    // только последний ключ, а конфигурация в настройках осталась бы от
+                    // предыдущего. Ровно этот путь и превращал одну неудачу в бесконечную.
+                    if (!clientData.shouldAttemptWarpIdentityBackfill(ignoreCooldown = ignoreCooldown)) {
+                        logger(
+                            "MASQUE-профиль появился, пока шла фоновая регистрация. " +
+                                "Второй выпуск ключа отменяем: он отобрал бы уже сохранённый."
+                        )
+                        return@Thread
+                    }
                     val masqueJson = runCatching {
-                        nova.Nova.ensureMasqueConfig(
-                            "",
-                            reserve.accessToken.orEmpty(),
-                            reserve.deviceId.orEmpty(),
-                            "Nova Android",
-                        ).orEmpty()
+                        nova.Nova.setPlainCloudflareApiPreferred(true)
+                        try {
+                            nova.Nova.ensureMasqueConfig(
+                                clientData.getMasqueConfigJson().orEmpty(),
+                                reserve.accessToken.orEmpty(),
+                                reserve.deviceId.orEmpty(),
+                                "Nova Android",
+                            ).orEmpty()
+                        } finally {
+                            // Предпочтение снимаем сразу: вне туннеля обычный запрос
+                            // упрётся в блокировку по SNI, и обфускация снова нужна.
+                            nova.Nova.setPlainCloudflareApiPreferred(false)
+                        }
                     }.getOrElse { error ->
                         logger("Регистрация MASQUE через туннель не удалась: ${error.message}")
                         ""
@@ -134,6 +166,9 @@ object WarpIdentityBackfill {
                         return@Thread
                     }
                     clientData.saveMasqueConfigJson(masqueJson)
+                    // Ключ есть — сообщаем службе. Если туннель поднимался только ради
+                    // регистрации, ждать «следующего подключения» пользователю не надо.
+                    onIdentityReady()
                     logger(
                         "MASQUE-профиль подготовлен через туннель и сохранён. " +
                             "При следующем подключении выбранный MASQUE стартует без регистрации."

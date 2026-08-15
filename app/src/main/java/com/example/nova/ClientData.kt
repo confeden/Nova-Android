@@ -283,6 +283,18 @@ class ClientData(context: Context) {
     private val gatewayFlagsFile = AtomicFile(File(appContext.filesDir, "gateway_flags.json"))
     private val lastExitObservationFile = AtomicFile(File(appContext.filesDir, "last_exit_observation.json"))
     private val vlessProfilesFile = AtomicFile(File(appContext.filesDir, "vless_profiles.json"))
+    private val importedSourceFile = AtomicFile(File(appContext.filesDir, "imported_source.json"))
+
+    /**
+     * Ключ MASQUE. В файле, а не в настройках.
+     *
+     * Замер 2026-08-13: служба выпускала ключ и писала его `commit()`-ом, а следующий же
+     * `commit()` из главного процесса возвращал свою кэшированную карту — со старым пустым
+     * значением — и ключ исчезал. Снаружи это выглядело как «MASQUE опять потерял ключ»
+     * после обычного нажатия кнопки, и сбило не один замер. Тот же капкан, что у
+     * `warp_imported_only_mode` и отладочного ключа AWG; лечение то же.
+     */
+    private val masqueConfigFile = AtomicFile(File(appContext.filesDir, "masque_config.json"))
     private val transportLatencyFile = AtomicFile(File(appContext.filesDir, "transport_latency.json"))
     private val vlessSubscriptionFile = AtomicFile(File(appContext.filesDir, "vless_subscription.json"))
     private val operaStateFile = AtomicFile(File(appContext.filesDir, "opera_state.json"))
@@ -420,7 +432,12 @@ class ClientData(context: Context) {
             putString("access_token", config.accessToken)
             putString("device_id", config.deviceId)
             putString("license", config.license)
-            putString("masque_config_json", config.masqueConfigJson)
+            // Ключ MASQUE здесь не пишется вовсе — он живёт в отдельном файле.
+            //
+            // `WarpClient.parseConfig` всегда возвращает `masqueConfigJson = null`: он
+            // разбирает ответ регистрации WireGuard, где ключа MASQUE нет и быть не может.
+            // Пока поле писалось сюда, любая регистрация WARP молча стирала только что
+            // выпущенный ключ. Хранилище у ключа одно — [saveMasqueConfigJson].
             putBoolean("is_registered", true)
             if (!config.accessToken.isNullOrBlank() && !config.deviceId.isNullOrBlank()) {
                 remove("masque_bootstrap_failed_at")
@@ -523,7 +540,7 @@ class ClientData(context: Context) {
             accessToken = prefs.getString("access_token", null),
             deviceId = prefs.getString("device_id", null),
             license = prefs.getString("license", null),
-            masqueConfigJson = prefs.getString("masque_config_json", null)
+            masqueConfigJson = getMasqueConfigJson()
         )
         return config.takeIf {
             it.privateKey.isNotBlank() &&
@@ -562,7 +579,7 @@ class ClientData(context: Context) {
             accessToken = prefs.getString("access_token", null),
             deviceId = prefs.getString("device_id", null),
             license = prefs.getString("license", null),
-            masqueConfigJson = prefs.getString("masque_config_json", null),
+            masqueConfigJson = getMasqueConfigJson(),
         )
     }
 
@@ -614,17 +631,86 @@ class ClientData(context: Context) {
     fun setQuickTileAdded(added: Boolean) { prefs.edit().putBoolean("quick_tile_added", added).commit() }
     fun getIsFirstLaunch(): Boolean = prefs.getBoolean("is_first_app_launch", true)
     fun setIsFirstLaunch(value: Boolean) { prefs.edit().putBoolean("is_first_app_launch", value).commit() }
-    fun isImportedWarpOnlyModeEnabled(): Boolean = prefs.getBoolean("warp_imported_only_mode", false)
+    /**
+     * Выбор источника профилей живёт в файле, а не в `SharedPreferences`.
+     *
+     * Ровно та же ловушка, что уже описана у профилей VLESS, но обошлась дороже:
+     * экран включал «только импортированные» в основном процессе, а служба в `:vpn`
+     * держала свою копию prefs и продолжала читать `false`. Хуже того, любой
+     * `commit()` из `:vpn` (а `saveServiceState` зовётся на каждой смене состояния)
+     * сериализует всю карту процесса целиком и **откатывал** только что включённый
+     * режим обратно. Снаружи это выглядело так: пользователь выбрал свои профили,
+     * а подключение пошло по встроенным — и после перезапуска приложения выбор
+     * оказывался сброшенным.
+     *
+     * Файл перечитывается каждый раз, поэтому оба процесса всегда видят одно и то
+     * же. Старая установка переносится один раз при первом чтении.
+     */
+    private fun readImportedSource(): JSONObject {
+        readAtomicJson(importedSourceFile)?.let { return it }
+        // Перенос из prefs делается ровно один раз — когда файла ещё нет.
+        //
+        // Если файл есть, но не прочитался (запись в этот момент, повреждение),
+        // возвращаться к prefs нельзя: там лежит зеркало, которое любой `commit()`
+        // из процесса `:vpn` мог откатить, — то есть ровно тот дефект, ради которого
+        // настройка и переехала в файл. В таком случае честнее отдать значения по
+        // умолчанию и не переписывать файл.
+        if (importedSourceFile.baseFile.exists()) {
+            return JSONObject().apply {
+                put("only_mode", false)
+                put("protocol", "auto")
+            }
+        }
+        val migrated = JSONObject().apply {
+            put("only_mode", prefs.getBoolean("warp_imported_only_mode", false))
+            put(
+                "protocol",
+                normalizeImportedProtocolPreference(prefs.getString("imported_protocol_preference", "auto")),
+            )
+        }
+        writeAtomicRaw(importedSourceFile, migrated.toString())
+        return migrated
+    }
+
+    private fun writeImportedSource(vararg entries: Pair<String, Any>) {
+        val json = readImportedSource()
+        entries.forEach { (key, value) -> json.put(key, value) }
+        writeAtomicRaw(importedSourceFile, json.toString())
+    }
+
+    fun isImportedWarpOnlyModeEnabled(): Boolean = readImportedSource().optBoolean("only_mode", false)
     fun setImportedWarpOnlyModeEnabled(enabled: Boolean) {
-        prefs.edit().putBoolean("warp_imported_only_mode", enabled).apply()
+        writeImportedSource("only_mode" to enabled)
+        prefs.edit().putBoolean("warp_imported_only_mode", enabled).commit()
     }
     fun isImportedConfigSourceActive(): Boolean =
         isImportedWarpOnlyModeEnabled() && getAvailableImportedProtocolFamilies().isNotEmpty()
     fun getImportedProtocolPreference(): String =
-        normalizeImportedProtocolPreference(prefs.getString("imported_protocol_preference", "auto"))
+        normalizeImportedProtocolPreference(readImportedSource().optString("protocol", "auto"))
     fun setImportedProtocolPreference(value: String) {
-        prefs.edit().putString("imported_protocol_preference", normalizeImportedProtocolPreference(value)).commit()
+        val normalized = normalizeImportedProtocolPreference(value)
+        writeImportedSource("protocol" to normalized)
+        prefs.edit().putString("imported_protocol_preference", normalized).commit()
     }
+
+    /**
+     * Какой протокол среди импортированных считать выбранным на самом деле.
+     *
+     * «AUTO» при единственной доступной семье — это не выбор, а отсутствие выбора:
+     * пользователь импортировал подписку VLESS, экран честно подписал бэкенд
+     * «VLESS», а [shouldUseVlessTransport] требовал ровно значения `vless` и
+     * возвращал false. Фаза VLESS не запускалась вовсе, импортированных WARP тоже
+     * не было — и служба гасла через полминуты со строкой «shortlist пуст».
+     * Схлопывание жило в UI ([MainActivity.resolveImportedUiBackendLabel]), поэтому
+     * экран и служба расходились в том, что выбрано.
+     *
+     * Несуществующая семья («AWG» после того, как все AWG-профили удалены) тоже
+     * откатывается сюда: иначе выбор молча отсекает весь список.
+     */
+    fun resolveEffectiveImportedProtocol(): String = ImportedSourcePolicy.resolveEffectiveProtocol(
+        preference = getImportedProtocolPreference(),
+        availableFamilies = getAvailableImportedProtocolFamilies(),
+    )
     /**
      * Настройки раздачи живут ещё и в файле, а не только в SharedPreferences.
      *
@@ -889,7 +975,24 @@ class ClientData(context: Context) {
     ) {
         val normalizedState = state.ifBlank { NovaVpnService.STATE_STOPPED }
         val normalizedBackend = backend.ifBlank { NovaVpnService.BACKEND_WARP }
-        val normalizedTransport = transport.trim().uppercase(Locale.US)
+        // Пустой транспорт на живом туннеле означает «служба ничего не сообщила»,
+        // а не «это WARP», и затирать им уже известный нельзя.
+        //
+        // Метка живёт в поле службы и обнуляется на старте каждого поколения
+        // подключения (`beginConnectGeneration`). Пока туннель поднят, поколения
+        // сменяются и без переподключения — от проверок и перечитывания настроек, —
+        // и любая такая публикация делала `transport` пустым. Экран тогда падал в
+        // общую ветку и писал «WARP: RU» поверх работающего MASQUE: замер на
+        // Pixel 4 XL, LTE, туннель через MASQUE-CONSUMER@443 —
+        // `backend=WARP, transport=-`.
+        val requestedTransport = transport.trim().uppercase(Locale.US)
+        val normalizedTransport = if (
+            requestedTransport.isBlank() && normalizedState == NovaVpnService.STATE_CONNECTED
+        ) {
+            readServiceStateFile().optString("transport").trim().uppercase(Locale.US)
+        } else {
+            requestedTransport
+        }
         val normalizedNotice = notice.trim()
         val now = System.currentTimeMillis()
         prefs.edit()
@@ -951,47 +1054,17 @@ class ClientData(context: Context) {
     fun getServiceAttemptTotal(): Int =
         readServiceStateFile().optInt("attempt_total", -1).takeIf { it >= 0 }
             ?: prefs.getInt("service_attempt_total", 0)
-    /**
-     * Ключ кэша числа попыток. Пустая строка означает «не кэшировать».
-     *
-     * Кэш нужен там, где длина перебора заранее неизвестна и счётчик иначе дёргался бы:
-     * это WARP с его discovery. У MASQUE список кандидатов известен точно — три-четыре
-     * штуки. Пока кэш был общим на бэкенд, фаза MASQUE подхватывала запомненные
-     * полсотни WARP-профилей и показывала «1/50»: снаружи это выглядело так, будто
-     * подключение идёт по AWG, а не по выбранному протоколу.
-     */
-    private fun connectAttemptTotalKey(backendLabel: String, transportLabel: String): String {
-        val backend = backendLabel.trim().uppercase(Locale.US)
-        return when {
-            backend.startsWith(NovaVpnService.BACKEND_OPERA) -> "cached_connect_attempt_total_opera"
-            backend.startsWith(NovaVpnService.BACKEND_VLESS) -> ""
-            transportLabel.trim().equals(NovaVpnService.TRANSPORT_MASQUE, ignoreCase = true) -> ""
-            else -> "cached_connect_attempt_total_warp"
-        }
-    }
-
-    fun getCachedConnectAttemptTotal(
-        backendLabel: String = getServiceBackend(),
-        transportLabel: String = getServiceTransport(),
-    ): Int {
-        val key = connectAttemptTotalKey(backendLabel, transportLabel)
-        if (key.isEmpty()) return 0
-        return prefs.getInt(key, 0).coerceAtLeast(0)
-    }
-
-    fun rememberConnectAttemptTotal(
-        total: Int,
-        backendLabel: String = getServiceBackend(),
-        transportLabel: String = getServiceTransport(),
-    ) {
-        val normalizedTotal = total.coerceIn(0, 240)
-        if (normalizedTotal <= 0) return
-        val key = connectAttemptTotalKey(backendLabel, transportLabel)
-        if (key.isEmpty()) return
-        val current = prefs.getInt(key, 0)
-        if (normalizedTotal == current) return
-        prefs.edit().putInt(key, normalizedTotal).commit()
-    }
+    // Кэш числа попыток удалён намеренно, восстанавливать не нужно.
+    //
+    // Он лежал в SharedPreferences и писался только процессом `:vpn`, а читался в
+    // том числе процессом UI — который в MODE_PRIVATE чужие записи не перечитывает
+    // никогда. Знаменатель прошлого прогона поэтому замерзал в экране до полного
+    // перезапуска приложения. Вдобавок ключ был общим для встроенного и
+    // импортированного наборов, а обе стороны брали `maxOf(своё, кэш)` — то есть
+    // работал храповик: попавшие в кэш полсотни встроенных профилей уже не
+    // опускались до четырёх импортированных. Длину перебора знает только цикл,
+    // который его ведёт, и он объявляет её до первой попытки; до этого момента
+    // экран показывает «...».
     // Ручной порядок конфигураций: пока пуст, список сортируется по качеству.
     // Первое же перемещение фиксирует текущий порядок целиком, дальше он ведущий,
     // а новые конфигурации дописываются в конец.
@@ -1191,6 +1264,13 @@ class ClientData(context: Context) {
         prefs.edit().putString("exit_region_preference", normalizeRegionPreference(value)).commit()
     }
     fun shouldUseWarpTransport(): Boolean {
+        // Источник профилей старше региона. Регион EU/US мог остаться от прошлого
+        // выбора — экран настроек в режиме импортированных показывает не регионы, а
+        // протоколы, и сменить его пользователю физически нечем. Пока решение
+        // принималось по одному региону, включённый режим «только импортированные»
+        // отменялся целиком: подключение уходило в Opera EU, и ни одна
+        // импортированная попытка не выполнялась.
+        if (isImportedConfigSourceActive()) return true
         return when (getExitRegionPreference()) {
             "eu", "us" -> false
             else -> true
@@ -1533,21 +1613,40 @@ class ClientData(context: Context) {
      */
     fun shouldUseVlessTransport(): Boolean {
         if (getVlessProfileLinks().isEmpty() && !hasVlessTransport()) return false
-        if (normalizeRegionPreference(getExitRegionPreference()) == "vless") return true
-        return isImportedConfigSourceActive() &&
-            getImportedProtocolPreference().equals("vless", ignoreCase = true)
+        return isVlessExplicitlyChosen()
     }
+
     /**
-     * true, если кроме VLESS в этом режиме пробовать нечего.
+     * Назвал ли пользователь VLESS выбранным транспортом.
      *
-     * Выбор протокола VLESS среди импортированных конфигураций отключает обычный пул
-     * WARP: цикл подключения честно доходит до «shortlist пуст» и гасит службу. Пока
-     * перебор VLESS сдавался по бюджету времени, это выглядело как «на 18-й попытке
-     * подключение само остановилось» — уходить было некуда, а перебор всё равно уходил.
+     * Отдельно от [shouldUseVlessTransport] потому, что тот дополнительно требует
+     * разбираемую ссылку: «выбран, но ссылок нет» и «не выбран» — разные состояния,
+     * и подставлять встроенные профили нельзя ни в одном из них.
+     *
+     * В режиме импортированных конфигураций решает только выбор протокола: регион
+     * там от прошлого выбора и экраном не управляется, а «сначала регион, потом
+     * протокол» приводило к тому, что при выбранном AWG перебирались профили VLESS.
      */
-    fun isVlessOnlyTransportMode(): Boolean =
-        isImportedConfigSourceActive() &&
-            getImportedProtocolPreference().equals("vless", ignoreCase = true)
+    fun isVlessExplicitlyChosen(): Boolean = ImportedSourcePolicy.isVlessChosen(
+        importedSourceActive = isImportedConfigSourceActive(),
+        effectiveImportedProtocol = resolveEffectiveImportedProtocol(),
+        regionPreference = normalizeRegionPreference(getExitRegionPreference()),
+    )
+
+    /**
+     * true, если кроме VLESS пробовать нечего.
+     *
+     * Выбор VLESS отключает обычный пул WARP: цикл подключения честно доходит до
+     * «shortlist пуст» и гасит службу. Пока перебор VLESS сдавался по бюджету
+     * времени, это выглядело как «на 18-й попытке подключение само остановилось» —
+     * уходить было некуда, а перебор всё равно уходил.
+     *
+     * Условие обязано совпадать с условием входа в фазу ([shouldUseVlessTransport]).
+     * Пока оно было уже входного — только режим импортированных, без региона, —
+     * провал VLESS уводил перебор на встроенные профили WARP: вход и выход
+     * проверяли разные вещи.
+     */
+    fun isVlessOnlyTransportMode(): Boolean = isVlessExplicitlyChosen()
 
     fun shouldAllowOperaTransport(): Boolean {
         return when (getExitRegionPreference()) {
@@ -3355,7 +3454,24 @@ class ClientData(context: Context) {
     fun markWarpIdentityBackfillFailure(nowMs: Long = System.currentTimeMillis()) {
         prefs.edit().putLong("warp_identity_backfill_failed_at", nowMs).commit()
     }
-    fun getMasqueConfigJson(): String? = prefs.getString("masque_config_json", null)
+    /**
+     * Ключ MASQUE читается из файла; из настроек он переносится ровно один раз.
+     *
+     * Если файл уже есть, но не прочитался (идёт запись, повреждение) — возвращаем
+     * пустоту, а не значение из настроек: там лежит зеркало, которое любой `commit()`
+     * соседнего процесса мог откатить, то есть ровно тот дефект, ради которого ключ и
+     * переехал в файл.
+     */
+    fun getMasqueConfigJson(): String? {
+        val stored = readAtomicRaw(masqueConfigFile).trim()
+        if (stored.isNotEmpty()) return stored
+        if (masqueConfigFile.baseFile.exists()) return null
+        val legacy = prefs.getString("masque_config_json", null)?.trim().orEmpty()
+        if (legacy.isEmpty()) return null
+        writeAtomicRaw(masqueConfigFile, legacy)
+        prefs.edit().remove("masque_config_json").commit()
+        return legacy
+    }
 
     /**
      * Лицензия WARP+, введённая пользователем.
@@ -4386,7 +4502,13 @@ class ClientData(context: Context) {
             .toList()
         // Профили VLESS лежат в своём хранилище, но для выбора протокола это такая же
         // импортированная семья, как AWG: без неё выбрать VLESS было бы негде.
-        return if (getVlessProfileLinks().isEmpty()) warpFamilies else warpFamilies + "vless"
+        //
+        // VLESS идёт первым намеренно. Экран выбора протокола раскладывает список по
+        // пяти радиокнопкам, первую из которых занимает «AUTO», — а семей бывает до
+        // пяти. Пока VLESS дописывался в конец, при полном наборе импортированных
+        // протоколов кнопки ему не доставалось и выбрать его было нечем.
+        val vlessFamilies = if (getVlessProfileLinks().isEmpty()) emptyList() else listOf("vless")
+        return (vlessFamilies + warpFamilies).distinct()
     }
 
     fun inferImportedProtocolFamily(config: WarpVerifiedConfig): String {
@@ -5705,9 +5827,23 @@ class ClientData(context: Context) {
     }
 
     fun saveMasqueConfigJson(json: String?) {
-        val editor = prefs.edit().putString("masque_config_json", json)
+        writeAtomicRaw(masqueConfigFile, json.orEmpty())
+        val editor = prefs.edit()
+        // Зеркало в настройках больше не ведём — оно и было источником потери. Старое
+        // значение убираем, чтобы никто не прочитал его вместо файла.
+        editor.remove("masque_config_json")
         // Ключ получен — обещание закрыто.
         if (!json.isNullOrBlank()) editor.remove("masque_identity_wanted")
+        // Паузы адресов держатся на прежнем ключе и вместе с ним заканчиваются.
+        //
+        // Единая точка: новый ключ появляется только здесь, поэтому здесь же и
+        // единственное место, где срок жизни пауз можно привязать к поколению ключа, не
+        // рассчитывая на дисциплину вызывающих.
+        if (!json.isNullOrBlank()) {
+            prefs.all.keys
+                .filter { it.startsWith("warp_attempt_cooldown|masque|") }
+                .forEach { editor.remove(it) }
+        }
         editor.commit()
     }
 
@@ -6380,11 +6516,12 @@ class ClientData(context: Context) {
                     remove("access_token")
                     remove("device_id")
                     remove("license")
-                    remove("masque_config_json")
                     remove("is_registered")
                 }
                 apply()
             }
+            // Ключ MASQUE лежит в файле, а не в настройках, — стираем отдельно.
+            saveMasqueConfigJson(null)
             saveWarpVerifiedConfigs((manualConfigs + preservedImportedConfigs).distinctBy { it.id })
             ensureBundledVerifiedWarpSeeds()
             clearTunnelUiSnapshot()
@@ -6406,7 +6543,6 @@ class ClientData(context: Context) {
             remove("access_token")
             remove("device_id")
             remove("license")
-            remove("masque_config_json")
             remove("is_registered")
             remove("restart_session_json")
             remove("pending_warp_bootstrap_restart_json")
@@ -6416,8 +6552,19 @@ class ClientData(context: Context) {
             remove("masque_bootstrap_failed_at")
             remove("warp_full_cycle_failed_count")
             remove("warp_full_cycle_failed_at")
+            // Запасная личность — тоже регистрация, и сброс обязан её убирать.
+            //
+            // Без этой строки «сбросить регистрацию» не сбрасывало ничего: основную
+            // конфигурацию стирали, а MASQUE продолжал работать поверх старого
+            // устройства из запасной личности. Проверка исправленной регистрации
+            // из-за этого показывала прежний результат.
+            remove("reserve_warp_identity_json")
+            remove("warp_identity_backfill_failed_at")
             commit()
         }
+        // Ключ MASQUE лежит в файле, а не в настройках, — стираем отдельно. Иначе «сбросить
+        // регистрацию» оставляло бы ключ от устройства, которого больше нет.
+        saveMasqueConfigJson(null)
         clearTunnelUiSnapshot()
         setTrafficMaskActiveHost(null)
         setWarpTrafficMaskActiveHost(null)

@@ -42,6 +42,7 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.animation.AccelerateDecelerateInterpolator
 import nova.Nova
@@ -85,6 +86,31 @@ class MainActivity : AppCompatActivity() {
          * а не настройка, которую стоит показывать.
          */
         private const val ACTION_ADB_SET_AWG_JUNK = "SET_AWG_JUNK"
+
+        /**
+         * Выгружает сохранённый профиль MASQUE во внешнюю папку приложения.
+         *
+         * Отладочное действие: сравнивать наш профиль с эталонным (проба
+         * `nova-core/cmd/masqueprobe`) иначе нечем — `run-as` на релизной сборке
+         * недоступен, а профиль лежит в `SharedPreferences`. Приватный ключ в выгрузке
+         * заменён длиной: для сверки формата этого достаточно, а ключ наружу не уходит.
+         */
+        private const val ACTION_ADB_DUMP_MASQUE_CONFIG = "DUMP_MASQUE_CONFIG"
+        private const val ACTION_ADB_DOUBLE_ENROLL_MASQUE = "DOUBLE_ENROLL_MASQUE"
+
+        /** Просит службу прогнать пробу MASQUE изнутри процесса `:vpn`. */
+        private const val ACTION_ADB_PROBE_MASQUE = "PROBE_MASQUE"
+
+        /**
+         * Кладёт готовые token/device id в запасную личность.
+         *
+         * Отладочное действие ради одного опыта: подсунуть приложению устройство,
+         * зарегистрированное эталонной пробой, и посмотреть, заработает ли MASQUE.
+         * Так вина регистрации отделяется от вины всего остального.
+         */
+        private const val ACTION_ADB_SET_WARP_IDENTITY = "SET_WARP_IDENTITY"
+        private const val EXTRA_ADB_WARP_TOKEN = "warp_token"
+        private const val EXTRA_ADB_WARP_DEVICE_ID = "warp_device_id"
         private const val EXTRA_ADB_AWG_JUNK_DISABLED = "junk_disabled"
 
         /** Как часто проверять, умер ли обречённый `:vpn`. */
@@ -127,7 +153,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvStatus: com.example.nova.StrokeTextView
     private lateinit var btnConnect: GlowPillButton
     private lateinit var btnNextProfile: GlowPillButton
-    private lateinit var btnInstallUpdate: com.example.nova.StrokeTextView
+    private lateinit var btnInstallUpdate: com.example.nova.UpdateChipView
+    private lateinit var tvUpdateCaption: TextView
     private lateinit var latencyGraph: LatencyGraphView
     private lateinit var ivBackgroundArt: BackdropRevealImageView
     private lateinit var networkBackground: NovaNetworkBackgroundView
@@ -151,8 +178,6 @@ class MainActivity : AppCompatActivity() {
     private var displayedAttemptTotal = 0
     private var lastRawAttemptOrdinal = 0
     private var lastRawAttemptTotal = 0
-    private var cachedBuiltInConfigProgressTotal = -1
-    private var cachedImportedConfigProgressTotal = -1
     private var manualProfileSwitchProgressHoldUntilMs = 0L
     private var primaryActionLockedUntilMs = 0L
     private var primaryActionPreviewActive = false
@@ -660,6 +685,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         btnInstallUpdate = findViewById(R.id.btn_install_update)
+        tvUpdateCaption = findViewById(R.id.tv_update_caption)
         latencyGraph = findViewById(R.id.graph_latency)
         tvVersion = findViewById(R.id.tv_version)
         tvIpAddress.setSaveEnabled(false)
@@ -673,6 +699,9 @@ class MainActivity : AppCompatActivity() {
             isStartFlowActive = true
         }
         tvVersion.text = "v${getAppVersionName()}"
+        // Экран открыт — уведомление «Nova обновлена, открыть» больше не нужно,
+        // независимо от того, сам он открылся или его открыл человек.
+        AppUpdateManager.cancelUpdatedNotification(this)
         setTaskDescription(
             ActivityManager.TaskDescription(
                 getString(R.string.app_name),
@@ -752,21 +781,22 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        btnInstallUpdate.setStroke(5.8f, Color.parseColor("#EEF8A6"))
-        btnInstallUpdate.setStrokeGlow(0f, Color.TRANSPARENT)
-        btnInstallUpdate.setGlow(0f, Color.TRANSPARENT)
-        btnInstallUpdate.setPillStyle(
-            fillColor = Color.TRANSPARENT,
-            glowColor = Color.argb(170, 19, 161, 14),
-            innerColor = Color.TRANSPARENT,
-            insetX = 12f,
-            insetY = 8f,
-            blurRadius = 42f,
-            ovalGlow = true,
-        )
-        btnInstallUpdate.letterSpacing = 0.06f
         btnInstallUpdate.setOnClickListener {
             AppUpdateManager.installReadyUpdate(this)
+        }
+        // Экран рисуется под системными панелями, а плашка прижата к верхнему краю:
+        // без отступа она уезжала под часы и заряд и читалась как мусор поверх статус-бара.
+        // Высота панели разная на разных устройствах, поэтому берём её из insets, а не
+        // из константы.
+        val updateChipBaseMarginTop =
+            (btnInstallUpdate.layoutParams as ViewGroup.MarginLayoutParams).topMargin
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(btnInstallUpdate) { view, insets ->
+            val systemBars = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+            val params = view.layoutParams as ViewGroup.MarginLayoutParams
+            params.topMargin = updateChipBaseMarginTop + systemBars.top
+            params.rightMargin = params.rightMargin.coerceAtLeast(systemBars.right)
+            view.layoutParams = params
+            insets
         }
 
         val btnSettings = findViewById<TextView>(R.id.btn_settings)
@@ -942,8 +972,6 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         isActivityResumed = true
-        cachedBuiltInConfigProgressTotal = -1
-        cachedImportedConfigProgressTotal = -1
         refreshWarpDiscoverySnapshotFromStorage()
         statusHandler.post(statusRunnable)
         refreshInstallUpdateButton()
@@ -1041,11 +1069,18 @@ class MainActivity : AppCompatActivity() {
     private fun refreshInstallUpdateButton() {
         val readyVersion = AppUpdateManager.getReadyDownloadedVersion(this)
         if (readyVersion.isNotBlank()) {
-            btnInstallUpdate.text = "Обновить приложение"
+            // Версию показываем ту, что реально лежит на диске: подпись — это обещание,
+            // и оно должно совпадать с тем, что установится по нажатию.
+            tvUpdateCaption.text = "Обновить до ${formatVersionLabel(readyVersion)}"
             btnInstallUpdate.visibility = View.VISIBLE
         } else {
             btnInstallUpdate.visibility = View.GONE
         }
+    }
+
+    private fun formatVersionLabel(version: String): String {
+        val trimmed = version.trim()
+        return if (trimmed.startsWith("v", ignoreCase = true)) trimmed else "v$trimmed"
     }
 
     private fun requestImmediateVpnHealthRecheck(
@@ -1169,15 +1204,17 @@ class MainActivity : AppCompatActivity() {
     private fun markServiceConnectingLocally(backend: String) {
         clientData.clearSoftReapplyPending()
         val backendLabel = backend.ifBlank { NovaVpnService.BACKEND_WARP }
+        // Знаменатель экран не называет.
+        //
+        // Здесь писалась длина встроенного списка, и она уходила в общий файл
+        // состояния как будто от службы: при выбранном MASQUE до первой попытки
+        // мелькало «1/50», хотя кандидатов три. Очередь знает только служба —
+        // до её первого снимка честно показывается «...».
         clientData.saveServiceState(
             NovaVpnService.STATE_CONNECTING,
             backendLabel,
             0,
-            if (!clientData.isImportedConfigSourceActive() && backendLabel == NovaVpnService.BACKEND_WARP) {
-                clientData.getWarpVerifiedConfigs().count(clientData::isBundledSeed).coerceAtLeast(0)
-            } else {
-                clientData.getCachedConnectAttemptTotal(backendLabel).coerceIn(0, 240)
-            },
+            0,
         )
     }
 
@@ -1526,15 +1563,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun resolveImportedUiBackendLabel(): String? {
         if (!clientData.isImportedConfigSourceActive()) return null
-        val availableFamilies = clientData.getAvailableImportedProtocolFamilies()
-        if (availableFamilies.isEmpty()) return null
-        val preferred = clientData.getImportedProtocolPreference()
-        val effective = when {
-            preferred != "auto" -> preferred
-            availableFamilies.size == 1 -> availableFamilies.first()
-            else -> "auto"
-        }
-        return clientData.formatImportedProtocolDisplay(effective)
+        // Схлопывание «AUTO» в единственную семью раньше жило только здесь, и экран
+        // расходился со службой: подпись обещала «VLESS», а служба фазу VLESS не
+        // запускала. Теперь решение одно на обоих — в ClientData.
+        return clientData.formatImportedProtocolDisplay(clientData.resolveEffectiveImportedProtocol())
             .takeIf { it.isNotBlank() && !it.equals("AUTO", ignoreCase = true) }
     }
 
@@ -1680,9 +1712,13 @@ class MainActivity : AppCompatActivity() {
                     return@execute
                 }
                 if (tunnelNetwork != null) {
+                    // Транспорт печатаем рядом с бэкендом: именно он решает, что
+                    // окажется на бейдже, и его отсутствие в этой строке однажды уже
+                    // спрятало расхождение «в туннеле MASQUE, на экране WARP».
                     LogManager.log(
                         "UI checkCurrentIp: snapshot получен, ip=${primaryIp.ifBlank { "-" }}, " +
-                            "country=${effectiveSnapshot.country.ifBlank { "-" }}, backend=$resolvedBackend"
+                            "country=${effectiveSnapshot.country.ifBlank { "-" }}, backend=$resolvedBackend, " +
+                            "transport=${clientData.getServiceTransport().ifBlank { "-" }}"
                     )
                 }
 
@@ -1853,6 +1889,83 @@ class MainActivity : AppCompatActivity() {
                 finish()
                 return true
             }
+            ACTION_ADB_SET_WARP_IDENTITY -> {
+                val token = intent?.getStringExtra(EXTRA_ADB_WARP_TOKEN)?.trim().orEmpty()
+                val deviceId = intent?.getStringExtra(EXTRA_ADB_WARP_DEVICE_ID)?.trim().orEmpty()
+                if (token.isEmpty() || deviceId.isEmpty()) {
+                    LogManager.log("ADB debug: не заданы warp_token/warp_device_id — личность не подменена.")
+                } else {
+                    val base = clientData.getConfig()
+                    clientData.saveReserveWarpIdentity(
+                        WarpConfig(
+                            privateKey = base?.privateKey.orEmpty(),
+                            publicKey = base?.publicKey.orEmpty(),
+                            ipv4 = base?.ipv4.orEmpty(),
+                            ipv6 = base?.ipv6.orEmpty(),
+                            peerPublicKey = base?.peerPublicKey.orEmpty(),
+                            peerEndpoint = base?.peerEndpoint.orEmpty(),
+                            reserved = base?.reserved,
+                            accessToken = token,
+                            deviceId = deviceId,
+                            license = null,
+                            masqueConfigJson = null,
+                        )
+                    )
+                    clientData.saveMasqueConfigJson(null)
+                    clientData.setMasqueIdentityWanted(true)
+                    LogManager.log(
+                        "ADB debug: запасная личность подменена на внешнюю (device_id=$deviceId). " +
+                            "Ключ MASQUE стёрт — будет выпущен заново на этом устройстве."
+                    )
+                }
+                finish()
+                return true
+            }
+            ACTION_ADB_PROBE_MASQUE -> {
+                ContextCompat.startForegroundService(
+                    this,
+                    Intent(this, NovaVpnService::class.java).setAction(
+                        NovaVpnService.ACTION_PROBE_MASQUE
+                    ),
+                )
+                LogManager.log("ADB debug: запросили у службы пробу MASQUE.")
+                finish()
+                return true
+            }
+            ACTION_ADB_DOUBLE_ENROLL_MASQUE -> {
+                // Тоже через службу: ключ и личность живут в её копии SharedPreferences.
+                ContextCompat.startForegroundService(
+                    this,
+                    Intent(this, NovaVpnService::class.java).setAction(
+                        NovaVpnService.ACTION_DOUBLE_ENROLL_MASQUE
+                    ),
+                )
+                LogManager.log("ADB debug: запросили у службы двойной выпуск ключа MASQUE.")
+                finish()
+                return true
+            }
+            ACTION_ADB_DUMP_MASQUE_CONFIG -> {
+                // Пересылаем в службу: профиль пишет процесс `:vpn`, и только он видит
+                // его в своей копии SharedPreferences. Из главного процесса выгрузка
+                // получалась пустой — та же межпроцессная ловушка, что и с настройками.
+                val includeSecrets =
+                    intent?.getBooleanExtra(NovaVpnService.EXTRA_DUMP_MASQUE_SECRETS, false) ?: false
+                ContextCompat.startForegroundService(
+                    this,
+                    Intent(this, NovaVpnService::class.java)
+                        .setAction(NovaVpnService.ACTION_DUMP_MASQUE_CONFIG)
+                        .putExtra(NovaVpnService.EXTRA_DUMP_MASQUE_SECRETS, includeSecrets),
+                )
+                LogManager.log(
+                    if (includeSecrets) {
+                        "ADB debug: запросили у службы выгрузку профиля MASQUE без маскировки."
+                    } else {
+                        "ADB debug: запросили у службы выгрузку профиля MASQUE."
+                    }
+                )
+                finish()
+                return true
+            }
             ACTION_ADB_SET_VLESS_PROFILE -> {
                 val link = intent?.getStringExtra(EXTRA_ADB_VLESS_LINK)?.trim().orEmpty()
                 if (link.isEmpty()) {
@@ -1908,6 +2021,11 @@ class MainActivity : AppCompatActivity() {
                 // завершении роняет процесс службы изнутри native-библиотеки. Служба
                 // умеет сменить узел на ходу, оставив туннель поднятым.
                 action = NovaVpnService.ACTION_SWITCH_VLESS_PROFILE
+                // Если перебора VLESS в службе сейчас нет, она уходит в REAPPLY и
+                // решает по своим настройкам, какой транспорт поднимать. Без этих
+                // полей она решала по устаревшему срезу и пересобирала WARP-сессию
+                // вместо смены узла VLESS.
+                applyCurrentPreferenceExtras(this)
             }
         )
     }
@@ -2542,8 +2660,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun seedConnectingAttemptProgress(backendLabel: String) {
+        // Ни ординала, ни знаменателя: и то и другое приходит от службы. Кэш,
+        // который лежал здесь, читался процессом UI из SharedPreferences и после
+        // старта службы уже никогда не обновлялся — знаменатель прошлого прогона
+        // побеждал честное число текущего.
         currentAttemptOrdinal = 0
-        currentAttemptTotal = clientData.getCachedConnectAttemptTotal(backendLabel).coerceIn(0, 240)
+        currentAttemptTotal = 0
     }
 
     private fun resolvePendingConnectBackend(): String {
@@ -2815,23 +2937,12 @@ class MainActivity : AppCompatActivity() {
             currentAttemptOrdinal > 0
     }
 
-    private fun builtInConfigProgressTotal(): Int {
-        if (cachedBuiltInConfigProgressTotal < 0) {
-            cachedBuiltInConfigProgressTotal = clientData.getWarpVerifiedConfigs()
-                .count(clientData::isBundledSeed)
-                .coerceAtLeast(0)
-        }
-        return cachedBuiltInConfigProgressTotal
-    }
-
-    private fun importedConfigProgressTotal(): Int {
-        if (cachedImportedConfigProgressTotal < 0) {
-            cachedImportedConfigProgressTotal = clientData.getWarpVerifiedConfigs()
-                .count { it.userImported && !it.manual }
-                .coerceAtLeast(0)
-        }
-        return cachedImportedConfigProgressTotal
-    }
+    // Заглушки знаменателя по длине списка профилей удалены намеренно.
+    //
+    // Они считали не то, что перебирает служба: экран брал все импортированные
+    // записи, а очередь строится с фильтром по выбранному протоколу и ограничением
+    // размера — «1/20» через долю секунды превращалось в «1/8». Длину перебора
+    // объявляет служба до первой попытки; пока она молчит, честный ответ — «...».
 
     private fun acceptAttemptProgress(
         rawOrdinal: Int,
@@ -3386,10 +3497,7 @@ class MainActivity : AppCompatActivity() {
             } else if (holdManualProfileSwitchProgress) {
                 currentAttemptTotal
             } else {
-                maxOf(
-                    persistedAttemptTotal,
-                    clientData.getCachedConnectAttemptTotal(currentTunnelBackend),
-                )
+                persistedAttemptTotal
             }
             if (currentAttemptTotal > 0) {
                 acceptAttemptProgress(currentAttemptOrdinal, currentAttemptTotal)
@@ -3740,25 +3848,6 @@ class MainActivity : AppCompatActivity() {
         // фаза не сообщила свой прогресс, старые числа не показываем.
         val progressPhaseSwitching =
             SystemClock.elapsedRealtime() - progressPhaseSwitchAtMs < PROGRESS_PHASE_SWITCH_QUIET_MS
-        // Заглушка по длине списка профилей годится только той фазе, которая этот
-        // список и перебирает. У EU/US перебирает Opera: сначала мелькало «1/50» от
-        // встроенных профилей WARP, потом «1/54» от плана запуска Opera — читалось
-        // как «подключение всё-таки идёт по WARP».
-        val warpProfileListPhase = RegionTransportPolicy.countsWarpProfileList(
-            transportLabel = serviceTransport,
-            backendLabel = currentTunnelBackend,
-            regionPreference = clientData.getExitRegionPreference(),
-        )
-        val importedConfigProgressTotal = if (clientData.isImportedConfigSourceActive() && warpProfileListPhase) {
-            importedConfigProgressTotal()
-        } else {
-            0
-        }
-        val builtInConfigProgressTotal = if (!clientData.isImportedConfigSourceActive() && warpProfileListPhase) {
-            builtInConfigProgressTotal()
-        } else {
-            0
-        }
         if (warpDiscoverySnapshot?.running == true) {
             if (isManualProfileSwitchProgressHeld()) {
                 // During a manual next-profile switch the engine may start a fresh
@@ -3807,75 +3896,56 @@ class MainActivity : AppCompatActivity() {
             }
             tvAttemptProgress.visibility = View.VISIBLE
         } else if (vpnState == NovaVpnService.STATE_CONNECTING) {
+            // Экран — чистая функция последнего снимка службы.
+            //
+            // Раньше за этот TextView соревновались четыре источника: снимок службы,
+            // кэш прошлого прогона в SharedPreferences, заглушка по длине списка
+            // профилей и собственный курсор кнопки «следующий профиль». Их мирили
+            // сглаживанием (`acceptAttemptProgress`), а оно тут же обходилось прямым
+            // присваиванием строкой выше. Отсюда и брались скачки: «1/20» → «1/8»,
+            // «23/50» → «4/50», «12/20» → «8/8» по истечении удержания.
+            //
+            // Теперь шкала одна и её ведёт только тот цикл, который перебирает:
+            // ординал растёт на единицу за попытку, знаменатель равен длине очереди
+            // и объявляется до первой попытки. Мирить нечего.
             val persistedOrdinal = clientData.getServiceAttemptOrdinal()
-            // Пока фаза не назвала себя, её перебор неизвестен: показываем «...», а не
-            // запомненное число прошлого цикла. Иначе на старте VLESS успевало
-            // мелькнуть «1/50» от встроенного списка WARP.
-            val persistedTotal = if (serviceTransport.isBlank() && persistedOrdinal <= 0) {
-                0
-            } else {
-                clientData.getServiceAttemptTotal()
+            val persistedTotal = clientData.getServiceAttemptTotal()
+            // Единственное исключение из «экран рисует снимок»: секунды между
+            // нажатием «следующий профиль» и первой публикацией службы. В файле
+            // состояния ещё лежит номер до нажатия, и счётчик успевал отскочить
+            // назад. Удержание снимается само, как только служба назвала команду —
+            // сравнением, а не таймером.
+            val manualSwitchPending = isManualProfileSwitchProgressHeld() &&
+                persistedOrdinal < currentAttemptOrdinal
+            if (!manualSwitchPending) {
+                currentAttemptOrdinal = persistedOrdinal
+                currentAttemptTotal = persistedTotal
             }
-            if (serviceTransport.isBlank() && persistedOrdinal <= 0) {
-                currentAttemptTotal = 0
-                currentAttemptOrdinal = 0
-                resetAttemptProgressTracking()
-            }
-            val holdManualProfileSwitchProgress = isManualProfileSwitchProgressHeld()
-            if (holdManualProfileSwitchProgress) {
-                // During a manual next-profile switch the engine reports its own attempt
-                // ordinal (seedOrder based), which does not match the UI's sequential
-                // cursor. Trust the UI selection and ignore engine/persisted ordinals.
-                if (currentAttemptOrdinal > 0 && currentAttemptTotal > 0) {
-                    displayedAttemptOrdinal = currentAttemptOrdinal
-                    displayedAttemptTotal = currentAttemptTotal
-                }
-            } else if (persistedOrdinal > 0 && !progressPhaseSwitching) {
+            // Числа прошлой фазы не показываем: её ординал ещё лежит в состоянии
+            // службы, а знаменатель уже от новой — после срыва MASQUE на 3/3 мелькало
+            // «3/50».
+            val snapshotUsable = !manualSwitchPending &&
+                persistedOrdinal > 0 &&
+                persistedTotal > 0 &&
+                !progressPhaseSwitching
+            if (snapshotUsable) {
                 displayedAttemptOrdinal = persistedOrdinal
                 displayedAttemptTotal = persistedTotal
+                lastRawAttemptOrdinal = persistedOrdinal
+                lastRawAttemptTotal = persistedTotal
+            } else if (manualSwitchPending) {
+                displayedAttemptOrdinal = currentAttemptOrdinal
+                displayedAttemptTotal = currentAttemptTotal
+            } else if (persistedTotal <= 0) {
+                resetAttemptProgressTracking()
             }
-            // Оценка по длине списка профилей — это заглушка на те доли секунды, пока
-            // сервис не сообщил свой перебор. Как только он сообщил, показываем его
-            // число: иначе выбранный протокол с четырьмя профилями показывал «1/50»
-            // от встроенного списка, а через секунду прыгал на «4/4».
-            val serviceReportedTotal = maxOf(currentAttemptTotal, persistedTotal)
-            val visibleConfigProgressTotal = when {
-                serviceReportedTotal > 0 -> 0
-                importedConfigProgressTotal > 0 -> importedConfigProgressTotal
-                builtInConfigProgressTotal > 0 -> builtInConfigProgressTotal
-                else -> 0
-            }
-            if (persistedTotal <= 0 && currentAttemptTotal <= 0) {
-                if (displayedAttemptTotal <= 0) {
-                    resetAttemptProgressTracking()
-                }
-            } else if (!holdManualProfileSwitchProgress && !progressPhaseSwitching) {
-                // Пока фаза сменилась, а новая ещё не назвала свой перебор, числа в
-                // файле состояния принадлежат прошлой. Раньше их сюда пускали, и
-                // знаменатель прошлой фазы оседал в счётчике через maxOf: подключение
-                // по VLESS показывало «x/54» от плана запуска Opera.
-                acceptAttemptProgress(
-                    maxOf(currentAttemptOrdinal, persistedOrdinal),
-                    maxOf(currentAttemptTotal, persistedTotal),
-                    visibleConfigProgressTotal,
-                )
-            }
-            if (serviceReportedTotal <= 0 && importedConfigProgressTotal > 0) {
-                val importedOrdinal = displayedAttemptOrdinal.coerceAtLeast(1).coerceAtMost(importedConfigProgressTotal)
-                tvAttemptProgress.text = "$importedOrdinal/$importedConfigProgressTotal"
-                tvAttemptProgress.visibility = View.VISIBLE
-            } else if (serviceReportedTotal <= 0 && builtInConfigProgressTotal > 0) {
-                val builtInOrdinal = displayedAttemptOrdinal.coerceAtLeast(1).coerceAtMost(builtInConfigProgressTotal)
-                tvAttemptProgress.text = "$builtInOrdinal/$builtInConfigProgressTotal"
-                tvAttemptProgress.visibility = View.VISIBLE
-            } else if (displayedAttemptTotal > 0) {
+            if (displayedAttemptTotal > 0 && displayedAttemptOrdinal > 0) {
                 val ordinal = displayedAttemptOrdinal.coerceIn(1, displayedAttemptTotal)
                 tvAttemptProgress.text = "$ordinal/${displayedAttemptTotal}"
-                tvAttemptProgress.visibility = View.VISIBLE
             } else {
                 tvAttemptProgress.text = "..."
-                tvAttemptProgress.visibility = View.VISIBLE
             }
+            tvAttemptProgress.visibility = View.VISIBLE
         } else {
             tvAttemptProgress.visibility = View.INVISIBLE
         }
@@ -3891,8 +3961,15 @@ class MainActivity : AppCompatActivity() {
     private fun refreshTransportNotice() {
         if (!::tvTransportNotice.isInitialized) return
         val notice = clientData.getLastTransportNotice()
+        // Причина остановки читается именно после остановки. Пока STOPPED сюда не
+        // пускали, объяснение «среди импортированных нет такого протокола» видел
+        // только журнал, а пользователь — «пара секунд ПОДКЛЮЧЕНИЕ… и всё».
         val relevant = notice.isNotBlank() &&
-            (isTunnelConnected() || vpnState == NovaVpnService.STATE_CONNECTING)
+            (
+                isTunnelConnected() ||
+                    vpnState == NovaVpnService.STATE_CONNECTING ||
+                    vpnState == NovaVpnService.STATE_STOPPED
+                )
         if (relevant) {
             tvTransportNotice.text = notice
             tvTransportNotice.visibility = View.VISIBLE
@@ -3921,8 +3998,14 @@ class MainActivity : AppCompatActivity() {
             // the engine's own ordinal overwrite currentAttemptOrdinal/currentAttemptTotal.
             currentAttemptOrdinal = currentAttemptOrdinal.coerceAtMost(currentAttemptTotal)
         } else {
-            currentAttemptOrdinal = maxOf(currentAttemptOrdinal, persistedOrdinal)
-            currentAttemptTotal = maxOf(currentAttemptTotal, persistedTotal)
+            // Снимок службы принимается как есть.
+            //
+            // `maxOf` работал храповиком: уменьшить числа мог только явный сброс по
+            // смене метки транспорта, а смена очереди внутри одной метки (встроенные
+            // → импортированные, первичный цикл → recovery) её не меняет. Очередь на
+            // восемь попыток после полусотни продолжала показываться как «x/50».
+            currentAttemptOrdinal = persistedOrdinal
+            currentAttemptTotal = persistedTotal
         }
         val progressAdvanced =
             persistedState == NovaVpnService.STATE_CONNECTING &&

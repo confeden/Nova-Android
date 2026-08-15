@@ -5,8 +5,8 @@ plugins {
     alias(libs.plugins.jetbrains.kotlin.android)
 }
 
-val appVersionCode = 136
-val appVersionName = "1.26"
+val appVersionCode = 139
+val appVersionName = "1.27"
 
 val keystoreProperties = Properties()
 val keystorePropertiesFile = rootProject.file("keystore.properties")
@@ -141,6 +141,21 @@ android {
     }
 }
 
+// Сборка со стороны: у постороннего секрета нет и быть не может, и запрет релиза
+// превращал бы «соберите сами и проверьте» в «соберите только debug». Флаг ставится
+// осознанно и ровно один раз — мы его не ставим никогда, так что защита от забытого
+// секрета у нас остаётся прежней.
+val allowUnsignedRelease: Boolean =
+    System.getenv("NOVA_ALLOW_UNSIGNED_RELEASE") == "1" ||
+        rootProject.file("local.properties")
+            .takeIf { it.exists() }
+            ?.let { file ->
+                Properties().apply { file.inputStream().use(::load) }
+                    .getProperty("novaAllowUnsignedRelease")
+                    ?.trim()
+                    .equals("true", ignoreCase = true)
+            } == true
+
 // Релиз без секрета собираться не должен: такая сборка выглядит работоспособной,
 // но потеряет доступ к nova-app.eu, как только воркер включит обязательную проверку.
 // Проверка выполняется на этапе конфигурации, а не в doFirst: замыкание задачи
@@ -148,12 +163,23 @@ android {
 // Gradle сериализовать не умеет.
 if (
     tgCfWsSecret.isEmpty() &&
+    !allowUnsignedRelease &&
     gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
 ) {
     throw GradleException(
         "Не задан секрет подписи WSS. Укажите переменную окружения NOVA_TG_CF_SECRET " +
             "или novaTgCfSecret в local.properties. Значение берётся из общего файла " +
-            "tgrelay/cf_ws.key проекта Nova PC и в репозиторий не коммитится."
+            "tgrelay/cf_ws.key проекта Nova PC и в репозиторий не коммитится.\n" +
+            "  Собираете Nova из исходников не как владелец домена nova-app.eu? " +
+            "Задайте NOVA_ALLOW_UNSIGNED_RELEASE=1 — соберётся всё, кроме релея Telegram " +
+            "через собственные поддомены."
+    )
+}
+
+if (tgCfWsSecret.isEmpty() && allowUnsignedRelease) {
+    logger.warn(
+        "Nova: релиз собирается без секрета подписи WSS. Транспорты работают, " +
+            "релей Telegram через nova-app.eu — нет."
     )
 }
 

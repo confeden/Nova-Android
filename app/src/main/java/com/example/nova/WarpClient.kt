@@ -119,9 +119,7 @@ class WarpClient(
             // остаётся зарегистрированным без обслуживания, а расхождения с эталоном в
             // полях регистрации — первое, что стоит исключить: разбираться, какое из них
             // важно серверу, можно только не имея своих.
-            val sdf = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", Locale.US)
-            sdf.timeZone = java.util.TimeZone.getTimeZone("UTC")
-            val tosTime = sdf.format(java.util.Date())
+            val tosTime = cloudflareTosTimestamp()
             val bodyString = buildRegistrationBody(publicKey, tosTime, locale, modelName)
             reportProgress(18, "Ключи готовы. Формируем запрос регистрации...")
 
@@ -913,11 +911,9 @@ class WarpClient(
         val publicKey = keyPair.second
         val locale = Locale.getDefault().toLanguageTag().ifBlank { "en-US" }
         val modelName = Build.MODEL?.trim().takeUnless { it.isNullOrBlank() } ?: "Android"
-        val sdf = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'")
-        sdf.timeZone = java.util.TimeZone.getTimeZone("UTC")
         val bodyString = buildRegistrationBody(
             publicKey,
-            sdf.format(java.util.Date()),
+            cloudflareTosTimestamp(),
             locale,
             modelName,
         )
@@ -936,6 +932,27 @@ class WarpClient(
             logger("Регистрация через туннель не удалась: ${e.message}")
             null
         }
+    }
+
+    /**
+     * Отметка о принятии условий в том виде, в каком её шлёт клиент WARP.
+     *
+     * Формат — миллисекунды и числовое смещение (`2026-08-12T18:39:03.000+00:00`),
+     * как в эталоне usque (`TimeAsCfString`). С коротким `…ssZ` регистрация тоже
+     * проходит и возвращает токен, но **устройство остаётся зарегистрированным без
+     * обслуживания**: ключ MASQUE на него выдаётся, TLS-рукопожатие проходит, а на
+     * запрос туннеля сервер молчит.
+     *
+     * Функция общая для обоих путей регистрации намеренно. Ровно это и было причиной
+     * неработающего MASQUE: короткий формат починили в [register], а
+     * [registerThroughActiveTunnel] — тот самый путь, которым приложение и добывает
+     * личность через туннель, — остался со старым, и все его устройства выходили
+     * необслуживаемыми.
+     */
+    private fun cloudflareTosTimestamp(): String {
+        val format = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", Locale.US)
+        format.timeZone = java.util.TimeZone.getTimeZone("UTC")
+        return format.format(java.util.Date())
     }
 
     private fun buildRegistrationBody(publicKey: String, tosTime: String, locale: String, modelName: String): String {

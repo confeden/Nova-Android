@@ -1,4 +1,13 @@
-$sdkDir = "C:\Users\Justin\AppData\Local\Android\Sdk"
+﻿# Путь к SDK берём из окружения текущего пользователя, а не из чужого профиля:
+# зашитый абсолютный путь работал ровно на одной машине и выдавал её владельца.
+param(
+    [string]$SdkDir = $(
+        if ($env:ANDROID_HOME) { $env:ANDROID_HOME }
+        else { Join-Path $env:LOCALAPPDATA "Android\Sdk" }
+    )
+)
+
+$sdkDir = $SdkDir
 New-Item -ItemType Directory -Force -Path "$sdkDir\cmdline-tools"
 Write-Host "Downloading cmdline-tools..."
 Invoke-WebRequest -Uri "https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip" -OutFile "cmdline-tools.zip"

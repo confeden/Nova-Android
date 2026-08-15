@@ -145,28 +145,46 @@
         app:layout_constraintStart_toEndOf="@id/btnConnect"
         app:layout_constraintEnd_toEndOf="parent" />
 
-    <com.example.nova.StrokeTextView
+    <!--
+        Плашка обновления. Вверху справа, а не под главной кнопкой: под кнопкой она
+        оттягивала внимание от единственного действия, ради которого экран открывают.
+    -->
+    <com.example.nova.UpdateChipView
         android:id="@+id/btn_install_update"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="18dp"
-        android:background="@drawable/bg_update_install_button"
-        android:clickable="true"
-        android:focusable="true"
-        android:gravity="center"
-        android:minWidth="240dp"
-        android:paddingStart="22dp"
-        android:paddingTop="10dp"
-        android:paddingEnd="22dp"
-        android:paddingBottom="10dp"
-        android:text="Обновить приложение"
-        android:textColor="#13A10E"
-        android:textSize="15sp"
-        android:textStyle="bold"
+        android:layout_marginTop="10dp"
+        android:layout_marginEnd="10dp"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="16dp"
+        android:paddingTop="13dp"
+        android:paddingEnd="18dp"
+        android:paddingBottom="13dp"
         android:visibility="gone"
-        app:layout_constraintEnd_toEndOf="@+id/btnConnect"
-        app:layout_constraintStart_toStartOf="@+id/btnConnect"
-        app:layout_constraintTop_toBottomOf="@+id/btnConnect" />
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <ImageView
+            android:id="@+id/iv_update_icon"
+            android:layout_width="19dp"
+            android:layout_height="19dp"
+            android:contentDescription="@null"
+            android:src="@drawable/ic_update_chrome" />
+
+        <TextView
+            android:id="@+id/tv_update_caption"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:letterSpacing="0.01"
+            android:text="Обновить"
+            android:textColor="#A9F2BF"
+            android:textSize="12sp"
+            android:textStyle="bold" />
+    </com.example.nova.UpdateChipView>
 
     <!-- Latency Label (Above Graph, Right side) -->
     <TextView

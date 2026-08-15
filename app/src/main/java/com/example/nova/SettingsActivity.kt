@@ -3014,13 +3014,15 @@ class SettingsActivity : AppCompatActivity() {
 
         val currentPreference = clientData.getImportedProtocolPreference()
 
+        // Отсутствующую сейчас семью показываем как «AUTO», но в хранилище не пишем.
+        //
+        // Список семей собирается из уже загруженных конфигураций, и на первых кадрах
+        // после запуска он бывает неполным. Пока экран записывал сюда откат, выбранный
+        // пользователем протокол молча превращался в «AUTO» просто от захода в
+        // настройки — а «AUTO» при нескольких семьях означает уже другой перебор.
+        // Решение, что делать с недоступной семьёй, принимает
+        // [ClientData.resolveEffectiveImportedProtocol] в момент подключения.
         val effectivePreference = currentPreference.takeIf { it in options } ?: "auto"
-
-        if (effectivePreference != currentPreference) {
-
-            clientData.setImportedProtocolPreference(effectivePreference)
-
-        }
 
         radioGroup.setOnCheckedChangeListener(null)
 

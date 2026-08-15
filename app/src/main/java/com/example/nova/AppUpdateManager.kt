@@ -23,6 +23,7 @@ import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
@@ -94,9 +95,13 @@ object AppUpdateManager {
     private const val PERIODIC_WORK_NAME = "nova_update_check_periodic"
     private const val REPAIR_WORK_NAME = "nova_update_repair"
     private const val CHANNEL_ID = "nova_updates"
+    private const val CHANNEL_ID_UPDATED = "nova_update_installed"
     private const val NOTIFICATION_AVAILABLE_ID = 2201
     private const val NOTIFICATION_READY_ID = 2202
     private const val MIN_LAUNCH_CHECK_INTERVAL_MS = 60L * 60L * 1000L
+    private const val DOWNLOAD_ATTEMPTS = 4
+    private const val DOWNLOAD_RETRY_DELAY_MS = 1500L
+    private const val NOTIFICATION_UPDATED_ID = 2203
     private val updateCheckInProgress = AtomicBoolean(false)
     private val installSessionInProgress = AtomicBoolean(false)
 
@@ -109,6 +114,7 @@ object AppUpdateManager {
     const val EXTRA_URL = "extra_url"
     const val EXTRA_SHA256 = "extra_sha256"
     const val EXTRA_PATH = "extra_path"
+    const val EXTRA_LAUNCHED_AFTER_UPDATE = "extra_launched_after_update"
     private const val EXTRA_INSTALL_SESSION_ID = "extra_install_session_id"
     private const val EXTRA_INSTALL_REQUEST_CODE = 6100
 
@@ -126,6 +132,16 @@ object AppUpdateManager {
         val parsedApk: ParsedDownloadedApk? = null,
         val failureReason: String = "",
         val actualSha256: String = "",
+    )
+
+    /**
+     * Итог одной попытки скачивания. `canResume` — можно ли продолжить с того места,
+     * докуда дошли: после 404 продолжать нечего, после обрыва связи — есть что.
+     */
+    private data class DownloadAttemptOutcome(
+        val completed: Boolean,
+        val canResume: Boolean,
+        val reason: String,
     )
 
     fun hasReadyDownloadedUpdate(context: Context): Boolean {
@@ -505,6 +521,20 @@ object AppUpdateManager {
         downloadManager.query(query)?.use { cursor ->
             if (!cursor.moveToFirst()) return
             val status = cursor.getIntSafe(DownloadManager.COLUMN_STATUS)
+            if (status == DownloadManager.STATUS_FAILED) {
+                // DownloadManager сдался. Раньше на этом всё и заканчивалось: кнопка
+                // молчала, состояние оставалось с чужим downloadId, и следующая проверка
+                // считала загрузку живой. Дальше качаем сами — с докачкой и повторами.
+                val reason = cursor.getIntSafe(DownloadManager.COLUMN_REASON)
+                val partialPath = clientData.getDownloadedApkPath()
+                enqueueRepairForInvalidApk(
+                    context = appContext,
+                    clientData = clientData,
+                    path = partialPath,
+                    reason = "DownloadManager не смог скачать обновление (причина $reason).",
+                )
+                return
+            }
             if (status != DownloadManager.STATUS_SUCCESSFUL) return
             val localUri = cursor.getStringSafe(DownloadManager.COLUMN_LOCAL_URI).orEmpty()
             val existingPath = clientData.getDownloadedApkPath()
@@ -717,6 +747,69 @@ object AppUpdateManager {
             .setContentIntent(openAppIntent)
             .build()
         NotificationManagerCompat.from(context).notify(NOTIFICATION_READY_ID, notification)
+    }
+
+    /**
+     * Возвращает человека в приложение сразу после того, как оно обновилось само.
+     *
+     * Своя установка убивает процесс, поэтому обычный «продолжим после commit» тут не
+     * работает: результат приходит уже в новый процесс, в фон. Пробуем поднять экран
+     * напрямую — на старых Android это просто срабатывает, — и одновременно вешаем
+     * уведомление «Открыть». Начиная с Android 10 запуск экрана из фона запрещён и
+     * запрещён молча: система не бросает исключение, окно просто не появляется. Поэтому
+     * уведомление не запасной вариант «на всякий случай», а единственный надёжный путь
+     * на новых версиях; [cancelUpdatedNotification] снимает его, если экран всё-таки
+     * открылся, и лишнего человек не увидит.
+     */
+    fun onPackageReplaced(context: Context) {
+        val appContext = context.applicationContext
+        val version = getInstalledVersion(appContext)
+        NotificationManagerCompat.from(appContext).cancel(NOTIFICATION_READY_ID)
+        NotificationManagerCompat.from(appContext).cancel(NOTIFICATION_AVAILABLE_ID)
+
+        showUpdatedNotification(appContext, version)
+
+        val launchIntent = Intent(appContext, MainActivity::class.java).apply {
+            addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP
+            )
+            putExtra(EXTRA_LAUNCHED_AFTER_UPDATE, true)
+        }
+        // `startActivity` без исключения ещё не значит, что экран открылся: замерено на
+        // Pixel 4a, система пишет своё «Abort background activity starts» и возвращает
+        // управление как ни в чём не бывало. Поэтому здесь не отчитываемся об успехе —
+        // об успехе отчитается сама MainActivity, сняв уведомление.
+        runCatching { appContext.startActivity(launchIntent) }
+            .onFailure { error ->
+                LogManager.log("Nova обновлена до $version: запрос на открытие экрана отклонён: ${error.message}")
+            }
+        LogManager.log(
+            "Nova обновлена до $version. Просим систему открыть экран; уведомление «Открыть» оставлено — " +
+                "с Android 10 запуск экрана из фона может быть отклонён молча."
+        )
+    }
+
+    private fun showUpdatedNotification(context: Context, version: String) {
+        if (!ensureUpdatedChannel(context) || !canNotify(context)) return
+        val openAppIntent = buildOpenAppPendingIntent(context, 5008)
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID_UPDATED)
+            .setSmallIcon(R.drawable.ic_qs_nova)
+            .setContentTitle("Nova обновлена до v$version")
+            .setContentText("Нажми, чтобы открыть приложение")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setAutoCancel(true)
+            .setContentIntent(openAppIntent)
+            .setFullScreenIntent(openAppIntent, true)
+            .build()
+        NotificationManagerCompat.from(context).notify(NOTIFICATION_UPDATED_ID, notification)
+    }
+
+    /** Снимает уведомление «Nova обновлена», когда экран уже открыт. */
+    fun cancelUpdatedNotification(context: Context) {
+        NotificationManagerCompat.from(context.applicationContext).cancel(NOTIFICATION_UPDATED_ID)
     }
 
     fun buildForegroundVpnNotification(
@@ -1082,6 +1175,26 @@ object AppUpdateManager {
         return true
     }
 
+    /**
+     * Отдельный канал для «Nova обновлена» — с высокой важностью.
+     *
+     * Важность канала задаётся один раз при создании: понизить её человек может, а
+     * поднять программно уже нельзя. Канал обновлений живёт с обычной важностью и
+     * не всплывает, поэтому уведомление, которое должно вернуть человека в
+     * приложение, идёт своим каналом.
+     */
+    private fun ensureUpdatedChannel(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID_UPDATED,
+                "Nova обновлена",
+                NotificationManager.IMPORTANCE_HIGH,
+            )
+            context.getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
+        }
+        return true
+    }
+
     private fun canNotify(context: Context): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
@@ -1149,6 +1262,10 @@ object AppUpdateManager {
             return null
         }
         if (!isNewerVersion(version, getInstalledVersion(context))) {
+            // Молча исчезнувшее «готовое обновление» выглядит как потерянный файл.
+            LogManager.log(
+                "Скачанный APK $version не новее установленного ${getInstalledVersion(context)}. Убираем его."
+            )
             clientData.clearDownloadedUpdateState()
             cleanupDownloadedApkFiles(context, keepPath = null)
             NotificationManagerCompat.from(context).cancel(NOTIFICATION_READY_ID)
@@ -1511,6 +1628,20 @@ object AppUpdateManager {
             LogManager.log("$reason Восстановление не запущено: нет актуальных metadata обновления.")
             return false
         }
+        // Восстанавливать имеет смысл только то, что новее установленного.
+        //
+        // Проверено на устройстве 1.27: в ленте обновлений оставалась версия 1.26,
+        // и любой не прошедший проверку файл запускал «восстановление» — семьдесят
+        // шесть мегабайт трафика ради APK, который следующий же запуск выбрасывал
+        // как устаревший. Само восстановление при этом отчитывалось об успехе.
+        val installedVersion = getInstalledVersion(context)
+        if (!isNewerVersion(metadata.version, installedVersion)) {
+            LogManager.log(
+                "$reason Восстановление ${metadata.version} не запускаем: " +
+                    "установлена $installedVersion, качать нечего."
+            )
+            return false
+        }
         if (clientData.isUpdateRepairInProgress() && clientData.getUpdateRepairVersion() == metadata.version) {
             LogManager.log("$reason Восстановление ${metadata.version} уже выполняется.")
             return true
@@ -1553,6 +1684,9 @@ object AppUpdateManager {
                         .setRequiredNetworkType(NetworkType.CONNECTED)
                         .build()
                 )
+                // Повтор через полминуты, дальше с удвоением: сеть, из-за которой
+                // оборвалась загрузка, редко возвращается в ту же секунду.
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30L, TimeUnit.SECONDS)
                 .setInputData(
                     workDataOf(
                         EXTRA_VERSION to metadata.version,
@@ -1828,6 +1962,19 @@ object AppUpdateManager {
         return true
     }
 
+    /**
+     * Качает APK, доводя дело до конца через обрывы связи.
+     *
+     * Одна попытка — это один HTTP-поток, и он рвётся: мобильная сеть, засыпающий
+     * телефон, поднявшийся поверх загрузки VPN. Раньше первый же обрыв возвращал
+     * «не удалось», хотя на диске лежало почти всё, — человек видел тупик и жал
+     * «обновить» заново с нуля. Теперь каждая следующая попытка продолжает с того
+     * места, куда дошла предыдущая, и только исчерпав их все мы признаём неудачу.
+     *
+     * Отдельно проверяем, что докачали до конца: сервер, закрывший соединение
+     * раньше времени, выглядит как успех — поток просто кончился, — и обрезанный
+     * APK доходил до проверки подписи, где его отвергали и качали целиком заново.
+     */
     private fun downloadRepairPayload(
         context: Context,
         metadata: ApkUpdateMetadata,
@@ -1835,6 +1982,51 @@ object AppUpdateManager {
         totalBytesHint: Long,
         resumeOffset: Long,
     ): Boolean {
+        var offset = resumeOffset
+        for (attempt in 1..DOWNLOAD_ATTEMPTS) {
+            val outcome = downloadRepairPayloadOnce(
+                context = context,
+                metadata = metadata,
+                targetFile = targetFile,
+                totalBytesHint = totalBytesHint,
+                resumeOffset = offset,
+            )
+            if (outcome.completed) return true
+            if (attempt == DOWNLOAD_ATTEMPTS) {
+                LogManager.log(
+                    "Загрузка ${metadata.version} не удалась за $DOWNLOAD_ATTEMPTS попыток: ${outcome.reason}"
+                )
+                return false
+            }
+
+            val bytesOnDisk = targetFile.takeIf { it.exists() }?.length() ?: 0L
+            // Продолжать имеет смысл, только если сервер отдаёт куски и предыдущая
+            // попытка что-то дописала. Иначе цикл крутился бы вхолостую.
+            offset = if (outcome.canResume && bytesOnDisk > 0L) bytesOnDisk else 0L
+            LogManager.log(
+                "Загрузка ${metadata.version}, попытка $attempt: ${outcome.reason}. " +
+                    if (offset > 0L) "Продолжим с ${formatBytes(offset)}." else "Начнём заново."
+            )
+            ClientData(context).setUpdateRepairState(
+                active = true,
+                version = metadata.version,
+                downloadedBytes = offset,
+                totalBytes = totalBytesHint,
+                status = "Связь оборвалась. Повторяем загрузку ${metadata.version}...",
+            )
+            broadcastUpdateStateChanged(context)
+            runCatching { Thread.sleep(DOWNLOAD_RETRY_DELAY_MS * attempt) }
+        }
+        return false
+    }
+
+    private fun downloadRepairPayloadOnce(
+        context: Context,
+        metadata: ApkUpdateMetadata,
+        targetFile: File,
+        totalBytesHint: Long,
+        resumeOffset: Long,
+    ): DownloadAttemptOutcome {
         val clientData = ClientData(context)
         var connection: HttpURLConnection? = null
         return try {
@@ -1848,19 +2040,24 @@ object AppUpdateManager {
                 connection.setRequestProperty("Range", "bytes=$resumeOffset-")
             }
             val responseCode = connection.responseCode
-            if (resumeOffset > 0L && responseCode != HttpURLConnection.HTTP_PARTIAL) {
-                LogManager.log(
-                    "Сервер не подтвердил Range-resume для ${metadata.version} (HTTP $responseCode)."
+            if (responseCode !in 200..299) {
+                return DownloadAttemptOutcome(
+                    completed = false,
+                    canResume = responseCode !in 400..499,
+                    reason = "сервер ответил HTTP $responseCode",
                 )
-                return false
             }
-            if (resumeOffset == 0L && responseCode !in 200..299) {
-                LogManager.log("Не удалось загрузить APK ${metadata.version}: HTTP $responseCode")
-                return false
+            // Ответ 200 на запрос с Range означает, что сервер отдаёт файл целиком:
+            // дописывать в этом случае нельзя — получится склейка из двух начал.
+            val resuming = resumeOffset > 0L && responseCode == HttpURLConnection.HTTP_PARTIAL
+            if (resumeOffset > 0L && !resuming) {
+                LogManager.log(
+                    "Сервер не подтвердил Range для ${metadata.version} (HTTP $responseCode). Качаем целиком."
+                )
             }
 
             val totalBytes = when {
-                responseCode == HttpURLConnection.HTTP_PARTIAL -> {
+                resuming -> {
                     val contentRange = connection.getHeaderField("Content-Range").orEmpty()
                     contentRange.substringAfter('/').toLongOrNull()
                         ?: totalBytesHint
@@ -1868,14 +2065,14 @@ object AppUpdateManager {
                 else -> connection.contentLengthLong.takeIf { it > 0L } ?: totalBytesHint
             }
 
-            if (resumeOffset == 0L && targetFile.exists()) {
+            if (!resuming && targetFile.exists()) {
                 targetFile.delete()
             }
             targetFile.parentFile?.mkdirs()
             connection.inputStream.buffered().use { input ->
-                FileOutputStream(targetFile, resumeOffset > 0L).buffered().use { output ->
+                FileOutputStream(targetFile, resuming).buffered().use { output ->
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                    var downloadedBytes = if (resumeOffset > 0L) resumeOffset else 0L
+                    var downloadedBytes = if (resuming) resumeOffset else 0L
                     var lastBroadcastAtMs = 0L
                     var lastBroadcastBytes = downloadedBytes
                     while (true) {
@@ -1906,6 +2103,14 @@ object AppUpdateManager {
                         }
                     }
                     output.flush()
+                    if (totalBytes > 0L && downloadedBytes < totalBytes) {
+                        // Поток кончился раньше файла — это обрыв, а не успех.
+                        return DownloadAttemptOutcome(
+                            completed = false,
+                            canResume = true,
+                            reason = "поток оборвался на ${formatBytes(downloadedBytes)} из ${formatBytes(totalBytes)}",
+                        )
+                    }
                     clientData.setUpdateRepairState(
                         active = true,
                         version = metadata.version,
@@ -1920,10 +2125,21 @@ object AppUpdateManager {
                     broadcastUpdateStateChanged(context)
                 }
             }
-            targetFile.exists() && targetFile.length() > 0L
+            if (targetFile.exists() && targetFile.length() > 0L) {
+                DownloadAttemptOutcome(completed = true, canResume = true, reason = "")
+            } else {
+                DownloadAttemptOutcome(
+                    completed = false,
+                    canResume = false,
+                    reason = "файл не появился на диске",
+                )
+            }
         } catch (e: Exception) {
-            LogManager.log("Не удалось восстановить APK ${metadata.version}: ${e.message}")
-            false
+            DownloadAttemptOutcome(
+                completed = false,
+                canResume = true,
+                reason = e.message ?: e.javaClass.simpleName,
+            )
         } finally {
             connection?.disconnect()
         }

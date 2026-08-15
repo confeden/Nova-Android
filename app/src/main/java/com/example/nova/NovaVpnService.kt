@@ -49,6 +49,28 @@ class NovaVpnService : OperaNativeVpnService() {
     private val NOTIFICATION_ID = 1
     @Volatile
     private var masqueAuthFailureObserved = false
+
+    /**
+     * Свой адрес принял CONNECT-IP, но не ответил — ключ MASQUE перестали обслуживать.
+     *
+     * Отличается от [masqueAuthFailureObserved] лечением, а не симптомом: аккаунт
+     * здесь ни при чём, устарел только ключ. Замер 2026-08-12: свежевыпущенный ключ
+     * отвечает «200 OK» на четырёх портах, а выпущенный двадцатью минутами раньше —
+     * ни на одном, причём с того же адреса и в ту же минуту. Поэтому сбрасываем
+     * только ключ, а запасную личность (токен и device id) бережём: перерегистрация
+     * на этой сети возможна лишь через уже поднятый туннель.
+     */
+    @Volatile
+    private var masqueKeyStaleObserved = false
+
+    /**
+     * Сеть режет data-plane MASQUE: CONNECT-IP открывается, обратно не приходит ничего.
+     *
+     * Отдельный признак нужен затем, чтобы не стирать исправный ключ. Ключ, на который
+     * сервер открыл CONNECT-IP, по определению принят — протухший даёт громкий
+     * `tls: access denied` до всякой передачи данных.
+     */
+    private var masqueDataPlaneBlockedObserved = false
     @Volatile
     private var masqueLastAuthError: String? = null
     private val cleanupInProgress = AtomicBoolean(false)
@@ -95,6 +117,20 @@ class NovaVpnService : OperaNativeVpnService() {
      */
     @Volatile
     private var currentTransportNotice = ""
+
+    /** Пояснение относится к причине остановки и не стирается переходом в STOPPED. */
+    @Volatile
+    private var preserveTransportNoticeOnStop = false
+
+    /**
+     * Поколение цикла, который поднял WARP только ради выпуска ключа MASQUE.
+     *
+     * Ноль означает «обычный цикл». По этой метке [scheduleWarpIdentityBackfill] знает,
+     * что после получения ключа надо вернуться на выбранный протокол, а не оставаться
+     * на ступени регистрации.
+     */
+    @Volatile
+    private var masqueRegistrationBootstrapGenerationId = 0
     @Volatile
     private var manualWarpProfileSwitchTargetKey: String? = null
     @Volatile
@@ -504,6 +540,50 @@ class NovaVpnService : OperaNativeVpnService() {
         const val ACTION_REFRESH_DNS_POLICY = "REFRESH_DNS_POLICY"
         const val EXTRA_EXIT_COUNTRY = "EXIT_COUNTRY"
         const val ACTION_RESET_WARP_REGISTRATION = "RESET_WARP_REGISTRATION"
+
+        /**
+         * Отладочная выгрузка профиля MASQUE во внешнюю папку приложения.
+         *
+         * Обрабатывается именно службой: профиль пишет процесс `:vpn`, а
+         * `SharedPreferences` межпроцессными не бывают — из главного процесса
+         * выгрузка получалась пустой. Приватный ключ и токен заменяются длиной.
+         */
+        const val ACTION_DUMP_MASQUE_CONFIG = "DUMP_MASQUE_CONFIG"
+
+        /**
+         * Выгрузить профиль MASQUE вместе с приватным ключом.
+         *
+         * По умолчанию ключ и токен маскируются: выгрузка ложится в общий каталог, откуда
+         * её читает любой, у кого есть доступ к устройству. Снимать маскировку нужно ровно
+         * для одного замера — проверить ключ приложения сторонним инструментом
+         * (`masqueprobe -app-config`), потому что иначе «ключ приложения не обслуживается»
+         * и «набор в приложении сломан» неразличимы. Аккаунт при этом анонимный и
+         * одноразовый, но файл после замера всё равно стоит удалить.
+         */
+        const val EXTRA_DUMP_MASQUE_SECRETS = "include_secrets"
+
+        /**
+         * Выпустить два ключа MASQUE подряд из процесса службы и сохранить оба.
+         *
+         * Замер под один вопрос: ключ, выпущенный приложением, не обслуживается никогда, а
+         * выпущенный из shell на том же аккаунте — обслуживается. Все различия в коде,
+         * заголовках, транспорте, профиле uTLS и egress уже исключены попарно. Осталась
+         * версия «дело в окружении самого вызова»: если второй ключ подряд окажется живым,
+         * значит первый вызов чем-то себя портит.
+         *
+         * Сервер хранит только последний ключ, поэтому живым может быть только второй —
+         * первый сохраняется как контроль, чтобы это было видно, а не предполагалось.
+         */
+        const val ACTION_DOUBLE_ENROLL_MASQUE = "DOUBLE_ENROLL_MASQUE"
+
+        /**
+         * Отладочная проба MASQUE изнутри процесса `:vpn`.
+         *
+         * Тот же путь, что и у боевой попытки, но без установки туннеля. Отвечает на
+         * вопрос, который иначе не разделить: отказывает служба Cloudflare или мешает
+         * наш собственный процесс — защита сокета, поднятый TUN, идущий цикл.
+         */
+        const val ACTION_PROBE_MASQUE = "PROBE_MASQUE"
         const val ACTION_START_WARP_CONFIG_DISCOVERY = "START_WARP_CONFIG_DISCOVERY"
         const val ACTION_START_WARP_NETWORK_ADAPTATION = "START_WARP_NETWORK_ADAPTATION"
         const val ACTION_START_WARP_QUALITY_DIAGNOSTICS = "START_WARP_QUALITY_DIAGNOSTICS"
@@ -631,6 +711,51 @@ class NovaVpnService : OperaNativeVpnService() {
          * выбранный протокол не подключился, и об этом надо сказать сразу.
          */
         private const val MASQUE_EXPLICIT_CYCLE_LIMIT = 1
+
+        /**
+         * До какого возраста ключ MASQUE считается свежим.
+         *
+         * Замер 2026-08-12: ключ, выпущенный только что, отвечает «200 OK» сразу на
+         * нескольких портах, а выпущенный двадцатью минутами раньше молчит на всех семи.
+         * Пять минут — заведомо внутри рабочего окна, поэтому молчание на таком ключе
+         * объясняется чем угодно, кроме его возраста, и стирать его нельзя: перевыпуск
+         * возможен только через уже поднятый туннель.
+         */
+        private const val MASQUE_KEY_FRESH_WINDOW_MS = 5L * 60L * 1000L
+
+        /**
+         * Причина отказа, при которой адрес MASQUE попадает в cooldown.
+         *
+         * Отдельная от `handshake_timeout` и `no_traffic` намеренно: те описывают путь и
+         * могут случиться на исправном узле, а этот — прямой ответ узла «ключ не
+         * обслуживаю».
+         */
+        private const val MASQUE_ACCESS_DENIED_REASON = "masque_access_denied"
+
+        /**
+         * Сколько адрес MASQUE отдыхает после отказа в доступе.
+         *
+         * Отказ относится к паре (ключ, узел), а ключ живёт около двадцати минут, поэтому
+         * дольше держать нечего — да и снимается cooldown раньше, при выпуске нового ключа.
+         */
+        private const val MASQUE_ACCESS_DENIED_COOLDOWN_MS = 20L * 60L * 1000L
+
+        /**
+         * Запасные имена для рукопожатия MASQUE, когда маскировка не выбрана.
+         *
+         * Годится любое имя, кроме собственных имён Cloudflare: проверено на четырёх
+         * (`4pda.to`, `www.google.com`, `static.twitchcdn.net`, `vk.com`) — данные пошли
+         * во всех четырёх случаях. Набор широкий и обыденный: цель не спрятаться
+         * навсегда, а не называть вслух то единственное имя, по которому режут.
+         */
+        private val MASQUE_NEUTRAL_SNI_POOL = listOf(
+            "www.google.com",
+            "static.twitchcdn.net",
+            "4pda.to",
+            "vk.com",
+            "cdn.jsdelivr.net",
+            "www.microsoft.com",
+        )
 
         /**
          * Сессия короче этого не засчитывается за успех.
@@ -902,6 +1027,24 @@ class NovaVpnService : OperaNativeVpnService() {
 
         if (intent?.action == ACTION_BACKGROUND_HEARTBEAT) {
             return handleBackgroundHeartbeat(clientData, startId)
+        }
+
+        if (intent?.action == ACTION_PROBE_MASQUE) {
+            probeMasqueFromServiceProcess(clientData)
+            return START_NOT_STICKY
+        }
+
+        if (intent?.action == ACTION_DOUBLE_ENROLL_MASQUE) {
+            doubleEnrollMasqueForDiagnostics(clientData)
+            return START_NOT_STICKY
+        }
+
+        if (intent?.action == ACTION_DUMP_MASQUE_CONFIG) {
+            dumpMasqueConfigForDiagnostics(
+                clientData = clientData,
+                includeSecrets = intent.getBooleanExtra(EXTRA_DUMP_MASQUE_SECRETS, false),
+            )
+            return START_NOT_STICKY
         }
 
         if (intent?.action == ACTION_SWITCH_VLESS_PROFILE) {
@@ -1258,8 +1401,13 @@ class NovaVpnService : OperaNativeVpnService() {
             lastTransportFailureSignature = null
             clearActiveWarpQualityTarget()
             currentTransportLabel = ""
-            currentTransportNotice = ""
-            clientData.setLastTransportNotice("")
+            if (preserveTransportNoticeOnStop) {
+                // Причину остановки оставляем: её и надо прочитать после остановки.
+                preserveTransportNoticeOnStop = false
+            } else {
+                currentTransportNotice = ""
+                clientData.setLastTransportNotice("")
+            }
         }
         currentState = state
         clientData.saveServiceState(
@@ -1573,11 +1721,14 @@ class NovaVpnService : OperaNativeVpnService() {
         total: Int,
         backendLabel: String = currentBackendLabel,
     ) {
+        // Знаменатель — ровно то, что назвал вызывающий цикл.
+        //
+        // Кэш здесь работал храповиком: попавшие в него полсотни встроенных профилей
+        // уже не опускались до четырёх импортированных ни в одной фазе, а лежал он в
+        // SharedPreferences, которые процесс UI никогда не перечитывает.
         val normalizedTotal = total.coerceIn(1, 240)
-        val cachedTotal = clientData.getCachedConnectAttemptTotal(backendLabel, currentTransportLabel)
-        currentAttemptTotal = maxOf(normalizedTotal, cachedTotal)
+        currentAttemptTotal = normalizedTotal
         currentAttemptOrdinal = ordinal.coerceIn(0, currentAttemptTotal)
-        clientData.rememberConnectAttemptTotal(currentAttemptTotal, backendLabel, currentTransportLabel)
         setCurrentBackend(backendLabel)
         broadcastState(STATE_CONNECTING)
     }
@@ -1639,8 +1790,22 @@ class NovaVpnService : OperaNativeVpnService() {
      * чтобы оно попало в файл: интерфейс живёт в другом процессе и читает
      * именно файл.
      */
-    private fun publishTransportNotice(clientData: ClientData, text: String) {
+    /**
+     * @param keepOnStop пояснение переживает переход в STOPPED.
+     *
+     * Обычное пояснение относится к идущей сессии и при остановке теряет смысл,
+     * поэтому ветка STOPPED его чистит. Но у причины самой остановки («среди
+     * импортированных профилей нет протокола AWG») читатель появляется именно после
+     * остановки: `broadcastState(STATE_STOPPED)` шёл следующей же строкой и стирал
+     * текст раньше, чем экран успевал его прочитать.
+     */
+    private fun publishTransportNotice(
+        clientData: ClientData,
+        text: String,
+        keepOnStop: Boolean = false,
+    ) {
         val normalized = text.trim()
+        preserveTransportNoticeOnStop = keepOnStop && normalized.isNotEmpty()
         if (currentTransportNotice == normalized) return
         currentTransportNotice = normalized
         clientData.setLastTransportNotice(normalized)
@@ -3123,8 +3288,17 @@ class NovaVpnService : OperaNativeVpnService() {
         setCurrentBackend(BACKEND_WARP)
         broadcastState(STATE_CONNECTING)
 
-        if (shouldUseWarpTransport(regionPreference)) {
-            val config = clientData.getConfig() ?: return false
+        if (shouldUseWarpTransport(regionPreference, clientData)) {
+            val config = clientData.getConfig()
+            if (config == null) {
+                // Молчаливый `return false` здесь означал «служба ничего не сделала»,
+                // и снаружи это выглядело как «кнопка не работает».
+                LogManager.log(
+                    "REAPPLY: WARP-конфигурация не зарегистрирована, поднимать сессию нечем. " +
+                        "Запустите подключение с главного экрана."
+                )
+                return false
+            }
             clientData.saveRestartSession(
                 RestartSession(
                     kind = "warp",
@@ -3160,7 +3334,7 @@ class NovaVpnService : OperaNativeVpnService() {
             return true
         }
 
-        if (shouldAllowOperaTransport(regionPreference)) {
+        if (shouldAllowOperaTransport(regionPreference, clientData)) {
             clientData.saveRestartSession(
                 RestartSession(
                     kind = "opera",
@@ -3682,7 +3856,6 @@ class NovaVpnService : OperaNativeVpnService() {
                 trafficMaskHosts = effectiveDiscoveryTrafficMaskHosts,
                 connectGenerationId = discoveryConnectGeneration,
                 externalStopRequested = { warpConfigDiscoveryStopRequested.get() },
-                useCachedAttemptTotal = false,
                 deferMasqueWithoutIdentity = adaptToNetwork,
                 qualitySamplingWindowMs = if (qualityDiagnostics) qualityDiagnosticHoldMs else 20_000L,
                 onAttemptStart = { attempt, ordinal, total ->
@@ -3828,8 +4001,7 @@ class NovaVpnService : OperaNativeVpnService() {
                         trafficMaskHosts = effectiveDiscoveryTrafficMaskHosts,
                         connectGenerationId = discoveryConnectGeneration,
                         externalStopRequested = { warpConfigDiscoveryStopRequested.get() },
-                        useCachedAttemptTotal = false,
-                        deferMasqueWithoutIdentity = true,
+                                deferMasqueWithoutIdentity = true,
                         onAttemptStart = { attempt, ordinal, total ->
                             currentAttemptOrdinal = ordinal
                             currentAttemptTotal = total
@@ -3949,8 +4121,7 @@ class NovaVpnService : OperaNativeVpnService() {
                         trafficMaskHosts = emptyList(),
                         connectGenerationId = discoveryConnectGeneration,
                         externalStopRequested = { warpConfigDiscoveryStopRequested.get() },
-                        useCachedAttemptTotal = false,
-                        onAttemptStart = { attempt, ordinal, total ->
+                                onAttemptStart = { attempt, ordinal, total ->
                             currentAttemptOrdinal = ordinal
                             currentAttemptTotal = total
                             broadcastWarpConfigDiscovery(
@@ -4051,8 +4222,7 @@ class NovaVpnService : OperaNativeVpnService() {
                         trafficMaskHosts = emptyList(),
                         connectGenerationId = discoveryConnectGeneration,
                         externalStopRequested = { warpConfigDiscoveryStopRequested.get() },
-                        useCachedAttemptTotal = false,
-                        deferMasqueWithoutIdentity = true,
+                                deferMasqueWithoutIdentity = true,
                         onAttemptStart = { attempt, ordinal, total ->
                             currentAttemptOrdinal = ordinal
                             currentAttemptTotal = total
@@ -4156,8 +4326,8 @@ class NovaVpnService : OperaNativeVpnService() {
         val regionPreference = normalizeRegionPreference(
             regionPreferenceOverride ?: clientData.getExitRegionPreference()
         )
-        val warpAllowed = shouldUseWarpTransport(regionPreference)
-        val operaAllowed = shouldAllowOperaTransport(regionPreference)
+        val warpAllowed = shouldUseWarpTransport(regionPreference, clientData)
+        val operaAllowed = shouldAllowOperaTransport(regionPreference, clientData)
         try {
             if (!ensureFreshTransportState(connectGenerationId, "smart-connect")) return
             if (!warpAllowed) {
@@ -4244,7 +4414,14 @@ class NovaVpnService : OperaNativeVpnService() {
                 return
             }
 
-            LogManager.log("Smart start не смог получить рабочую конфигурацию.")
+            LogManager.log(
+                if (ownProfileSourceChosen(clientData)) {
+                    "Smart start не смог получить рабочую конфигурацию. Выбраны собственные " +
+                        "профили — встроенную Opera за них не подставляем."
+                } else {
+                    "Smart start не смог получить рабочую конфигурацию."
+                }
+            )
             isRunning = false
             setCurrentBackend(BACKEND_WARP)
             broadcastState(STATE_STOPPED)
@@ -4517,11 +4694,18 @@ class NovaVpnService : OperaNativeVpnService() {
             broadcastState(STATE_CONNECTING)
             installSocketProtector()
             installTelegramWsSignatureSecret()
-            val warpAllowed = shouldUseWarpTransport(regionPreference)
             val importedConfigSourceActive = clientData.isImportedConfigSourceActive()
-            val operaAllowed = shouldAllowOperaTransport(regionPreference)
+            val vlessExplicitlyChosen = clientData.isVlessExplicitlyChosen()
+            // Источник профилей старше региона. Регион EU/US мог остаться от прошлого
+            // выбора, а экран настроек в режиме импортированных показывает не регионы,
+            // а протоколы — сменить его пользователю нечем. Пока `warpAllowed` считался
+            // по одному региону, включённый режим «только импортированные» отменялся
+            // целиком: ветки 4725 и 4985 уводили цикл в Opera EU, и ни одна
+            // импортированная попытка не выполнялась.
+            val warpAllowed = shouldUseWarpTransport(regionPreference, clientData)
+            val operaAllowed = shouldAllowOperaTransport(regionPreference, clientData)
             val preferWarpOnlyThisCycle = preferWarpOnlySticky || importedConfigSourceActive
-            val allowOperaFallbackThisCycle = if (importedConfigSourceActive) {
+            val allowOperaFallbackThisCycle = if (importedConfigSourceActive || vlessExplicitlyChosen) {
                 false
             } else {
                 allowOperaFallbackOverride ?: (operaAllowed && !preferWarpOnlyThisCycle)
@@ -4557,6 +4741,7 @@ class NovaVpnService : OperaNativeVpnService() {
                     publishTransportNotice(
                         clientData,
                         "Ни один профиль VLESS не ответил. Обновите подписку.",
+                        keepOnStop = true,
                     )
                     isRunning = false
                     broadcastState(STATE_STOPPED)
@@ -4663,8 +4848,17 @@ class NovaVpnService : OperaNativeVpnService() {
             }
             // Выбор «MASQUE» в списке регионов — это явное указание начать именно с
             // него, а не догадка по накопленной статистике.
-            val masqueChosenExplicitly =
+            //
+            // В режиме импортированных конфигураций список регионов не показывается
+            // вовсе (там выбирают протокол), поэтому оставшийся с прошлого раза
+            // «masque» выбором уже не является. Пока он им считался, режим отменялся
+            // целиком: фаза MASQUE шла первой, а её провал останавливал службу —
+            // до построения импортированного shortlist дело не доходило.
+            val masqueChosenExplicitly = if (importedConfigSourceActive) {
+                clientData.resolveEffectiveImportedProtocol().equals("masque", ignoreCase = true)
+            } else {
                 clientData.getExitRegionPreference().trim().lowercase(Locale.US) == "masque"
+            }
             val masqueStartDecision = MasqueStartPolicy.decide(
                 MasqueStartPolicy.Inputs(
                     masqueChosenExplicitly = masqueChosenExplicitly,
@@ -4744,23 +4938,17 @@ class NovaVpnService : OperaNativeVpnService() {
                             "Сначала пробуем их, MASQUE оставляем fallback этой же сессии."
                     )
                 }
-                // В «Авто» MASQUE берём только с лицензией WARP+.
+                // Лицензия WARP+ для MASQUE не нужна — это замер, а не предположение.
                 //
-                // Без неё аккаунт бесплатный, а бесплатные к службе MASQUE не допускают:
-                // соединение принимается, туннель не открывается. Замер на тестовом устройстве —
-                // двадцать секунд на четыре кандидата, и все впустую, после чего перебор
-                // только начинает встроенные профили. Снаружи это и выглядело как
-                // «счётчик показал 1/4, потом 1/50». Явный выбор MASQUE это правило не
-                // трогает: попросили — пробуем, чем бы ни кончилось.
-                val masqueLicensedForAuto =
-                    masqueChosenExplicitly || clientData.getWarpPlusLicense().isNotBlank()
-                if (!masqueLicensedForAuto && !diagnosticsMode) {
-                    LogManager.log(
-                        "MASQUE в режиме «Авто» пропускаем: лицензия WARP+ не задана, а на " +
-                            "бесплатном аккаунте Cloudflare туннель MASQUE не открывает. " +
-                            "Сразу идём по профилям WARP/AWG."
-                    )
-                }
+                // Прежний вывод «бесплатные к службе MASQUE не допускают» держался на
+                // наблюдении «соединение принимается, туннель не открывается» и стоил
+                // протоколу всей работоспособности: в «Авто» он отключался, а при явном
+                // выборе не мог получить identity. Проба 2026-08-12 с этого же телефона
+                // (nova-core/cmd/masqueprobe) свежий бесплатный аккаунт довела до
+                // «200 OK» на запрос туннеля. Настоящей причиной был порт: 443, с
+                // которого начинался перебор, на этой сети не отвечает вовсе, а 500,
+                // 1701 и 8443 отвечают сразу.
+                val masqueLicensedForAuto = true
                 val masqueIdentity = if (
                     isOperaWarpBootstrapCycle ||
                     deferMasquePreparationForFastStart ||
@@ -4836,29 +5024,32 @@ class NovaVpnService : OperaNativeVpnService() {
                             "MASQUE оставляем fallback внутри этой же сессии."
                     )
                 } else if (masqueChosenExplicitly && masqueIdentity == null) {
-                    // Пользователь выбрал MASQUE явно, но идентификатор получить не
-                    // удалось: без регистрации в Cloudflare фаза MASQUE не стартует.
-                    // Уходить на WARP нельзя — снаружи это выглядит как успешное
-                    // подключение по выбранному протоколу, хотя работает другой.
-                    LogManager.log(
-                        "Выбран MASQUE, но идентификатор устройства для него не получен: " +
-                            "регистрация в Cloudflare не прошла. Другие протоколы за него " +
-                            "не подставляем — останавливаем цикл."
-                    )
-                    // Обещание: при следующем подключении, каким бы протоколом оно ни
-                    // шло, ключ добудем фоном через туннель.
+                    // Ключ MASQUE выдаёт только `api.cloudflareclient.com`, а его режут
+                    // по SNI — снаружи туннеля регистрация не проходит. Внутри проходит:
+                    // имя узла спрятано за шифрованием.
+                    //
+                    // Раньше здесь стоял `stopSelf()`, и получался замкнутый круг: ключ
+                    // добывается поверх поднятого туннеля (WarpIdentityBackfill), а цикл
+                    // с выбранным MASQUE останавливался до того, как туннель появится.
+                    // Снаружи это и выглядело как «нажал — ничего не произошло».
+                    //
+                    // Поэтому поднимаем WARP как временную ступень регистрации и говорим
+                    // об этом вслух. Подменой выбранного протокола это не является: как
+                    // только ключ получен, [scheduleWarpIdentityBackfill] возвращает цикл
+                    // в MASQUE сам.
+                    masqueRegistrationBootstrapGenerationId = connectGenerationId
                     clientData.setMasqueIdentityWanted(true)
+                    LogManager.log(
+                        "Выбран MASQUE, но ключа устройства ещё нет, а регистрация вне " +
+                            "туннеля не прошла. Поднимаем WARP как ступень регистрации: " +
+                            "внутри туннеля api.cloudflareclient.com доступен. Как только " +
+                            "ключ будет получен, вернёмся на MASQUE сами."
+                    )
                     publishTransportNotice(
                         clientData,
-                        "MASQUE недоступен: ключ устройства не получен. Подключитесь один " +
-                            "раз по «Авто» — Nova выпустит ключ через туннель, и MASQUE " +
-                            "снова заработает.",
+                        "Готовим MASQUE: выпускаем ключ устройства через временное " +
+                            "подключение. Переключимся на MASQUE автоматически.",
                     )
-                    isRunning = false
-                    setCurrentBackend(BACKEND_WARP)
-                    broadcastState(STATE_STOPPED)
-                    stopSelf()
-                    return
                 } else if (!isUserStopped && masqueIdentity != null && !skipMasqueForCooldown) {
                     // Выбранный вручную MASQUE идёт на второй и третий круг.
                     //
@@ -4874,6 +5065,15 @@ class NovaVpnService : OperaNativeVpnService() {
                         masqueCycle++
                         masqueAuthFailureObserved = false
                         masqueLastAuthError = null
+                        // Отметка «ключ устарел» тоже принадлежит одному кругу.
+                        //
+                        // Она объявлена полем службы, поэтому без сброса сюда доживал вывод
+                        // предыдущего круга и стирал ключ, к которому не имел отношения.
+                        // Соседняя отметка отказа по аккаунту сбрасывается здесь с самого
+                        // начала — эта была забыта.
+                        masqueKeyStaleObserved = false
+                        // Вывод о блокировке относится к одному прогону: сеть могла смениться.
+                        masqueDataPlaneBlockedObserved = false
                         publishTransportNotice(clientData, "")
                         masqueProgressBudget = runMasquePhase(
                             identity = masqueIdentity,
@@ -4904,15 +5104,61 @@ class NovaVpnService : OperaNativeVpnService() {
                                     "поверх устройства, которое сервер уже не признаёт, бессмысленно. " +
                                     "Новую личность заведём фоном при следующем подключении."
                             )
-                            clientData.saveMasqueConfigJson(null)
+                            discardMasqueKey(clientData)
                             clientData.clearReserveWarpIdentity()
                             clientData.setMasqueIdentityWanted(true)
                             clientData.markMasqueTransportFailure()
                             masqueAuthFailureObserved = false
                             masqueLastAuthError = null
+                            masqueKeyStaleObserved = false
                             // Ключ отвергнут — повторять круг нечем, новый выдаёт только
                             // регистрация.
                             masqueIdentityRejected = true
+                        }
+
+                        if (!isUserStopped && masqueKeyStaleObserved) {
+                            // Молчание на CONNECT-IP — приговор ключу только по возрасту.
+                            //
+                            // Замер 2026-08-12 (ROADMAP §3g) развёл две версии: ключ,
+                            // выпущенный только что, отвечает «200 OK» сразу на нескольких
+                            // портах, а выпущенный двадцатью минутами раньше молчит на всех.
+                            // Значит молчание описывает возраст ключа, а не адрес.
+                            //
+                            // Но из этого же следует обратное: только что выпущенный ключ
+                            // стирать по молчанию НЕЛЬЗЯ. Прежний обработчик стирал любой, и
+                            // это была не защита, а вечный двигатель: стёрли — перевыпустили —
+                            // сервер оставил только последний ключ — снова молчание — снова
+                            // стёрли. Перевыпуск здесь возможен лишь через уже поднятый
+                            // туннель, поэтому цена лишнего стирания высокая.
+                            val keyAgeMs = storedMasqueKeyAgeMs(clientData)
+                            val keyIsFresh = keyAgeMs != null && keyAgeMs < MASQUE_KEY_FRESH_WINDOW_MS
+                            if (masqueDataPlaneBlockedObserved) {
+                                // Возраст здесь ни при чём: в этом же прогоне сервер открыл
+                                // CONNECT-IP на двух портах, то есть ключ он принял. Стирать
+                                // его — терять выдачу и требовать enroll через туннель ради
+                                // того, что лечится не ключом.
+                                LogManager.log(
+                                    "MASQUE: ключ не трогаем — в этом прогоне сервер открывал по нему " +
+                                        "CONNECT-IP, а молчал уже data-plane."
+                                )
+                            } else if (keyIsFresh) {
+                                LogManager.log(
+                                    "MASQUE: свой адрес принял CONNECT-IP и не ответил, но ключу всего " +
+                                        "${keyAgeMs!! / 1000} с. Ключ не трогаем: свежий ключ молчанием " +
+                                        "не объясняется, а перевыпуск возможен только через поднятый туннель."
+                                )
+                            } else {
+                                LogManager.log(
+                                    "MASQUE: свой адрес принял CONNECT-IP и не ответил, возраст ключа — " +
+                                        "${keyAgeMs?.let { "${it / 1000} с" } ?: "неизвестен"}. Стираем только " +
+                                        "ключ, личность бережём: новый выпустим enroll-ом при ближайшем " +
+                                        "поднятом туннеле."
+                                )
+                                discardMasqueKey(clientData)
+                                clientData.setMasqueIdentityWanted(true)
+                                masqueIdentityRejected = true
+                            }
+                            masqueKeyStaleObserved = false
                         }
 
                         closeActiveInterface()
@@ -5035,7 +5281,7 @@ class NovaVpnService : OperaNativeVpnService() {
                 transportModes = primaryTransportModes
             )
             val importedProtocolModeActive = clientData.isImportedConfigSourceActive()
-            val forcedImportedProtocol = clientData.getImportedProtocolPreference()
+            val forcedImportedProtocol = clientData.resolveEffectiveImportedProtocol()
                 .takeIf { importedProtocolModeActive && !it.equals("auto", ignoreCase = true) }
             val primaryRankedAttempts = prioritizeConnectionAttempts(primaryConnectionAttempts, clientData)
             val builtInSeedConfigsForPrimary = if (!importedConfigSourceActive) {
@@ -5084,19 +5330,30 @@ class NovaVpnService : OperaNativeVpnService() {
                 )
                 prioritizeConnectionAttempts(fullConnectionAttempts, clientData)
             }
+            // Порядок нумерации обязан совпадать с порядком обхода.
+            //
+            // Раньше шкала строилась по `seedOrder` — прошивочному порядку встроенных
+            // профилей, — а очередь `primaryWarpAttempts` отсортирована по качеству,
+            // удержанию и пингу. Номер попытки брался как позиция её ключа в шкале,
+            // поэтому счётчик шёл вразнобой: 23/50 → 4/50 → 37/50. Экран это не
+            // сглаживал и сгладить не мог: он видит только присланные числа.
+            //
+            // Теперь первой идёт очередь, а непопавшие в неё профили дописываются
+            // следом — знаменатель остаётся прежним (весь встроенный набор), а
+            // номер по построению растёт на единицу за попытку.
             val builtInProgressGroupKeys = if (!importedConfigSourceActive) {
                 buildList {
                     val seen = linkedSetOf<String>()
-                    builtInSeedConfigsForPrimary
-                        .asSequence()
-                        .sortedBy { it.seedOrder }
-                        .map { buildWarpDiscoveryAttemptKey(it.mode, it.host, it.port) }
+                    primaryWarpAttempts
+                        .map { buildWarpDiscoveryAttemptKey(it.mode.name, it.endpointHost, it.port) }
                         .filter { it.isNotBlank() }
                         .forEach { key ->
                             if (seen.add(key)) add(key)
                         }
-                    primaryWarpAttempts
-                        .map { buildWarpDiscoveryAttemptKey(it.mode.name, it.endpointHost, it.port) }
+                    builtInSeedConfigsForPrimary
+                        .asSequence()
+                        .sortedBy { it.seedOrder }
+                        .map { buildWarpDiscoveryAttemptKey(it.mode, it.host, it.port) }
                         .filter { it.isNotBlank() }
                         .forEach { key ->
                             if (seen.add(key)) add(key)
@@ -5133,7 +5390,6 @@ class NovaVpnService : OperaNativeVpnService() {
             // уходили в кэш под ключом MASQUE. Оттуда они возвращались в следующий цикл
             // и показывались как перебор MASQUE.
             currentTransportLabel = TRANSPORT_WARP
-            clientData.rememberConnectAttemptTotal(fullWarpProgressTotalHint, BACKEND_WARP, TRANSPORT_WARP)
             setCurrentBackend(BACKEND_WARP)
             broadcastState(STATE_CONNECTING)
             LogManager.log(
@@ -5148,10 +5404,22 @@ class NovaVpnService : OperaNativeVpnService() {
                     "USER WARP: режим импортированных конфигураций ($selectedProtocol), " +
                         "но shortlist пуст. Прерываем цикл без fallback на обычный WARP."
                 )
+                // Остановка без объяснения читается как «подключение само выключилось»:
+                // на экране пара секунд «ПОДКЛЮЧЕНИЕ…» и сразу «НЕ ПОДКЛЮЧЕНО». Причина
+                // была только в журнале, куда пользователь не смотрит.
+                publishTransportNotice(
+                    clientData,
+                    if (forcedImportedProtocol != null) {
+                        "Среди импортированных профилей нет протокола $selectedProtocol. " +
+                            "Выберите другой протокол или импортируйте профили."
+                    } else {
+                        "Импортированных профилей для подключения не осталось."
+                    },
+                    keepOnStop = true,
+                )
                 isRunning = false
                 currentAttemptOrdinal = 0
                 currentAttemptTotal = 0
-                clientData.rememberConnectAttemptTotal(0, BACKEND_WARP)
                 broadcastState(STATE_STOPPED)
                 stopSelf()
                 return
@@ -5269,6 +5537,16 @@ class NovaVpnService : OperaNativeVpnService() {
                                 "Готовим MASQUE identity только сейчас, перед ранним fallback."
                         }
                     )
+                    // Отметка «попытка была» ставится до разбора результата.
+                    //
+                    // Раньше она стояла только на успехе, и это давало второй выпуск ключа
+                    // в том же цикле: ожидание здесь истекало, флаг не выставлялся, поздний
+                    // fallback ниже видел `!deferredMasqueAttempted` и звал подготовку
+                    // заново. Сервер хранит только последний ключ, поэтому второй выпуск
+                    // отбирал ключ у первого. Ядро теперь такой второй запрос не отправит
+                    // (вызов присоединяется к идущему), но ждать его ещё восемь секунд
+                    // впустую всё равно незачем.
+                    deferredMasqueAttempted = true
                     prepareMasqueIdentity(
                         clientData,
                         connectGenerationId = connectGenerationId,
@@ -5307,7 +5585,7 @@ class NovaVpnService : OperaNativeVpnService() {
                                 masqueLastAuthError ?: "auth failure"
                             }). Возвращаемся к masked WARP retry и дальнейшим fallback-путям."
                         )
-                        clientData.saveMasqueConfigJson(null)
+                        discardMasqueKey(clientData)
                         clientData.markMasqueTransportFailure()
                         masqueAuthFailureObserved = false
                         masqueLastAuthError = null
@@ -5383,7 +5661,7 @@ class NovaVpnService : OperaNativeVpnService() {
                                 masqueLastAuthError ?: "auth failure"
                             }). Оставляем WireGuard/AWG и дальнейшие fallback-пути."
                         )
-                        clientData.saveMasqueConfigJson(null)
+                        discardMasqueKey(clientData)
                         clientData.markMasqueTransportFailure()
                         masqueAuthFailureObserved = false
                         masqueLastAuthError = null
@@ -5412,7 +5690,7 @@ class NovaVpnService : OperaNativeVpnService() {
                 )
                 val fullFailureCount = clientData.noteWarpFullCycleFailure()
                 clientData.resetWarpTransportLearning()
-                clientData.saveMasqueConfigJson(null)
+                discardMasqueKey(clientData)
                 clientData.clearLastSuccessIfProtocol("MASQUE")
                 currentWarpMaskHost = null
                 val stableLastSuccessAgeMs = (System.currentTimeMillis() - clientData.getStableLastSuccessAt())
@@ -5647,7 +5925,8 @@ class NovaVpnService : OperaNativeVpnService() {
             )
         )
         currentAttemptOrdinal = 0
-        currentAttemptTotal = clientData.getCachedConnectAttemptTotal(backendHint)
+        // Длина перебора Opera ещё не известна: до её объявления экран показывает «...».
+        currentAttemptTotal = 0
         clientData.markTransientConnectingPending((delayMs + 14_000L).coerceAtLeast(12_000L))
         setCurrentBackend(backendHint)
         broadcastState(STATE_CONNECTING)
@@ -5681,6 +5960,58 @@ class NovaVpnService : OperaNativeVpnService() {
                 return this@NovaVpnService.protect(socketFd.toInt())
             }
         })
+        // MASQUE получает свой способ уйти мимо VPN — см. bindMasqueSocketToUnderlyingNetwork.
+        runCatching {
+            Nova.setMasqueSocketProtector(object : nova.SocketProtector {
+                override fun protect(socketFd: Long): Boolean {
+                    return bindMasqueSocketToUnderlyingNetwork(socketFd.toInt())
+                }
+            })
+        }.onFailure { error ->
+            LogManager.log(
+                "MASQUE: свой протектор сокета недоступен в этой native-библиотеке (${error.message}). " +
+                    "Остаётся общий protect(), а он ломает CONNECT-IP."
+            )
+        }
+    }
+
+    /**
+     * Уводит сокет MASQUE мимо собственного VPN привязкой к нижележащей сети.
+     *
+     * Почему не `VpnService.protect()`, как везде: замер 2026-08-13, парная проба по пяти
+     * портам на одном ключе в одну минуту — с `protect()` запрос CONNECT-IP остаётся без
+     * ответа на всех пяти портах, без него отвечают все пять. QUIC при этом встаёт и
+     * HTTP/3 SETTINGS приходят, поэтому отказ годами читался как «ключ не обслуживают».
+     * Для WireGuard тот же вызов работает, так что общий протектор не трогаем.
+     *
+     * `bindSocket` требует настоящий `FileDescriptor`, а из Go приходит номер. `fromFd`
+     * дублирует номер, но привязка действует на сам сокет, а не на дубликат, — поэтому
+     * дубликат сразу и закрывается.
+     *
+     * Если привязать не к чему или не вышло, остаётся прежний `protect()`: он измеримо
+     * плох, но лучше, чем совсем без защиты — незащищённый сокет уйдёт в тот самый
+     * туннель, который сейчас строится.
+     */
+    private fun bindMasqueSocketToUnderlyingNetwork(fd: Int): Boolean {
+        val connectivityManager = runCatching {
+            getSystemService(android.net.ConnectivityManager::class.java)
+        }.getOrNull()
+        val network = selectUnderlyingNetwork(connectivityManager)
+        if (network == null) {
+            LogManager.log("MASQUE: нижележащая сеть неизвестна — сокет привязать не к чему, помечаем как раньше.")
+            return protect(fd)
+        }
+        val bound = runCatching {
+            android.os.ParcelFileDescriptor.fromFd(fd).use { duplicate ->
+                network.bindSocket(duplicate.fileDescriptor)
+            }
+            true
+        }.getOrElse { error ->
+            LogManager.log("MASQUE: привязка сокета к нижележащей сети не удалась (${error.message}). Помечаем как раньше.")
+            false
+        }
+        if (bound) return true
+        return protect(fd)
     }
 
     override fun onTun2ProxyLog(message: String) {
@@ -5944,7 +6275,13 @@ class NovaVpnService : OperaNativeVpnService() {
                 "Подложная сеть для VPN не найдена, оставляем выбор системе."
             }
         )
-        LogManager.log("MTU для WARP/MASQUE: $warpTunnelMtu")
+        // Печатаем действующий MTU, а не значение по умолчанию.
+        //
+        // Строка печатала `warpTunnelMtu`, тогда как интерфейс поднимался с
+        // `effectiveTunnelMtu`. У MASQUE они разные (1179 против 1280), и журнал уверенно
+        // сообщал «1280» о туннеле, у которого 1179, — на этом чуть не построили разбор
+        // отсутствия трафика.
+        LogManager.log("MTU для WARP/MASQUE: $effectiveTunnelMtu")
         configureInternetRoutes(
             builder = builder,
             enableIpv6DefaultRoute = interfaceAddresses.any { it.address.contains(':') },
@@ -6273,7 +6610,6 @@ class NovaVpnService : OperaNativeVpnService() {
         }
 
         currentTransportLabel = TRANSPORT_VLESS
-        clientData.rememberConnectAttemptTotal(rotation.size, BACKEND_VLESS, TRANSPORT_VLESS)
         setCurrentBackend(BACKEND_VLESS)
 
         val socksPort = findEphemeralLoopbackPort() ?: VLESS_SOCKS_FALLBACK_PORT
@@ -6290,8 +6626,7 @@ class NovaVpnService : OperaNativeVpnService() {
         val rejected = LinkedHashSet<String>()
         var tunnelUp = false
         var searchDeadline = SystemClock.elapsedRealtime() + VLESS_SEARCH_BUDGET_MS
-        // Начинаем с активной записи, но идём по самому списку: номер на экране — это
-        // место профиля в списке, а не в перестановке под перебор.
+        // Начинаем с активной записи, но идём по самому списку.
         var cursor = clientData.getVlessRotationStartIndex().coerceIn(0, rotation.lastIndex)
         var tried = 0
         try {
@@ -6307,12 +6642,17 @@ class NovaVpnService : OperaNativeVpnService() {
                     break
                 }
                 val (link, config) = rotation[cursor]
-                // Номер — место профиля в списке, а не счётчик попыток: наказание
-                // отложено, порядок за проход не меняется, и числа не скачут.
-                currentAttemptOrdinal = cursor + 1
-                currentAttemptTotal = rotation.size
                 cursor = (cursor + 1) % rotation.size
                 tried++
+                // Номер — счётчик попыток этого прохода, а не место профиля в списке.
+                //
+                // Место в списке скакало: перебор стартует с сохранённой позиции
+                // («7/151» вместо «1/151»), после последней записи ординал падает со
+                // 151 на 1, а успех переставляет список и меняет заодно знаменатель.
+                // Номер попытки растёт на единицу и ни от чего, кроме самого перебора,
+                // не зависит.
+                currentAttemptOrdinal = tried
+                currentAttemptTotal = rotation.size
                 pendingVlessProfileSwitch = false
 
                 // Активная ссылка двигается вместе с перебором: если службу убьют на
@@ -6359,18 +6699,19 @@ class NovaVpnService : OperaNativeVpnService() {
                     rotation = clientData.getVlessProfileLinks()
                         .mapNotNull { stored -> VlessConfig.parse(stored)?.let { stored to it } }
                         .ifEmpty { rotation }
-                    clientData.rememberConnectAttemptTotal(rotation.size, BACKEND_VLESS, TRANSPORT_VLESS)
                 }
                 rejected.clear()
                 val activeIndex = rotation.indexOfFirst { it.first == link }.takeIf { it >= 0 } ?: 0
                 cursor = (activeIndex + 1) % rotation.size
                 val triedBeforeSession = tried
                 tried = 0
-                currentAttemptOrdinal = activeIndex + 1
+                // Проход закончился успехом: следующий начнётся с первой попытки.
+                currentAttemptOrdinal = 1
                 currentAttemptTotal = rotation.size
 
                 LogManager.log(
-                    "VLESS активен: ${config.displayName} — профиль $currentAttemptOrdinal/${rotation.size}."
+                    "VLESS активен: ${config.displayName} — профиль ${activeIndex + 1}/${rotation.size}, " +
+                        "попыток в проходе: $triedBeforeSession."
                 )
                 publishTransportNotice(clientData, "")
                 broadcastState(STATE_CONNECTED)
@@ -7117,7 +7458,7 @@ class NovaVpnService : OperaNativeVpnService() {
         LogManager.log("Пробуем резервное подключение через Opera $operaLabel...")
         setCurrentBackend("$BACKEND_OPERA-$operaLabel")
         currentAttemptOrdinal = 0
-        currentAttemptTotal = clientData.getCachedConnectAttemptTotal("$BACKEND_OPERA-$operaLabel")
+        currentAttemptTotal = 0
         broadcastState(STATE_CONNECTING)
         val readyState = OperaProxyManager.ensureReady(
             context = applicationContext,
@@ -7598,6 +7939,57 @@ class NovaVpnService : OperaNativeVpnService() {
      * которых пользователь не просил. Затевать их стоит только тогда, когда MASQUE выбран
      * в списке протоколов; в режиме «Авто» есть кэш — берём, нет — идём по WARP/AWG.
      */
+    /**
+     * Регистрирует устройство в Cloudflare ради MASQUE и возвращает пару токен/id.
+     *
+     * Регистрация анонимная: лицензия WARP+ не нужна. Замерено 2026-08-12 на этом же
+     * телефоне — свежий бесплатный аккаунт (`account_type: "free"`) после включения
+     * `warp_enabled` получает от службы MASQUE `200 OK` на запрос туннеля.
+     *
+     * Полученную личность кладём в **запасную**, а не в основную конфигурацию:
+     * `saveConfig` заменил бы рабочий профиль WireGuard и стёр бы кэш MASQUE, а
+     * `getAccessToken()`/`getDeviceId()` и так читают запасную личность как fallback.
+     */
+    private fun registerWarpIdentityForMasque(
+        clientData: ClientData,
+        connectGenerationId: Int?,
+    ): Pair<String, String>? {
+        if (shouldAbortConnectWork(connectGenerationId)) return null
+        LogManager.log(
+            "MASQUE: нет access token/device id — регистрируем устройство в Cloudflare. " +
+                "Регистрация анонимная, лицензия WARP+ для неё не нужна."
+        )
+        val warpClient = WarpClient(
+            applicationContext,
+            LogManager::log,
+            shouldAbort = { shouldAbortConnectWork(connectGenerationId) },
+        )
+        val registered = try {
+            warpClient.register(
+                onProgress = { progress ->
+                    if (progress in 1..99 && progress % 25 == 0) {
+                        LogManager.log("MASQUE: регистрация устройства $progress%.")
+                    }
+                }
+            )
+        } catch (e: Exception) {
+            LogManager.log("MASQUE: регистрация устройства сорвалась: ${e.message}")
+            null
+        }
+        val token = registered?.accessToken.orEmpty()
+        val id = registered?.deviceId.orEmpty()
+        if (registered == null || token.isBlank() || id.isBlank()) {
+            LogManager.log(
+                "MASQUE: регистрация не дала access token/device id. " +
+                    "Без них служба MASQUE не выдаёт ключ — цикл останавливаем."
+            )
+            return null
+        }
+        clientData.saveReserveWarpIdentity(registered)
+        LogManager.log("MASQUE: устройство зарегистрировано, продолжаем получением ключа MASQUE.")
+        return token to id
+    }
+
     private fun prepareMasqueIdentity(
         clientData: ClientData,
         fastRefresh: Boolean = false,
@@ -7605,27 +7997,130 @@ class NovaVpnService : OperaNativeVpnService() {
         trackConnectProgress: Boolean = false,
         thoroughRegistration: Boolean = false,
         cachedOnly: Boolean = false,
+        forceRefresh: Boolean = false,
     ): MasqueIdentity? {
         if (shouldAbortConnectWork(connectGenerationId)) {
             return null
         }
-        val existingJson = clientData.getMasqueConfigJson().orEmpty()
-        val accessToken = clientData.getAccessToken().orEmpty()
-        val deviceId = clientData.getDeviceId().orEmpty()
+        val storedJson = clientData.getMasqueConfigJson().orEmpty()
+        // Подписываемся запасной личностью — той же, что и фоновая добыча ключа.
+        //
+        // MASQUE живёт именно на ней: enroll переводит устройство Cloudflare в режим
+        // `masque`, и делать это с активной личностью нельзя — сменился бы тип туннеля
+        // прямо под работающим соединением. Поэтому и `registerWarpIdentityForMasque`, и
+        // `WarpIdentityBackfill` кладут устройство в резерв.
+        //
+        // Цикл подключения при этом брал основной `device_id`, и расхождение было
+        // детерминированным, а не гоночным: ключ, добытый фоном через туннель, приходил
+        // с чужим для цикла идентификатором и на ближайшей же подготовке отбрасывался
+        // проверкой «выпущен для другого устройства». Заодно это чинило и single-flight:
+        // защита от двойного выпуска ключуется по `device_id`, а два разных
+        // идентификатора она не может связать.
+        //
+        // Токен и идентификатор берутся из одного источника: смешать их значит
+        // предъявить чужой паре доступ к записи устройства.
+        val masqueIdentitySource = clientData.getReserveWarpIdentity()
+            ?.takeIf { !it.accessToken.isNullOrBlank() && !it.deviceId.isNullOrBlank() }
+        var accessToken = masqueIdentitySource?.accessToken?.trim()
+            ?: clientData.getAccessToken().orEmpty()
+        var deviceId = masqueIdentitySource?.deviceId?.trim()
+            ?: clientData.getDeviceId().orEmpty()
 
-        if (existingJson.isBlank() && (accessToken.isBlank() || deviceId.isBlank())) {
-            return null
+        // Принудительное обновление не стирает прежний ключ заранее.
+        //
+        // Раньше вызывающий код стирал конфигурацию ДО попытки и возвращал её обратно,
+        // если новая не пришла. Возвращался при этом ключ, который сервер к тому моменту
+        // уже мог заменить: неудача здесь — это чаще всего истёкшее ожидание, а не
+        // несостоявшийся запрос. Теперь прежний ключ живёт в настройках до последнего, а
+        // ядру просто говорят «этот выпуск не переиспользуй».
+        val refreshing = forceRefresh && accessToken.isNotBlank() && deviceId.isNotBlank()
+        if (forceRefresh && !refreshing) {
+            LogManager.log(
+                "MASQUE identity: обновить нечем — нет токена или идентификатора устройства. Оставляем прежний ключ."
+            )
         }
+        if (refreshing) {
+            // Сначала забрать, потом забыть.
+            //
+            // В памяти ядра может лежать ключ, выпущенный уже после того, как прошлое
+            // ожидание истекло, — то есть ровно тот, который сейчас держит сервер, и
+            // единственный экземпляр его приватной половины. Забыть его, не забрав,
+            // значило бы своими руками устроить ту самую потерю, ради которой писалась
+            // вся эта правка.
+            //
+            // Сравнение по приватному ключу, а не по строке: сохранённый конфиг ядро
+            // отдаёт нормализованным, и побайтового совпадения ждать нельзя. Совпал —
+            // значит в памяти лежит тот же ключ, от которого мы и хотим уйти.
+            val pendingJson = runCatching { Nova.lastMasqueEnrollResult(deviceId).orEmpty() }
+                .getOrDefault("")
+            if (
+                pendingJson.isNotBlank() &&
+                masquePrivateKeyOf(pendingJson) != masquePrivateKeyOf(storedJson)
+            ) {
+                val pendingIdentity = parseMasqueIdentity(pendingJson)
+                if (pendingIdentity != null) {
+                    LogManager.log(
+                        "MASQUE identity: ядро уже выпустило ключ после истёкшего ожидания. Берём его вместо " +
+                            "нового выпуска — новый отобрал бы его у сервера."
+                    )
+                    clientData.saveMasqueConfigJson(pendingJson)
+                    return pendingIdentity
+                }
+            }
+            runCatching { Nova.forgetMasqueEnrollResult(deviceId) }
+        }
+        val existingJson = if (refreshing) "" else storedJson
+
         if (cachedOnly && parseMasqueIdentity(existingJson) == null) {
             return null
         }
 
+        // Ключ добываем только через поднятый туннель.
+        //
+        // Замер 2026-08-13 развёл два выпуска на ОДНОЙ записи устройства, минуты друг от
+        // друга, одним и тем же кодом: ключ, выпущенный из shell через готовый туннель,
+        // обслуживается на шести портах из семи; ключ, выпущенный приложением, — ни на
+        // одном. Разница видна в журнале: у приложения выпуск стартует раньше туннеля,
+        // первые профили транспорта отваливаются по таймауту на сырой сети, и запрос
+        // всякий раз доезжает на последнем — рандомизированном, без ALPN; проба через
+        // готовый туннель побеждает на первом профиле.
+        //
+        // Отсюда правило: нет туннеля — не добываем. Цикл с явно выбранным MASQUE в этом
+        // случае поднимает WARP как ступень регистрации (ветка «Выбран MASQUE, но ключа
+        // устройства ещё нет»), а регистрацию и выпуск делает [WarpIdentityBackfill] уже
+        // внутри туннеля — он умеет и то и другое.
+        //
+        // Гард стоит до регистрации намеренно: раньше цикл сначала тратил около минуты на
+        // лестницу Opera-прокси и прямых obfuscated-попыток, а потом всё равно уходил в
+        // ступень регистрации. Готовый ключ гард не трогает — он проверяется только когда
+        // ключа нет.
+        if (parseMasqueIdentity(existingJson) == null && !isTunnelReadyForMasqueEnroll()) {
+            LogManager.log(
+                "MASQUE: ключа нет, а туннеля ещё нет — за ключом не идём. Выпуск вне туннеля даёт " +
+                    "ключ, который служба MASQUE не обслуживает (замер 2026-08-13). Ждём ступень регистрации."
+            )
+            return null
+        }
+
+        if (existingJson.isBlank() && (accessToken.isBlank() || deviceId.isBlank())) {
+            // Раньше здесь стоял голый `return null`, и это была вся история отказа:
+            // MASQUE не поднимался никогда, потому что регистрацию никто не запускал.
+            //
+            // Токен и device id даёт только регистрация устройства в Cloudflare, а
+            // встроенный сид (assets/warp_bootstrap.json) их не содержит — он делает
+            // конфигурацию непустой и тем самым выключает единственный триггер
+            // регистрации в MainActivity. Замкнутый круг: ключ MASQUE добывался лишь
+            // поверх поднятого туннеля, а цикл с выбранным MASQUE гас до туннеля.
+            //
+            // Регистрация анонимная и бесплатная — ключ WARP+ для неё не нужен.
+            val registered = registerWarpIdentityForMasque(clientData, connectGenerationId)
+                ?: return null
+            accessToken = registered.first
+            deviceId = registered.second
+        }
+
         val progressBase = currentAttemptOrdinal.coerceAtLeast(0)
-        val progressTotalHint = maxOf(
-            currentAttemptTotal,
-            clientData.getCachedConnectAttemptTotal(currentBackendLabel, currentTransportLabel),
-            progressBase + 1,
-        )
+        val progressTotalHint = maxOf(currentAttemptTotal, progressBase + 1)
         if (trackConnectProgress) {
             publishConnectingAttemptProgress(
                 clientData = clientData,
@@ -7715,8 +8210,30 @@ class NovaVpnService : OperaNativeVpnService() {
                 }
                 future.get(timeoutMs, TimeUnit.MILLISECONDS)
             } catch (_: TimeoutException) {
-                LogManager.log("MASQUE identity refresh не ответил за ${timeoutMs}мс. Продолжаем перебор без ожидания.")
-                null
+                // Истёкшее ожидание не отменяет выпуск ключа.
+                //
+                // `shutdownNow` ставит флаг прерывания только Java-потоку; вызов в ядре
+                // его не видит и доводит запрос до конца. Раньше результат на этом просто
+                // терялся: сервер оставался с новым публичным ключом, а приватная половина
+                // исчезала вместе с брошенным потоком. Снаружи это неотличимо от
+                // «свой адрес принял TLS и молчит на CONNECT-IP» — именно этот след и
+                // увёл расследование на несколько дней.
+                //
+                // Ядро запоминает выпущенный ключ, поэтому здесь достаточно спросить.
+                val rescued = runCatching { Nova.lastMasqueEnrollResult(deviceId).orEmpty() }
+                    .getOrDefault("")
+                    .takeIf { it.isNotBlank() }
+                if (rescued != null) {
+                    LogManager.log(
+                        "MASQUE identity не уложился в ${timeoutMs}мс, но ключ ядро уже выпустило — забираем его, " +
+                            "иначе он остался бы на сервере без приватной половины."
+                    )
+                } else {
+                    LogManager.log(
+                        "MASQUE identity refresh не ответил за ${timeoutMs}мс. Продолжаем перебор без ожидания."
+                    )
+                }
+                rescued
             } finally {
                 executor.shutdownNow()
             }
@@ -7752,6 +8269,70 @@ class NovaVpnService : OperaNativeVpnService() {
         }
     }
 
+    /**
+     * Сколько прошло с выпуска сохранённого ключа MASQUE, в миллисекундах.
+     *
+     * `null` — отметки нет: так выглядят ключи, выпущенные сборками до появления поля
+     * `issued_at`. Такой ключ считается несвежим — это безопаснее: он действительно
+     * пролежал как минимум с прошлой установки.
+     *
+     * Часы стенные (`currentTimeMillis`), а не монотонные, потому что отметку ставит
+     * ядро при выпуске и она переживает перезапуск процесса. Перевод часов назад даст
+     * отрицательную разницу — тогда возраст неизвестен, а не отрицателен.
+     */
+    /**
+     * Выбрасывает ключ MASQUE — из настроек и из памяти ядра сразу.
+     *
+     * Ядро запоминает последний выпуск, чтобы два вызова подряд не отобрали ключ друг у
+     * друга. У этой памяти есть обратная сторона: стирание ключа только в настройках
+     * оставляло его в ядре, и ближайший же вызов получал ту же самую мёртвую запись
+     * обратно — вместе с её отметкой выпуска, то есть заведомо старую. Получался прежний
+     * вечный двигатель, просто перенесённый на шаг ниже. Поэтому стирание всегда идёт
+     * парой, и делает эту пару одна функция, а не дисциплина пяти вызывающих.
+     *
+     * Идентификатор читается ДО стирания: после него он ещё на месте, но полагаться на
+     * порядок в пяти местах не стоит. Пустая строка очищает память ядра целиком — это
+     * запасной путь на случай, когда идентификатора нет вовсе.
+     */
+    private fun discardMasqueKey(clientData: ClientData) {
+        val deviceIds = linkedSetOf<String>()
+        clientData.getDeviceId()?.trim()?.takeIf { it.isNotEmpty() }?.let { deviceIds.add(it) }
+        clientData.getReserveWarpIdentity()?.deviceId?.trim()?.takeIf { it.isNotEmpty() }?.let { deviceIds.add(it) }
+        clientData.saveMasqueConfigJson(null)
+        if (deviceIds.isEmpty()) {
+            runCatching { Nova.forgetMasqueEnrollResult("") }
+        } else {
+            deviceIds.forEach { id -> runCatching { Nova.forgetMasqueEnrollResult(id) } }
+        }
+    }
+
+    /**
+     * Есть ли сейчас туннель, через который можно выпустить ключ MASQUE.
+     *
+     * Проверяем состояние службы, а не достижимость API: снаружи туннеля API как раз
+     * достижим — через обфускацию или Opera-прокси, — и именно поэтому выпуск там
+     * молча удавался и давал необслуживаемый ключ.
+     */
+    private fun isTunnelReadyForMasqueEnroll(): Boolean {
+        if (currentState == STATE_CONNECTED) return true
+        return hasRecentSuccessfulTunnelProbe()
+    }
+
+    /** Приватная половина ключа из конфигурации MASQUE — для сравнения «тот же ключ или другой». */
+    private fun masquePrivateKeyOf(raw: String): String {
+        if (raw.isBlank()) return ""
+        return runCatching { JSONObject(raw).optString("private_key").orEmpty() }.getOrDefault("")
+    }
+
+    private fun storedMasqueKeyAgeMs(clientData: ClientData): Long? {
+        val raw = clientData.getMasqueConfigJson().orEmpty()
+        if (raw.isBlank()) return null
+        val issuedAtSec = runCatching { JSONObject(raw).optLong("issued_at", 0L) }.getOrDefault(0L)
+        if (issuedAtSec <= 0L) return null
+        val ageMs = System.currentTimeMillis() - issuedAtSec * 1000L
+        return ageMs.takeIf { it >= 0L }
+    }
+
     private fun parseMasqueIdentity(raw: String): MasqueIdentity? {
         return try {
             val json = JSONObject(raw)
@@ -7765,7 +8346,9 @@ class NovaVpnService : OperaNativeVpnService() {
                     }
                 }
             }
-            for (fallback in listOf(443, 500, 1701, 4500, 4443, 8443, 8095)) {
+            // Порядок замерен: 500/1701/8443 отвечают, 443/4500 — нет. См. пояснение
+            // у defaultMasquePorts в nova-core/engine/masque.go.
+            for (fallback in listOf(500, 1701, 8443, 443, 4500, 4443, 8095)) {
                 ports.add(fallback)
             }
 
@@ -7938,7 +8521,18 @@ class NovaVpnService : OperaNativeVpnService() {
                     addEndpoint(verified.host, verified.port, "verified-config")
                 }
 
-            if (includeScannerCandidates) {
+            // Сканированные адреса в очередь MASQUE не идут, пока есть свои.
+            //
+            // MASQUE проверяет узел по `endpoint_pub_key` из ответа enroll, поэтому
+            // адрес, которого нет в нашей выдаче, не может пройти проверку в принципе.
+            // Замерено на LTE (Pixel 4 XL): `162.159.192.x` отвечает и падает на
+            // `remote endpoint has a different public key than what we trust in
+            // config.json` / `CRYPTO_ERROR 0x128 tls: handshake failure`, а
+            // `162.159.197.1` не отвечает на MASQUE вовсе — при том, что выданный нам
+            // `162.159.198.2` в тот же момент несёт данные. Раньше такие адреса
+            // занимали четыре из двенадцати попыток и списывались в `engine_crash`.
+            val hasOwnEndpoints = v4Candidates.isNotEmpty() || v6Candidates.isNotEmpty()
+            if (includeScannerCandidates && !hasOwnEndpoints) {
                 for (candidate in readScannedMasqueEndpoints(mode.masqueSni.orEmpty(), orderedPorts.toList())) {
                     addEndpoint(candidate.host, candidate.preferredPort, candidate.source)
                 }
@@ -8616,7 +9210,6 @@ class NovaVpnService : OperaNativeVpnService() {
                 // Кэш сглаживает счётчик там, где размер перебора заранее неизвестен —
                 // это про WARP с его discovery. У MASQUE список кандидатов известен
                 // точно, и подтянутое из кэша большее число только врёт.
-                useCachedAttemptTotal = false,
                 trafficMaskHosts = trafficMaskHosts,
                 cycleUnderlyingSignature = cycleUnderlyingSignature,
                 connectGenerationId = connectGenerationId,
@@ -8757,7 +9350,6 @@ class NovaVpnService : OperaNativeVpnService() {
         onAttemptResult: ((ConnectionAttempt, String, Long, Long) -> Unit)? = null,
         fastConnectMode: Boolean = false,
         onMasqueIdentityRefreshed: ((MasqueIdentity) -> Unit)? = null,
-        useCachedAttemptTotal: Boolean = true,
         deferMasqueWithoutIdentity: Boolean = false,
         qualitySamplingWindowMs: Long = 20_000L,
         progressGroupKeys: List<String>? = null,
@@ -8767,6 +9359,7 @@ class NovaVpnService : OperaNativeVpnService() {
         var attemptIndex = 0
         var attemptsCompleted = 0
         var unstableMasqueStreak = 0
+        val masquePortsWithoutInbound = mutableSetOf<Int>()
         // Прошло ли на этой сети хоть одно рукопожатие QUIC без маскировки.
         //
         // Ставится из потока движка, читается из потока перебора, поэтому атомарный.
@@ -8808,17 +9401,8 @@ class NovaVpnService : OperaNativeVpnService() {
         currentAttemptTotal = if (importedProgressGroupKeys.isNotEmpty()) {
             importedProgressGroupKeys.size
         } else {
-            maxOf(
-                connectionAttempts.size,
-                globalAttemptTotal,
-                if (useCachedAttemptTotal) {
-                    clientData.getCachedConnectAttemptTotal(currentBackendLabel, currentTransportLabel)
-                } else {
-                    0
-                },
-            )
+            maxOf(connectionAttempts.size, globalAttemptTotal)
         }
-        clientData.rememberConnectAttemptTotal(currentAttemptTotal, currentBackendLabel, currentTransportLabel)
         val connectivityManager = getSystemService(android.net.ConnectivityManager::class.java)
         val selectedUnderlyingNetwork = selectUnderlyingNetwork(connectivityManager)
         val selectedUnderlyingSignature = cycleUnderlyingSignature
@@ -8929,22 +9513,26 @@ class NovaVpnService : OperaNativeVpnService() {
                 val progressTotal = progressGroupKeysToUse.size.coerceAtLeast(1)
                 val keyIndex = progressGroupKeysToUse.indexOf(currentKey)
                 currentAttemptTotal = progressTotal
-                // During a manual profile switch the UI commands an explicit ordinal
-                // (the sequential profile cursor 1..N). Honor it instead of deriving
-                // the ordinal from the config's seedOrder position, otherwise the
-                // counter jumps to an unrelated value.
-                currentAttemptOrdinal = if (manualWarpProfileSwitchTargetKey != null &&
+                // Номер, названный кнопкой «следующий профиль», сдвигает всю шкалу, а
+                // не подменяет одну попытку.
+                //
+                // Кнопка ставит выбранный профиль первым в очередь, поэтому его
+                // позиция в очереди — ноль, а на экране должно остаться то число,
+                // которое пользователь и попросил. Дальше перебор идёт от него:
+                // 8/50 → 9/50 → 10/50. Пока номер применялся ко всей очереди, счётчик
+                // после нажатия замирал на «8/50»; пока он гасился после первой
+                // попытки — прыгал назад на «2/50».
+                val manualOrdinalCommanded = manualWarpProfileSwitchTargetKey != null &&
                     manualWarpProfileSwitchOrdinal > 0 &&
                     manualWarpProfileSwitchTotal > 0
-                ) {
-                    manualWarpProfileSwitchOrdinal.coerceIn(1, manualWarpProfileSwitchTotal)
-                } else if (keyIndex >= 0) {
-                    keyIndex + 1
-                } else {
-                    currentAttemptOrdinal
+                currentAttemptOrdinal = AttemptProgressScale.ordinal(
+                    total = progressTotal,
+                    queueIndex = keyIndex,
+                    manualBaseOrdinal = if (manualOrdinalCommanded) manualWarpProfileSwitchOrdinal else 0,
+                    fallbackOrdinal = currentAttemptOrdinal
                         .takeIf { it in 1..progressTotal }
-                        ?: (globalAttemptOffset + attemptIndex + 1).coerceIn(1, progressTotal)
-                }
+                        ?: (globalAttemptOffset + attemptIndex + 1),
+                )
                 LogManager.log(
                     "DIAG attempt-ordinal: manual=${manualWarpProfileSwitchTargetKey != null} " +
                         "cmdOrdinal=$manualWarpProfileSwitchOrdinal cmdTotal=$manualWarpProfileSwitchTotal " +
@@ -8953,18 +9541,20 @@ class NovaVpnService : OperaNativeVpnService() {
                 )
             } else {
                 currentAttemptOrdinal = (globalAttemptOffset + attemptIndex + 1).coerceAtLeast(1)
-                // Знаменатель берём из размера очереди, а не только из достигнутого
-                // номера. Пока его выводили как maxOf(текущий, порядковый), счётчик
-                // дёргался: завершающийся параллельный цикл обнуляет обе переменные
-                // (`currentAttemptOrdinal = 0; currentAttemptTotal = 0`), и следующая
-                // попытка показывала «4 из 4» вместо «4 из 50» — знаменатель полз
-                // следом за номером.
-                currentAttemptTotal = maxOf(
-                    maxOf(currentAttemptTotal, globalAttemptTotal),
-                    currentAttemptOrdinal,
+                // Знаменатель — размер очереди этого цикла, и ничего кроме.
+                //
+                // Прошлое значение поля сюда не входит: поле общее на все фазы, и
+                // `maxOf(currentAttemptTotal, …)` переносил знаменатель предыдущей
+                // фазы в новую очередь — восемь попыток показывались как «3/50».
+                // Уменьшиться такая формула не могла в принципе, только вырасти.
+                // Достигнутый номер тоже не годится: он давал «4 из 4» вместо
+                // «4 из 50», когда знаменатель полз следом за номером.
+                currentAttemptTotal = AttemptProgressScale.total(
+                    queueSize = connectionAttempts.size,
+                    declaredTotal = globalAttemptTotal,
+                    reachedOrdinal = currentAttemptOrdinal,
                 )
             }
-            clientData.rememberConnectAttemptTotal(currentAttemptTotal, currentBackendLabel, currentTransportLabel)
             publishWarpTrafficMaskHint(
                 clientData = clientData,
                 trafficMaskHosts = trafficMaskHosts,
@@ -9083,6 +9673,13 @@ class NovaVpnService : OperaNativeVpnService() {
             val isConnected = AtomicBoolean(false)
             val everConnected = AtomicBoolean(false)
             val handshakeObserved = AtomicBoolean(false)
+            // Пришёл ли хоть один байт обратно за всю попытку.
+            //
+            // Отличает «сеть режет data-plane» от «ключ протух»: протухший ключ до
+            // передачи данных не доходит вовсе, сервер закрывает соединение с
+            // «tls: access denied». Полная тишина ПОСЛЕ открытого CONNECT-IP говорит
+            // об обратном — ключ приняли.
+            val inboundEverObserved = AtomicBoolean(false)
             val rotateRequested = AtomicBoolean(false)
             val skipStrategyLearning = AtomicBoolean(false)
             val attemptFailureReason = AtomicReference<String?>(null)
@@ -9646,6 +10243,9 @@ class NovaVpnService : OperaNativeVpnService() {
                             "$modeLabel ответил: port=$currentPort, rx=${tunnelStats.rxBytes}, tx=${tunnelStats.txBytes}"
                         )
                     }
+                    if (tunnelStats.rxBytes > 0L) {
+                        inboundEverObserved.set(true)
+                    }
 
                     val provisionalValidatedExpired =
                         provisionalValidatedAtMs > 0L &&
@@ -9710,6 +10310,11 @@ class NovaVpnService : OperaNativeVpnService() {
                                 }
                                 currentAttemptOrdinal = 0
                                 currentAttemptTotal = 0
+                                // Метку транспорта подтверждаем ровно здесь, у
+                                // победившей попытки: между её началом и успехом мог
+                                // смениться цикл подключения и обнулить её, а бейдж
+                                // берёт значение именно из этой публикации.
+                                setCurrentTransportForAttempt(currentAttempt)
                                 broadcastState(STATE_CONNECTED)
                             } else {
                                 LogManager.log(
@@ -10024,14 +10629,16 @@ class NovaVpnService : OperaNativeVpnService() {
                                 preferMessengerChatProfiles = clientData.shouldForceMessengerWarpPriority(),
                             )
                         }
-                        val masqueFakeBurstEnabled = when {
-                            masqueCleanPathProven -> false
-                            trustedVerifiedMasqueMaskedFastPath -> true
-                            ordinaryWifiMasqueMaskedFastPath -> true
-                            ordinaryWifiMasqueLegacyBurstFastPath -> true
-                            shouldKeepMasqueFastPathClean -> false
-                            else -> adaptiveMasqueCamouflageHost.isNotBlank()
-                        }
+                        // Fake-пачка выключена везде — она измеримо ломает рукопожатие.
+                        //
+                        // Замер 2026-08-13, парная проба по пяти портам на одном ключе: с
+                        // пачкой QUIC не встаёт ни разу («timeout: no recent network
+                        // activity»), без неё встаёт всегда. Она задумывалась маскировкой
+                        // под десктопный клиент, а обошлась в само соединение. Ветки
+                        // выбора оставлены выше только ради строк в журнале: они
+                        // объясняют, какой путь выбран, и стоить это перестало ничего.
+                        @Suppress("UNUSED_VARIABLE")
+                        val masqueFakeBurstEnabled = false
                         if (trustedVerifiedMasqueMaskedFastPath) {
                             LogManager.log(
                                 "MASQUE camouflage host: $adaptiveMasqueCamouflageHost " +
@@ -10071,12 +10678,19 @@ class NovaVpnService : OperaNativeVpnService() {
                         setTrafficCamouflageHostCompat(adaptiveMasqueCamouflageHost)
                         setMasqueFakeBurstEnabledCompat(masqueFakeBurstEnabled)
                         cleanMasqueAttempt = !masqueFakeBurstEnabled
+                        val masqueSniToSend = resolveMasqueHandshakeSni(
+                            camouflageHost = adaptiveMasqueCamouflageHost,
+                            mode = transportMode,
+                            host = currentHost,
+                            port = currentPort,
+                        )
+                        LogManager.log("MASQUE SNI рукопожатия: $masqueSniToSend (вместо ${transportMode.masqueSni.orEmpty()})")
                         Nova.startMasqueVPNWithSNI(
                             tunnelFdForEngine(attemptDescriptor),
                             identityJson,
                             currentHost,
                             currentPort.toLong(),
-                            transportMode.masqueSni.orEmpty()
+                            masqueSniToSend
                         )
                         // Вернулись без исключения — значит, сессия жила, а рукопожатие
                         // прошло.
@@ -10115,12 +10729,21 @@ class NovaVpnService : OperaNativeVpnService() {
                         // 162.159.197.1 ответил отказом — и рабочий ключ был стёрт. Дальше
                         // MASQUE не стартовал вовсе: перевыпустить ключ на этой сети можно
                         // только через уже поднятый туннель.
-                        if (
-                            isMasqueRemoteAuthError(errorMessage) &&
-                            isOwnMasqueIdentityEndpoint(currentAttempt.endpointSource)
-                        ) {
-                            masqueAuthFailureObserved = true
-                            masqueLastAuthError = errorMessage
+                        if (isMasqueRemoteAuthError(errorMessage)) {
+                            if (isOwnMasqueIdentityEndpoint(currentAttempt.endpointSource)) {
+                                masqueAuthFailureObserved = true
+                                masqueLastAuthError = errorMessage
+                            }
+                            // Отказ с чужого адреса личность не порочит, но и забывать его
+                            // не надо.
+                            //
+                            // До сих пор такой отказ просто игнорировался: MASQUE был
+                            // исключён из cooldown целиком, и узел, жёстко отказавший этому
+                            // ключу, честно перебирался заново каждый круг. Это и выглядело
+                            // как «скан кормит нас мусором». Отказ описывает пару
+                            // (ключ, узел), поэтому cooldown снимается при выпуске нового
+                            // ключа — см. ClientData.saveMasqueConfigJson.
+                            attemptFailureReason.set(MASQUE_ACCESS_DENIED_REASON)
                         }
                         // Сорвалось после рукопожатия — значит, чистый QUIC до узла дошёл, и
                         // маскировать остальные попытки цикла незачем.
@@ -10130,24 +10753,28 @@ class NovaVpnService : OperaNativeVpnService() {
                         ) {
                             masqueQuicPassesClean.set(true)
                         }
-                        // Молчание на CONNECT-IP со своего адреса — тот же отказ, только
-                        // тихий.
+                        // Молчание на CONNECT-IP со своего адреса — устаревший ключ.
                         //
-                        // Громкий отказ (`tls: access denied`) приложение уже понимает и
-                        // обновляет ключ. А тихий выглядел как «сеть капризничает»: до
-                        // SETTINGS дошли, значит попали в нужную службу, — и она не
-                        // ответила на запрос туннеля. Замер на тестовом устройстве: ключ в таком
-                        // состоянии не оживает сам, весь круг проходит впустую, а
-                        // приложение продолжает держаться за него до следующего громкого
-                        // отказа. Свой адрес отличаем от сканированных: чужие узлы этому
-                        // аккаунту не выдавались и молчат по другой причине.
+                        // Замер 2026-08-12 (nova-core/cmd/masqueprobe) развёл две версии,
+                        // которые до него путались. Версия «не тот порт» неверна: в одну и
+                        // ту же минуту с одного адреса свежий ключ отвечает «200 OK» сразу
+                        // на четырёх портах, а выпущенный двадцатью минутами раньше молчит
+                        // на всех семи. Версия «аккаунт не обслуживают» тоже неверна:
+                        // аккаунт тот же самый и бесплатный.
+                        //
+                        // Поэтому лечение — перевыпуск ключа, а не сброс личности: токен и
+                        // device id остаются, новый ключ добывается enroll-ом. Прежний код
+                        // стирал и личность, и каждая попытка MASQUE начиналась с полной
+                        // перерегистрации, которая здесь возможна только через туннель.
+                        //
+                        // Громкий отказ (`tls: access denied`) — по-прежнему отказ по
+                        // аккаунту, его обрабатывает ветка выше.
                         if (
                             errorMessage.contains("CONNECT-IP", ignoreCase = true) &&
                             errorMessage.contains("не ответил", ignoreCase = true) &&
                             isOwnMasqueIdentityEndpoint(currentAttempt.endpointSource)
                         ) {
-                            masqueAuthFailureObserved = true
-                            masqueLastAuthError = errorMessage
+                            masqueKeyStaleObserved = true
                         }
                     }
                     LogManager.log("Ошибка движка: ${t.message}")
@@ -10245,6 +10872,31 @@ class NovaVpnService : OperaNativeVpnService() {
                         else -> "no_traffic"
                     }
             }
+            // Жёсткий отказ MASQUE запоминается — в отличие от молчания.
+            //
+            // `tls: access denied` — однозначный ответ узла «этот ключ я не обслуживаю», и
+            // он приходит за 60–150 мс. Молчание на CONNECT-IP сюда НЕ входит: замером
+            // 2026-08-12 доказано, что оно описывает возраст ключа, а не адрес, и cooldown
+            // по нему закрыл бы исправные узлы. Срок держим коротким относительно жизни
+            // ключа: сам ключ живёт около двадцати минут, а cooldown снимается при его
+            // перевыпуске.
+            if (
+                transportMode.engine == "masque" &&
+                normalizedFailureReason == MASQUE_ACCESS_DENIED_REASON
+            ) {
+                clientData.markWarpAttemptCooldown(
+                    engine = transportMode.engine,
+                    mode = transportMode.name,
+                    host = currentHost,
+                    port = currentPort,
+                    preferredSni = null,
+                    cooldownMs = MASQUE_ACCESS_DENIED_COOLDOWN_MS,
+                )
+                LogManager.log(
+                    "MASQUE $modeLabel@$currentPort ответил отказом в доступе. " +
+                        "Ставим cooldown на этот адрес до перевыпуска ключа."
+                )
+            }
             if (
                 normalizedFailureReason in setOf("validated_no_traffic", "no_inbound_after_handshake", "handshake_timeout") &&
                 transportMode.engine != "masque"
@@ -10332,6 +10984,17 @@ class NovaVpnService : OperaNativeVpnService() {
                     AttemptOutcome.SUCCESS -> 0
                     else -> unstableMasqueStreak
                 }
+                // Порты, где CONNECT-IP открылся и обратно не пришло ни байта.
+                //
+                // Замер 2026-08-14 (Mi A1, root): такой же ноль даёт эталонный клиент
+                // usque — и с нашим ключом, и со своим, только что зарегистрированным
+                // им самим. Внутри рабочего туннеля WARP тот же usque на том же
+                // ключе несёт данные (HTTP/1.1 301 через CONNECT-IP), на голой сети —
+                // ни одного ответа за пять проб, соединение умирает по idle каждые 30 с.
+                // Значит режет путь, а не клиент и не ключ.
+                if (handshakeObserved.get() && !inboundEverObserved.get()) {
+                    masquePortsWithoutInbound.add(currentPort)
+                }
                 val protectedMasqueFastPathExhausted =
                     protectedMasqueFastPathKeys.isEmpty() ||
                         protectedMasqueFastPathKeys.all { it in triedMasqueFastPathKeys }
@@ -10341,6 +11004,21 @@ class NovaVpnService : OperaNativeVpnService() {
                         outcome in setOf(AttemptOutcome.UNSTABLE, AttemptOutcome.HANDSHAKE) &&
                         !allowMasqueIdentityRefreshInRun &&
                         protectedMasqueFastPathExhausted
+                // Два разных порта приняли CONNECT-IP и промолчали — дальше пробовать нечего.
+                //
+                // Перебор оставшихся портов занимал около полутора минут и заканчивался
+                // тем же нулём: путь один на все семь. Ключ при этом заведомо исправен —
+                // сервер его принял, — поэтому и перевыпуск ниже здесь только тратит
+                // выдачу и время. Честнее назвать причину и уйти в WireGuard/AWG.
+                if (masquePortsWithoutInbound.size >= 2) {
+                    masqueDataPlaneBlockedObserved = true
+                    LogManager.log(
+                        "MASQUE: CONNECT-IP открывается (порты ${masquePortsWithoutInbound.sorted().joinToString(", ")}), " +
+                            "но обратно не приходит ни байта. Ключ сервер принял, значит режет сеть, а не он. " +
+                            "Прекращаем перебор MASQUE и переходим к WireGuard/AWG."
+                    )
+                    break
+                }
                 if (
                     !refreshedMasqueIdentityThisRun &&
                     (
@@ -10361,23 +11039,27 @@ class NovaVpnService : OperaNativeVpnService() {
                                 "Сбрасываем cached MASQUE identity и пробуем refresh."
                         }
                     )
-                    // Прежний identity стираем только на время обновления и возвращаем,
-                    // если новый не пришёл.
+                    // Прежний identity не стирается заранее.
                     //
-                    // Дефект, ради которого это сделано: обновление здесь спекулятивное —
-                    // мы всего лишь подозреваем, что identity протух. А получить новый
-                    // можно не везде: регистрация идёт через api.cloudflareclient.com,
-                    // который на этой сети режется по SNI, и через Opera-прокси, который
-                    // поднимается не всегда. На тестовое устройство так и вышло: рабочий identity
-                    // стёрли, новый не получили, и MASQUE перестал стартовать вовсе —
-                    // «идентификатор устройства не получен, останавливаем цикл».
+                    // Обновление здесь спекулятивное — мы всего лишь подозреваем, что ключ
+                    // протух. Получить новый можно не везде: регистрация идёт через
+                    // api.cloudflareclient.com, который на этой сети режется по SNI, и через
+                    // Opera-прокси, который поднимается не всегда. На тестовом устройстве так и
+                    // вышло: рабочий identity стёрли, новый не получили, и MASQUE перестал
+                    // стартовать вовсе — «идентификатор устройства не получен».
+                    //
+                    // Прежняя лечебная мера — «вернуть стёртое, если новое не пришло» — сама
+                    // была дефектом: неудача здесь чаще всего означает истёкшее ожидание, а не
+                    // несостоявшийся запрос, и в настройки возвращался ключ, который сервер уже
+                    // заменил. Такой ключ выглядит рабочим и молчит на CONNECT-IP. Теперь
+                    // старый ключ просто не трогают до появления нового.
                     val previousMasqueConfigJson = clientData.getMasqueConfigJson().orEmpty()
-                    clientData.saveMasqueConfigJson(null)
                     val refreshedIdentity = prepareMasqueIdentity(
                         clientData = clientData,
                         fastRefresh = shouldForceLateOrdinaryWifiMasqueRefresh,
                         connectGenerationId = connectGenerationId,
                         trackConnectProgress = true,
+                        forceRefresh = true,
                     )
                     val refreshedJson = clientData.getMasqueConfigJson().orEmpty()
                     if (refreshedIdentity != null && refreshedJson.isNotBlank()) {
@@ -10403,12 +11085,10 @@ class NovaVpnService : OperaNativeVpnService() {
                     } else {
                         refreshedMasqueIdentityThisRun = true
                         if (previousMasqueConfigJson.isNotBlank()) {
-                            clientData.saveMasqueConfigJson(previousMasqueConfigJson)
                             runtimeMasqueIdentityJson = previousMasqueConfigJson
                             LogManager.log(
-                                "Обновить MASQUE identity не удалось — возвращаем прежний. " +
-                                    "Он хотя бы позволяет пробовать подключение, а без него " +
-                                    "MASQUE не стартует вовсе."
+                                "Обновить MASQUE identity не удалось. Прежний ключ остался на месте — " +
+                                    "он хотя бы позволяет пробовать подключение, а без него MASQUE не стартует вовсе."
                             )
                         } else {
                             LogManager.log("Обновить MASQUE identity не удалось. Продолжаем без refresh.")
@@ -11087,11 +11767,11 @@ class NovaVpnService : OperaNativeVpnService() {
                 val connectGenerationId = beginConnectGeneration(stopExisting = true)
 
                 val regionPreference = normalizeRegionPreference(clientData.getExitRegionPreference())
-                if (shouldUseWarpTransport(regionPreference)) {
+                if (shouldUseWarpTransport(regionPreference, clientData)) {
                     val config = clientData.getConfig()
                     if (config != null) {
                         val reconnectWarpOnly = autoReconnectShouldPreferWarpOnly(clientData, regionPreference)
-                        val operaAllowed = shouldAllowOperaTransport(regionPreference)
+                        val operaAllowed = shouldAllowOperaTransport(regionPreference, clientData)
                         configureAndStartVpn(
                             config.privateKey,
                             config.ipv4,
@@ -11111,10 +11791,17 @@ class NovaVpnService : OperaNativeVpnService() {
                             diagnosticsMode = false,
                             connectGenerationId = connectGenerationId,
                         )
-                    } else if (shouldAllowOperaTransport(regionPreference)) {
+                    } else if (shouldAllowOperaTransport(regionPreference, clientData)) {
                         configureAndStartOperaOnly(regionPreference, connectGenerationId)
+                    } else {
+                        // Своими профилями подключаться нечем без WARP-идентичности, а
+                        // подставлять встроенную Opera нельзя: пользователь выбрал не её.
+                        LogManager.log(
+                            "Смена сети: выбраны собственные профили, но WARP-конфигурация " +
+                                "не зарегистрирована. Встроенную Opera не подставляем."
+                        )
                     }
-                } else if (shouldAllowOperaTransport(regionPreference)) {
+                } else if (shouldAllowOperaTransport(regionPreference, clientData)) {
                     configureAndStartOperaOnly(regionPreference, connectGenerationId)
                 }
             } finally {
@@ -12027,7 +12714,7 @@ class NovaVpnService : OperaNativeVpnService() {
         )
 
     private fun masqueExperimentalPortOrder(): List<Int> =
-        listOf(443, 500, 1701, 4500, 4443, 8095, 8443)
+        listOf(500, 1701, 8443, 443, 4500, 4443, 8095)
 
     private fun warpPortRank(port: Int): Int {
         val quickRank = warpQuickPortOrder().indexOf(port)
@@ -12157,9 +12844,41 @@ class NovaVpnService : OperaNativeVpnService() {
             }
             return strategyScore + verifiedPriority * 1.35 + persistedSourceBoost + ownNetworkBoost
         }
-        val rankedMasqueAttempts = masqueAttempts.sortedByDescending { attempt ->
-            masqueRankScore(attempt)
-        }
+        // Выданный нам адрес идёт выше найденных сканом — разбивкой, а не прибавкой.
+        //
+        // Прибавка +6.0 существовала и раньше, но проигрывала бонусам источника:
+        // last-success-exact даёт +14.0, verified-config +8.0. То есть чужой адрес,
+        // однажды попавший в сохранённые, обходил тот единственный адрес, который
+        // Cloudflare выдала этому устройству. Здесь это уже не слагаемое: сначала свои,
+        // потом все остальные, а прежние баллы решают порядок внутри каждой группы.
+        //
+        // Сравнение идёт по самому адресу, а не по /24 и не по метке источника: /24
+        // неопределима для IPv6 (ipv4NetworkPrefix отдаёт null), а метка теряется, когда
+        // тот же адрес приходит из сохранённых. Чужие кандидаты не выбрасываются — они
+        // остаются хвостом: при явном выборе MASQUE перебор заканчивать нечем, и пустой
+        // список означал бы «НЕ ПОДКЛЮЧЕНО» без единой попытки.
+        fun normalizedMasqueHost(host: String): String =
+            host.trim().removePrefix("[").removeSuffix("]").lowercase()
+        val provisionedMasqueHosts = masqueAttempts
+            .filter { isOwnMasqueIdentityEndpoint(it.endpointSource) }
+            .map { normalizedMasqueHost(it.endpointHost) }
+            .filter { it.isNotBlank() }
+            .toSet()
+        fun isProvisionedMasqueAttempt(attempt: ConnectionAttempt): Boolean =
+            provisionedMasqueHosts.isNotEmpty() &&
+                normalizedMasqueHost(attempt.endpointHost) in provisionedMasqueHosts
+        // Отказавший адрес не поднимается вперёд даже своим происхождением: «ключ не
+        // обслуживаю» — это ответ про конкретную пару, и проверять его повторно в том же
+        // круге нечем. Но и выбрасывать нельзя: перебор MASQUE заканчивать некуда, поэтому
+        // отказавшие просто уходят в хвост.
+        val masqueCooldownNowMs = System.currentTimeMillis()
+        val rankedMasqueAttempts = masqueAttempts.sortedWith(
+            compareByDescending<ConnectionAttempt> {
+                !isMasqueEndpointRefusedRecently(clientData, it, masqueCooldownNowMs)
+            }
+                .thenByDescending { isProvisionedMasqueAttempt(it) }
+                .thenByDescending { masqueRankScore(it) }
+        )
         val rankedMasqueScoreByKey = rankedMasqueAttempts
             .associate { attempt ->
                 masqueAttemptKey(attempt) to masqueRankScore(attempt)
@@ -13620,9 +14339,15 @@ class NovaVpnService : OperaNativeVpnService() {
         // Именно так родной адрес и пропадал целиком, оставляя перебор из одних
         // сканированных — а те отвечают отказом по сертификату.
         //
-        // Среди своих адресов предпочитаем 443: только на этом порту ядро включает
-        // запасной путь MASQUE поверх TCP, и только он проходит там, где QUIC режут.
+        // Порт своего адреса выбираем по замеру, а не по предположению про TCP-fallback.
+        //
+        // Но «первым» не значит «единственным». Своих попыток набирается до восьми
+        // (четыре порта на каждый из двух режимов), а короткий перебор бывает и на три
+        // слота: тогда цикл вытеснения ниже опустошал список целиком, вместе с
+        // `last-success-exact`, который сам же и пытался уберечь, — и весь круг уходил на
+        // один адрес. Оставляем под остальных хотя бы один слот.
         val ownIdentityAttempts = preferredOwnMasqueIdentityAttempts(rankedMasqueAttempts)
+            .take((limit - 1).coerceAtLeast(1))
         if (ownIdentityAttempts.isNotEmpty()) {
             result.removeAll(ownIdentityAttempts)
             while (result.isNotEmpty() && result.size + ownIdentityAttempts.size > limit) {
@@ -13642,13 +14367,8 @@ class NovaVpnService : OperaNativeVpnService() {
 
         // На реальных сетях QUIC может отваливаться, а TCP fallback в core включается только
         // когда пробуем порт 443. Добавляем раннее покрытие ключевых портов без дублей.
-        val preferredPortCoverage = if (!legacy32 && !preferMessengerMasqueStealth) {
-            listOf(500, 1701, 4500, 443, 4443, 8443)
-        } else if (legacy32) {
-            listOf(500, 1701, 4500, 443, 4443, 8443)
-        } else {
-            listOf(500, 4443, 443, 1701, 4500, 8443)
-        }
+        // Тот же измеренный порядок, что и в masquePortPriority: 443 последним.
+        val preferredPortCoverage = listOf(8095, 8443, 4443, 1701, 4500, 500, 443)
         preferredPortCoverage.forEachIndexed { index, port ->
             if (result.any { it.port == port }) return@forEachIndexed
             val candidate = rankedMasqueAttempts.firstOrNull { attempt ->
@@ -13693,6 +14413,15 @@ class NovaVpnService : OperaNativeVpnService() {
                     result.add(2.coerceIn(0, result.size), fallback443)
                 }
             }
+        }
+        // Дальше решения принимаются по тому списку, который действительно поедет.
+        //
+        // Хвост за пределами лимита всё равно срежется на выходе, а проверка «все адреса
+        // одинаковые» и замена одного из них на кандидата с другого узла считались по
+        // полному списку. В итоге замена попадала в отрезаемый хвост и не делала ничего —
+        // ровно в том случае, ради которого написана: когда список состоит из одного узла.
+        while (result.size > limit) {
+            result.removeAt(result.lastIndex)
         }
         val primaryHost = result.firstOrNull()?.endpointHost?.trim().orEmpty()
         val sameHostOnly = primaryHost.isNotBlank() &&
@@ -13759,17 +14488,48 @@ class NovaVpnService : OperaNativeVpnService() {
     ): List<ConnectionAttempt> {
         val own = rankedMasqueAttempts.filter { isOwnMasqueIdentityEndpoint(it.endpointSource) }
         if (own.isEmpty()) return emptyList()
-        // 443 предпочитаем внутри режима, а не поверх него: у режимов свой порядок портов,
-        // и отбор «сначала все 443» оставлял в списке один Zero Trust — тот самый, который
-        // молчит. Своё лучшее у каждого режима, consumer первым.
-        fun pick(modeName: String): ConnectionAttempt? {
-            val ofMode = own.filter { it.mode.name.equals(modeName, ignoreCase = true) }
-            return ofMode.firstOrNull { it.port == 443 } ?: ofMode.firstOrNull()
+        // Своему адресу даём НЕСКОЛЬКО портов, а не один.
+        //
+        // Раньше здесь предпочитался 443 — «только на нём ядро включает запасной путь
+        // поверх TCP». Замер 2026-08-12 (nova-core/cmd/masqueprobe, четыре прогона по
+        // одному и тому же ключу и адресу) это опроверг: 443 не ответил ни разу, а
+        // остальные порты отвечают «200 OK» с перебоями — 1701 и 4500 в трёх прогонах
+        // из четырёх, 8095 во всех, где его пробовали, 500 в одном. То есть верного
+        // порта не существует: молчание — свойство попытки, а не порта.
+        //
+        // Поэтому берём у каждого режима по несколько лучших портов в измеренном
+        // порядке. Один глухой порт больше не лишает свой адрес шанса, а именно так и
+        // выглядел отказ: единственная попытка на 443 и уход в скан.
+        fun pickAll(modeName: String): List<ConnectionAttempt> =
+            own.asSequence()
+                .filter { it.mode.name.equals(modeName, ignoreCase = true) }
+                .sortedBy { masquePortPriority(it.port) }
+                .distinctBy { it.port }
+                .take(OWN_MASQUE_IDENTITY_PORTS_PER_MODE)
+                .toList()
+
+        val zeroTrust = pickAll("MASQUE-ZT")
+        val consumer = pickAll("MASQUE-CONSUMER")
+        // Чередуем режимы: у одного адреса их обслуживают разные службы Cloudflare, и
+        // подряд идущие попытки одного режима тратят круг на одну и ту же службу.
+        val interleaved = buildList {
+            val maxSize = maxOf(zeroTrust.size, consumer.size)
+            for (index in 0 until maxSize) {
+                zeroTrust.getOrNull(index)?.let { add(it) }
+                consumer.getOrNull(index)?.let { add(it) }
+            }
         }
-        val zeroTrust = pick("MASQUE-ZT")
-        val consumer = pick("MASQUE-CONSUMER")
-        return listOfNotNull(zeroTrust, consumer).ifEmpty { listOf(own.first()) }
+        return interleaved.ifEmpty { listOf(own.first()) }
     }
+
+    /**
+     * Сколько портов своего адреса пробовать в одном круге на каждый режим.
+     *
+     * Четыре, а не три: по замеру в каждый момент отвечают два-четыре порта из семи,
+     * и какие именно — меняется. Отказ одной попытки стоит несколько секунд, а
+     * пропущенный рабочий порт — всё подключение.
+     */
+    private val OWN_MASQUE_IDENTITY_PORTS_PER_MODE = 4
 
     /**
      * Порядок источников адресов MASQUE.
@@ -13795,15 +14555,27 @@ class NovaVpnService : OperaNativeVpnService() {
         }
     }
 
+    /**
+     * Порядок портов MASQUE — по замеру 2026-08-12 (nova-core/cmd/masqueprobe).
+     *
+     * Двенадцать проходов по свежим ключам за день. Главное наблюдение: рабочих портов
+     * много, но в каждый момент отвечают два-четыре из семи, и какие именно — меняется
+     * от минуты к минуте. Поэтому список не «правильный порт», а порядок ставок:
+     * 8095, 8443 и 4443 отвечали почти всегда, 1701 и 4500 — примерно в половине
+     * проходов, 500 — в четырёх из девяти, 443 — один раз за день, 2408 — ни разу.
+     *
+     * 443 оставлен последним, а не выброшен: только на нём ядро включает запасной путь
+     * поверх TCP, и на сети, где режут QUIC, он может оказаться единственным рабочим.
+     */
     private fun masquePortPriority(port: Int): Int {
         return when (port) {
-            1701 -> 0
-            500 -> 1
-            4500 -> 2
-            443 -> 3
-            4443 -> 4
-            8443 -> 5
-            8095 -> 6
+            8095 -> 0
+            8443 -> 1
+            4443 -> 2
+            1701 -> 3
+            4500 -> 4
+            500 -> 5
+            443 -> 6
             else -> 7
         }
     }
@@ -13815,7 +14587,7 @@ class NovaVpnService : OperaNativeVpnService() {
         if (attempts.isEmpty()) return attempts
 
         val importedProtocolModeActive = clientData.isImportedConfigSourceActive()
-        val forcedImportedProtocol = clientData.getImportedProtocolPreference()
+        val forcedImportedProtocol = clientData.resolveEffectiveImportedProtocol()
             .takeIf { importedProtocolModeActive && !it.equals("auto", ignoreCase = true) }
         val userImportedAttempts = buildUserImportedWarpAttemptSet(
             attempts,
@@ -13931,6 +14703,33 @@ class NovaVpnService : OperaNativeVpnService() {
         return finalOrdered
     }
 
+    /**
+     * Отвечал ли этот адрес MASQUE отказом в доступе недавно.
+     *
+     * Отдельно от общей проверки [isWarpAttemptCoolingDown] намеренно: та исключает MASQUE
+     * целиком и исключает по делу — обычные причины отказа (`handshake_timeout`,
+     * `no_traffic`) на MASQUE описывают не адрес, а возраст ключа, и пауза по ним закрыла бы
+     * исправные узлы. Здесь проверяется единственная причина, которая действительно
+     * принадлежит адресу: `tls: access denied` — прямой ответ «предъявленный ключ не
+     * обслуживаю». Пауза заканчивается вместе с ключом, который её вызвал
+     * (см. [ClientData.saveMasqueConfigJson]).
+     */
+    private fun isMasqueEndpointRefusedRecently(
+        clientData: ClientData,
+        attempt: ConnectionAttempt,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Boolean {
+        if (attempt.mode.engine != "masque") return false
+        return clientData.isWarpAttemptCoolingDown(
+            engine = attempt.mode.engine,
+            mode = attempt.mode.name,
+            host = attempt.endpointHost,
+            port = attempt.port,
+            preferredSni = null,
+            nowMs = nowMs,
+        )
+    }
+
     private fun isWarpAttemptCoolingDown(
         clientData: ClientData,
         attempt: ConnectionAttempt,
@@ -13970,7 +14769,7 @@ class NovaVpnService : OperaNativeVpnService() {
         if (!importedProtocolModeActive) {
             return emptyList()
         }
-        val forcedImportedProtocol = clientData.getImportedProtocolPreference()
+        val forcedImportedProtocol = clientData.resolveEffectiveImportedProtocol()
             .takeIf { importedProtocolModeActive && !it.equals("auto", ignoreCase = true) }
 
         val importedConfigs = mergedVerifiedWarpConfigs(clientData)
@@ -14013,9 +14812,14 @@ class NovaVpnService : OperaNativeVpnService() {
         fun fallbackModeTemplate(config: WarpVerifiedConfig): TransportMode {
             val normalizedMode = config.mode.lowercase()
             val explicitAwgImport = config.userImported && hasExplicitAwgImport(config.rawConfig)
-            val primaryPort = clientDataPrimaryPortForConfig(config, clientData)
+            // Первым идёт собственный порт профиля — см. пояснение ниже по коду о том,
+            // почему подобранный по статистике порт стоил импортированному профилю
+            // его же ключей и параметров обфускации.
+            val primaryPort = config.port.takeIf { it in 1..65535 }
+                ?: clientDataPrimaryPortForConfig(config, clientData)
             val preferredPorts = buildList {
                 add(primaryPort)
+                addAll(clientDataPreferredPortsForConfig(config, clientData, limit = 6))
                 when (normalizedMode) {
                     "warp-awg-lite" -> addAll(listOf(1701, 500, 988, 4500, 2408, 443))
                     "warp-awg-exact",
@@ -14131,12 +14935,26 @@ class NovaVpnService : OperaNativeVpnService() {
                     addImportedAttemptWithFallback(adjusted)
                     continue
                 }
-                val primaryPort = clientDataPrimaryPortForConfig(config, clientData)
+                // Порт импортированного профиля — его собственный, а не подобранный по
+                // статистике.
+                //
+                // `clientDataPrimaryPortForConfig` намеренно исключает `config.port`
+                // (`it != config.port`) и агрегирует порты всех записей с тем же
+                // хостом и режимом, включая встроенные. Попытка получалась на чужом
+                // порту, а `findMatchingWarpVerifiedConfigForAttempt` ищет запись
+                // строго по порту — импортированный профиль переставал находиться, и
+                // вместе с ним терялись его ключи, DNS, MTU и параметры обфускации
+                // AWG: в журнале «Используем identity Nova», строки «AWG client
+                // extras» нет вовсе.
+                val primaryPort = config.port.takeIf { it in 1..65535 }
+                    ?: clientDataPrimaryPortForConfig(config, clientData)
                 val createdAttempt = ConnectionAttempt(
                     endpointHost = resolvedHost,
                     port = primaryPort,
                     mode = modeTemplate.copy(
-                        preferredPorts = listOf(primaryPort) + modeTemplate.preferredPorts.filter { it != primaryPort },
+                        preferredPorts = listOf(primaryPort) +
+                            clientDataPreferredPortsForConfig(config, clientData, limit = 6) +
+                            modeTemplate.preferredPorts.filter { it != primaryPort },
                     ),
                     endpointSource = config.endpointSource.ifBlank { "verified-config" },
                     importedConfigHost = config.host,
@@ -14342,7 +15160,7 @@ class NovaVpnService : OperaNativeVpnService() {
         if (attempts.isEmpty() || importedAttempts.isEmpty() || limit <= 0) return emptyList()
         val importedProtocolModeActive = clientData.isImportedConfigSourceActive()
         if (!importedProtocolModeActive) return emptyList()
-        val forcedImportedProtocol = clientData.getImportedProtocolPreference()
+        val forcedImportedProtocol = clientData.resolveEffectiveImportedProtocol()
             .takeIf { importedProtocolModeActive && !it.equals("auto", ignoreCase = true) }
         if (importedProtocolModeActive) {
             val forced = importedAttempts
@@ -15445,8 +16263,19 @@ class NovaVpnService : OperaNativeVpnService() {
         attempts: List<ConnectionAttempt>,
         clientData: ClientData,
     ): List<ConnectionAttempt> {
+        // Адаптация поднимает настоящие туннели, а не считает статистику по бумажке.
+        // В режиме «только импортированные» это значит, что встроенные профили брать
+        // нельзя: пользователь просил свои, а кнопка адаптации подключалась мимо них.
+        val importedSourceActive = clientData.isImportedConfigSourceActive()
         val verifiedConfigs = clientData.getWarpVerifiedConfigs()
-            .filter { !it.manual && it.endpointSource.equals("bundled-seed", ignoreCase = true) }
+            .filter { !it.manual }
+            .filter {
+                if (importedSourceActive) {
+                    it.userImported && !it.engine.equals("masque", ignoreCase = true)
+                } else {
+                    it.endpointSource.equals("bundled-seed", ignoreCase = true)
+                }
+            }
             .sortedWith(
                 compareBy<WarpVerifiedConfig> { it.seedOrder }
                     .thenBy { it.host }
@@ -17164,6 +17993,50 @@ class NovaVpnService : OperaNativeVpnService() {
         return bias
     }
 
+    /**
+     * Имя, которым MASQUE представляется в рукопожатии.
+     *
+     * Собственные имена Cloudflare (`consumer-masque…`, `zt-masque…`) — это и есть то,
+     * по чему нас режут. Замер 2026-08-15 на Mi A1, один ключ, один адрес
+     * `162.159.198.2:443`, минуты между прогонами:
+     *
+     *   `consumer-masque.cloudflareclient.com` → туннель встаёт, данных нет, 0 из 2;
+     *   `4pda.to`, `www.google.com`, `static.twitchcdn.net`, `vk.com` → 3 из 3,
+     *   `HTTP/1.1 301`, 389 байт через CONNECT-IP. То же на порту 8443.
+     *
+     * Подменять имя безопасно: узел проверяется по `endpoint_pub_key` из ответа enroll,
+     * а не по имени. В самом usque рядом с `InsecureSkipVerify` так и написано — «SNI
+     * usually is not for the endpoint». Приём взят из рабочего конфига mihomo/Clash.
+     *
+     * Это НЕ возврат подстановки SNI для WARP, снятой в 3b: там подменялось имя у
+     * WireGuard-профилей и оно ломало туннели. Здесь поле настоящее, и без подмены
+     * MASQUE не работает вовсе.
+     */
+    private fun resolveMasqueHandshakeSni(
+        camouflageHost: String,
+        mode: TransportMode,
+        host: String,
+        port: Int,
+    ): String {
+        val adaptive = camouflageHost.trim()
+        if (adaptive.isNotBlank() && !isCloudflareMasqueSni(adaptive)) {
+            return adaptive
+        }
+        // Ветки «чистое рукопожатие» намеренно оставляют маскировку пустой. Раньше это
+        // означало имя Cloudflare, то есть заведомо отрезанную попытку; теперь пустое
+        // значение выбирает нейтральное имя из запасного набора — своё на каждый
+        // адрес и режим, чтобы попытки не повторяли друг друга.
+        val seed = "$host:$port:${mode.name}".hashCode()
+        val index = ((seed % MASQUE_NEUTRAL_SNI_POOL.size) + MASQUE_NEUTRAL_SNI_POOL.size) %
+            MASQUE_NEUTRAL_SNI_POOL.size
+        return MASQUE_NEUTRAL_SNI_POOL[index]
+    }
+
+    private fun isCloudflareMasqueSni(value: String): Boolean {
+        val normalized = value.trim().lowercase(Locale.US)
+        return normalized.endsWith("cloudflareclient.com")
+    }
+
     private fun resolveAdaptiveCamouflageHost(
         clientData: ClientData,
         seed: String,
@@ -18581,11 +19454,36 @@ class NovaVpnService : OperaNativeVpnService() {
         }
     }
 
-    private fun shouldUseWarpTransport(regionPreference: String): Boolean {
+    /**
+     * Выбран ли пользователем собственный источник профилей.
+     *
+     * Читается из файла, поэтому одинаково видно из обоих процессов. Здесь заведён
+     * отдельным методом, чтобы решение о транспорте принималось в одном месте: пока
+     * его принимали по одному региону, оставшийся с прошлого раза EU/US отменял режим
+     * «только импортированные» целиком — цикл уходил в Opera, и ни одна
+     * импортированная попытка не выполнялась.
+     */
+    private fun ownProfileSourceChosen(clientData: ClientData = ClientData(this)): Boolean =
+        clientData.isImportedConfigSourceActive() || clientData.isVlessExplicitlyChosen()
+
+    private fun shouldUseWarpTransport(
+        regionPreference: String,
+        clientData: ClientData = ClientData(this),
+    ): Boolean {
+        // Источник профилей старше региона: в режиме импортированных экран настроек
+        // показывает не регионы, а протоколы, и сменить регион пользователю нечем.
+        if (ownProfileSourceChosen(clientData)) return true
         return regionPreference != "eu" && regionPreference != "us"
     }
 
-    private fun shouldAllowOperaTransport(regionPreference: String): Boolean {
+    private fun shouldAllowOperaTransport(
+        regionPreference: String,
+        clientData: ClientData = ClientData(this),
+    ): Boolean {
+        // Opera — встроенный транспорт. Подставлять его под выбранные пользователем
+        // профили нельзя ни в одной ветке: правило «явный выбор не подменяем»
+        // (RegionTransportPolicy) распространяется и на выбор источника профилей.
+        if (ownProfileSourceChosen(clientData)) return false
         if (regionPreference == "ru") return false
         return OperaProxyManager.isSupportedOnDevice(this)
     }
@@ -19550,6 +20448,139 @@ class NovaVpnService : OperaNativeVpnService() {
      * запрос ушёл бы мимо, в заблокированный домен. Поэтому добываем личность
      * только на собственном WARP/MASQUE-туннеле.
      */
+    private fun probeMasqueFromServiceProcess(clientData: ClientData) {
+        val identityJson = clientData.getMasqueConfigJson().orEmpty()
+        if (identityJson.isBlank()) {
+            LogManager.log("ADB debug: пробовать нечего — профиля MASQUE в службе нет.")
+            return
+        }
+        startSafeServiceThread("NovaMasqueProbe") {
+            val ports = listOf(1701, 4500, 8095, 8443, 443)
+            LogManager.log("ADB debug: проба MASQUE изнутри службы, порты $ports. Каждый порт — без предварительной пробы сокета и с ней.")
+            // Пачка из десяти фальшивых пакетов QUIC уходит с того же сокета перед
+            // рукопожатием и включена по умолчанию. Эталонная проба её не шлёт и
+            // обслуживается, наша — шлёт и получает молчание на CONNECT-IP. Меряем оба
+            // варианта подряд на одном ключе, иначе разницу опять спишут на возраст ключа.
+            // Пачка выключена во всех вариантах: замер 2026-08-13 показал, что с ней
+            // рукопожатие QUIC не встаёт вовсе, и сравнивать было бы нечего. Меняется
+            // только отдельное ожидание SETTINGS — последнее структурное отличие от
+            // эталонной пробы, которая шлёт CONNECT-IP сразу.
+            setMasqueFakeBurstEnabledCompat(false)
+            // Меняется только бюджет на SETTINGS + CONNECT-IP. Все отказы приходят ровно
+            // на границе штатных 3,5 с, а исключали этот срок пробой из shell — там
+            // ответ приходит за десятки миллисекунд, и короткого срока хватает. Изнутри
+            // `:vpn` это не проверялось ни разу.
+            ports.forEach { port ->
+                listOf(false, true).forEach { preprobe ->
+                    runCatching { nova.Nova.setMasqueSocketPreprobeEnabled(preprobe) }
+                    val result = try {
+                        nova.Nova.probeMasqueHandshake(identityJson, "", port.toLong(), "")
+                    } catch (e: Exception) {
+                        "исключение: ${e.message}"
+                    }
+                    LogManager.log(
+                        "ADB debug: проба MASQUE порт $port, предварительная проба сокета " +
+                            "${if (preprobe) "включена" else "выключена"} -> $result"
+                    )
+                }
+            }
+            runCatching { nova.Nova.setMasqueSocketPreprobeEnabled(false) }
+            setMasqueFakeBurstEnabledCompat(true)
+            LogManager.log("ADB debug: проба MASQUE завершена.")
+        }
+    }
+
+    /**
+     * Выпускает два ключа MASQUE подряд и складывает оба на диск.
+     *
+     * Идёт в отдельном потоке: это сетевая операция, а действие приходит на главный поток
+     * службы. Память ядра о выпуске сбрасывается перед каждым вызовом — иначе второй
+     * вызов вернул бы результат первого, ради чего эта память и заведена.
+     *
+     * Личность берём запасную, как и весь путь MASQUE: цикл подключения и фоновая добыча
+     * подписываются именно ею.
+     */
+    private fun doubleEnrollMasqueForDiagnostics(clientData: ClientData) {
+        val reserve = clientData.getReserveWarpIdentity()
+        val token = reserve?.accessToken?.trim()?.takeIf { it.isNotEmpty() }
+            ?: clientData.getAccessToken().orEmpty().trim()
+        val deviceId = reserve?.deviceId?.trim()?.takeIf { it.isNotEmpty() }
+            ?: clientData.getDeviceId().orEmpty().trim()
+        if (token.isBlank() || deviceId.isBlank()) {
+            LogManager.log("ADB debug: двойной выпуск MASQUE невозможен — нет токена или device id.")
+            return
+        }
+        val targetDir = getExternalFilesDir(null) ?: filesDir
+        Thread(
+            {
+                LogManager.log("ADB debug: двойной выпуск MASQUE, устройство $deviceId.")
+                var lastGoodJson = ""
+                listOf("masque_enroll_a.json", "masque_enroll_b.json").forEachIndexed { index, fileName ->
+                    runCatching { Nova.forgetMasqueEnrollResult(deviceId) }
+                    val issued = runCatching {
+                        Nova.ensureMasqueConfig("", token, deviceId, "Nova Android").orEmpty()
+                    }.getOrElse { error ->
+                        LogManager.log("ADB debug: выпуск ${index + 1} не удался: ${error.message}")
+                        ""
+                    }
+                    java.io.File(targetDir, fileName).writeText(issued.ifBlank { "{}" })
+                    if (issued.isNotBlank()) lastGoodJson = issued
+                    LogManager.log(
+                        "ADB debug: выпуск ${index + 1} — ${
+                            if (issued.isBlank()) "пусто" else "${issued.length} символов"
+                        }, файл $fileName."
+                    )
+                }
+                if (lastGoodJson.isNotBlank()) {
+                    // Последний ключ и есть тот, который держит сервер, — пусть им же
+                    // пользуется и приложение, иначе следующий цикл наберёт мёртвым.
+                    clientData.saveMasqueConfigJson(lastGoodJson)
+                }
+                LogManager.log("ADB debug: двойной выпуск MASQUE закончен. Файлы в ${targetDir.absolutePath}.")
+            },
+            "NovaMasqueDoubleEnroll",
+        ).apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun dumpMasqueConfigForDiagnostics(clientData: ClientData, includeSecrets: Boolean = false) {
+        val raw = clientData.getMasqueConfigJson().orEmpty()
+        val target = java.io.File(
+            getExternalFilesDir(null) ?: filesDir,
+            "masque_config_dump.json",
+        )
+        if (raw.isBlank()) {
+            target.writeText("{}")
+            LogManager.log("ADB debug: профиля MASQUE в службе нет — выгружен пустой объект.")
+            return
+        }
+        val prepared = try {
+            val json = JSONObject(raw)
+            if (!includeSecrets) {
+                json.keys().asSequence().toList().forEach { key ->
+                    if (key == "private_key" || key == "access_token") {
+                        val value = json.optString(key)
+                        json.put(key, "<${value.length} символов>")
+                    }
+                }
+            }
+            json.toString(2)
+        } catch (e: Exception) {
+            "не разобрано: ${e.message}"
+        }
+        target.writeText(prepared)
+        LogManager.log(
+            if (includeSecrets) {
+                "ADB debug: профиль MASQUE выгружен БЕЗ маскировки в ${target.absolutePath}. " +
+                    "Файл содержит приватный ключ — удалить после замера."
+            } else {
+                "ADB debug: профиль MASQUE выгружен в ${target.absolutePath}."
+            }
+        )
+    }
+
     private fun scheduleWarpIdentityBackfill() {
         if (isOperaBackendLabel(currentBackendLabel)) return
         // Ключ MASQUE добываем только тогда, когда MASQUE выбран.
@@ -19577,7 +20608,66 @@ class NovaVpnService : OperaNativeVpnService() {
             // Сюда доходим только с выбранным MASQUE: пользователь сидит без него и
             // ждёт результата, а не фоновой любезности. Паузу после неудачи не выдерживаем.
             ignoreCooldown = true,
+            onIdentityReady = ::returnToMasqueAfterRegistrationBootstrap,
         )
+    }
+
+    /**
+     * Возвращает цикл на MASQUE после того, как ключ выпущен через временный туннель.
+     *
+     * Без этого шага ступень регистрации оставалась бы конечной станцией: ключ есть,
+     * а работает по-прежнему WARP — то есть ровно та молчаливая подмена выбранного
+     * протокола, которую правила проекта запрещают.
+     */
+    private fun returnToMasqueAfterRegistrationBootstrap() {
+        if (masqueRegistrationBootstrapGenerationId == 0) return
+        if (!isConnectGenerationCurrent(masqueRegistrationBootstrapGenerationId)) {
+            masqueRegistrationBootstrapGenerationId = 0
+            return
+        }
+        if (isUserStopped || explicitStopRequested) return
+        val clientData = ClientData(applicationContext)
+        if (clientData.getExitRegionPreference().trim().lowercase(Locale.US) != "masque") {
+            masqueRegistrationBootstrapGenerationId = 0
+            return
+        }
+        masqueRegistrationBootstrapGenerationId = 0
+        LogManager.log(
+            "Ключ MASQUE выпущен через временный туннель. Возвращаемся на выбранный протокол."
+        )
+        publishTransportNotice(clientData, "Ключ MASQUE получен. Переключаемся на MASQUE.")
+        startSafeServiceThread("NovaMasqueAfterBootstrap") {
+            // Ступень регистрации сносим полностью, а не полагаемся на зачистку внутри
+            // нового цикла: та умеет пропустить себя («транспорт уже очищен»), и MASQUE
+            // набирался, пока временный туннель ещё жив. Эталонная проба так не делала
+            // ни разу — она всегда набирала из чистого состояния.
+            LogManager.log("Снимаем ступень регистрации целиком перед набором MASQUE.")
+            stopNovaCoreEngine(joinTimeoutMs = 1500L, allowBlockingWait = true)
+            stopOperaFallback(
+                joinTimeoutMs = 1500L,
+                stopProxyManager = true,
+                allowBlockingWait = true,
+            )
+            runCatching { XrayBridge.stop() }
+            closeActiveInterface()
+            // Пауза не для красоты: закрытие интерфейса асинхронно доходит до системы,
+            // и сокет MASQUE, открытый в ту же миллисекунду, может достаться ещё живому
+            // маршруту.
+            try {
+                Thread.sleep(1200L)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+            if (isUserStopped || explicitStopRequested) return@startSafeServiceThread
+            val intent = Intent(this, NovaVpnService::class.java).apply {
+                action = ACTION_REAPPLY_CURRENT_SESSION
+            }
+            try {
+                startService(intent)
+            } catch (e: Exception) {
+                LogManager.log("Не удалось перезапустить цикл на MASQUE: ${e.message}")
+            }
+        }
     }
 
     private fun refreshConnectedExitObservationAsync() {

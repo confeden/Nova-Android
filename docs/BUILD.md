@@ -53,6 +53,27 @@ keyPassword=...
 Без него собирается только debug-вариант. Сам файл и хранилище ключей в репозиторий не
 попадают — они перечислены в `.gitignore`.
 
+## Секреты, которых в репозитории нет
+
+Два значения принадлежат владельцу инфраструктуры и в исходники не входят. Оба
+читаются из переменной окружения или из `local.properties`:
+
+| Значение | Переменная окружения | Ключ в `local.properties` | Без него |
+| --- | --- | --- | --- |
+| Подпись рукопожатий WSS к `nova-app.eu` | `NOVA_TG_CF_SECRET` | `novaTgCfSecret` | не работает релей Telegram через собственные поддомены |
+| Пароль релеев API SurfEasy | `NOVA_OPERA_RELAY_PASSWORD` | `novaOperaRelayPassword` | регионы EU/US ищут endpoint'ы прямым discover |
+
+Релизная сборка **у владельца** намеренно падает без первого значения: молчаливый откат
+на пустой секрет дал бы внешне рабочий APK, теряющий домен. Стороннему сборщику этот
+запрет не нужен — снимается явным флагом:
+
+```bash
+NOVA_ALLOW_UNSIGNED_RELEASE=1 ./gradlew assembleRelease
+```
+
+или `novaAllowUnsignedRelease=true` в `local.properties`. Всё остальное — WARP, MASQUE,
+VLESS, шлюз, обновления — собирается и работает без обоих секретов.
+
 ## Пересборка Go-ядра
 
 Нужна, только если вы правите Go-код. Требуется Go 1.26+ и Android NDK 27.
@@ -73,16 +94,26 @@ cd nova-xray
 
 ### Ядро nova-core для AmneziaWG и MASQUE
 
-Собирается через `gomobile bind` в `.aar`. Понадобятся внешние зависимости, подключённые
-через `replace` в `nova-core/go.mod`; их нужно клонировать в `tools/` рядом с проектом:
+`nova-core/go.mod` подключает пять проектов через `replace`, то есть по путям на диске.
+Три из них у нас пропатчены — клонировать upstream «как есть» значит собрать другое ядро.
+Пины коммитов и сами патчи лежат в `tools/deps/`, раскладывает всё один скрипт:
 
 ```bash
-git clone https://github.com/amnezia-vpn/amneziawg-go   tools/amneziawg-go
-git clone https://github.com/amnezia-vpn/amneziawg-tools tools/amneziawg-tools
-git clone https://github.com/bepass-org/warp-plus        tools/warp-plus
+tools/deps/fetch_go_deps.sh
 ```
 
-Всю сборку делает скрипт: он вызывает `gomobile bind`, снимает символы с `libgojni.so`
+| Зависимость | Путь | Патч |
+| --- | --- | --- |
+| `amneziawg-go` | `tools/amneziawg-go` | да — `device/`, `tun/netstack/` |
+| `warp-plus` | `tools/warp-plus` | да — `wireguard/tun/netstack/`, `wiresocks/` |
+| `gvisor` | `build/deps/gvisor` | да — снят `pkg/sync/runtime_constants_go125.go` (не собирается на Go 1.26) |
+| `usque` | `build/deps/usque` | нет |
+| `connect-ip-go` | `tools/connect-ip-go` | наш форк, лежит прямо в репозитории |
+
+Каталоги зависимостей в репозиторий не кладутся: один gvisor весит больше всех исходников
+вместе взятых. В репозитории — пины, патчи и скрипт; результат воспроизводим побайтово.
+
+Дальше сборку делает скрипт: он вызывает `gomobile bind`, снимает символы с `libgojni.so`
 и раскладывает результат по обоим местам сразу.
 
 ```bash
@@ -94,6 +125,25 @@ tools/build_nova_core_aar.sh
 > старая библиотека — при изменении `nova-core` обновляйте оба места, иначе новый
 > экспортированный метод даст `UnsatisfiedLinkError` на реальных устройствах. Скрипт
 > обновляет оба; при ручной сборке про это нужно помнить.
+
+## Готовые нативные библиотеки
+
+В `app/src/main/jniLibs/<abi>/` лежат собранные `.so`. Три из них собираются из этого
+репозитория, остальные — внешние. Что откуда:
+
+| Библиотека | Происхождение |
+| --- | --- |
+| `libgojni.so` | `nova-core/`, собирается `tools/build_nova_core_aar.sh` |
+| `libnovaxray.so`, `libnovaxrayjni.so` | `nova-xray/`, собирается `nova-xray/build.sh`; в репозиторий не коммитятся |
+| `libnative-lib.so` | `app/src/main/cpp/native-lib.cpp`, собирается CMake в составе проекта |
+| `libtun2proxy.so` | [tun2proxy](https://github.com/tun2proxy/tun2proxy), сборка под Android NDK |
+| `liboperaproxy.so` | [opera-proxy](https://github.com/Snawoot/opera-proxy), сборка под Android |
+| `libtgwsproxy.so` | наш Go-слой релея Telegram, часть `nova-core` |
+
+Внешние библиотеки собраны заранее и лежат в репозитории готовыми — иначе для обычной
+сборки APK понадобились бы Rust и Go со всеми их цепочками. Если это неприемлемо для
+аудита, каждую можно пересобрать из указанного источника и подменить файл: код Nova
+обращается к ним только через объявленные JNI-имена.
 
 ## Тесты
 

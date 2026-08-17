@@ -8,12 +8,26 @@
 ```bash
 git clone https://github.com/confeden/Nova-Android.git
 cd Nova-Android
-./gradlew assembleDebug
+./gradlew assembleGithubDebug
 ```
 
-Готовый файл: `app/build/outputs/apk/debug/`.
+Готовый файл: `app/build/outputs/apk/github/debug/`.
 
 На Windows используйте `gradlew.bat`.
+
+## Варианты сборки
+
+Сборка бывает двух видов, различие между ними ровно одно — откуда приходят
+обновления:
+
+| Вариант | Задача Gradle | Встроенное обновление |
+| --- | --- | --- |
+| `github` (по умолчанию) | `assembleGithubRelease` | работает: приложение само проверяет релизы и предлагает скачать |
+| `fdroid` | `assembleFdroidRelease` | выключено: обновления выдаёт каталог F-Droid |
+
+Правила F-Droid запрещают приложению самому скачивать исполняемые файлы, поэтому
+для каталога собирается вариант `fdroid`. Код при этом общий: различие задаётся
+флагом `BuildConfig.UPDATER_ENABLED`, и на сборку `github` это не влияет.
 
 ## Что должно быть установлено
 
@@ -41,7 +55,7 @@ Android Studio создаёт его сам при первом открытии
 
 ## Подпись релиза
 
-Для `assembleRelease` нужен файл `keystore.properties` в корне:
+Для `assembleGithubRelease` нужен файл `keystore.properties` в корне:
 
 ```properties
 storeFile=/путь/к/nova.jks
@@ -68,7 +82,7 @@ keyPassword=...
 запрет не нужен — снимается явным флагом:
 
 ```bash
-NOVA_ALLOW_UNSIGNED_RELEASE=1 ./gradlew assembleRelease
+NOVA_ALLOW_UNSIGNED_RELEASE=1 ./gradlew assembleGithubRelease
 ```
 
 или `novaAllowUnsignedRelease=true` в `local.properties`. Всё остальное — WARP, MASQUE,
@@ -136,9 +150,8 @@ tools/build_nova_core_aar.sh
 | `libgojni.so` | `nova-core/`, собирается `tools/build_nova_core_aar.sh` |
 | `libnovaxray.so`, `libnovaxrayjni.so` | `nova-xray/`, собирается `nova-xray/build.sh`; в репозиторий не коммитятся |
 | `libnative-lib.so` | `app/src/main/cpp/native-lib.cpp`, собирается CMake в составе проекта |
-| `libtun2proxy.so` | [tun2proxy](https://github.com/tun2proxy/tun2proxy), сборка под Android NDK |
-| `liboperaproxy.so` | [opera-proxy](https://github.com/Snawoot/opera-proxy), сборка под Android |
-| `libtgwsproxy.so` | наш Go-слой релея Telegram, часть `nova-core` |
+| `libtun2proxy.so` | [tun2proxy](https://github.com/tun2proxy/tun2proxy) `v0.7.21`, собирается `tools/build_tun2proxy.sh`; выше поднимать нельзя — с v0.8.0 убран C-API `tun2proxy_with_fd_run` |
+| `liboperaproxy.so` | [opera-proxy](https://github.com/snawoot-proxies-forks/opera-proxy) `v1.15.0-fork`, собирается `tools/build_opera_proxy.sh` |
 
 Внешние библиотеки собраны заранее и лежат в репозитории готовыми — иначе для обычной
 сборки APK понадобились бы Rust и Go со всеми их цепочками. Если это неприемлемо для

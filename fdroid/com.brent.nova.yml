@@ -1,0 +1,124 @@
+### Метаданные F-Droid для Nova. ЧЕРНОВИК — до подачи прогнать `fdroid build`.
+#
+# Кладётся в форк fdroiddata как metadata/com.brent.nova.yml,
+# оттуда merge request в gitlab.com/fdroid/fdroiddata.
+#
+# ЧТО ПРОВЕРЕНО ЛОКАЛЬНО:
+#   * лицензия GPL-3.0 (дословный текст FSF);
+#   * flavor `fdroid` собирается и в нём выключен встроенный загрузчик обновлений
+#     (BuildConfig.UPDATER_ENABLED=false), при этом flavor `github` не изменился;
+#   * libtun2proxy_jni.so собирается из src/main/cpp для обеих ABI;
+#   * liboperaproxy.so собирается из snawoot-proxies-forks/opera-proxy@v1.15.0-fork
+#     (tools/build_opera_proxy.sh) и проверен на устройстве: режим Opera EU
+#     поднялся, выходной IP сменился на нидерландский;
+#   * libtun2proxy.so собирается из tun2proxy/tun2proxy@v0.7.21
+#     (tools/build_tun2proxy.sh), режим Opera EU проверен на устройстве.
+#
+# ЧТО НЕ ПРОВЕРЕНО И ТРЕБУЕТ ПРОГОНА У НИХ:
+#   * шаги ниже собирают нативные библиотеки на их buildserver. Локально работают
+#     сами скрипты, но не эта последовательность в их окружении. До merge request
+#     обязателен `fdroid build --on-server com.brent.nova` из клона fdroiddata —
+#     рецепт с четырьмя тулчейнами с первого раза не проходит почти никогда.
+#   * рабочий каталог шагов prebuild/build в fdroidserver надо подтвердить: ниже
+#     всюду явный `cd`, чтобы не зависеть от умолчания.
+#   * всё, что раньше было готовым бинарником, теперь имеет шаг сборки. Не
+#     проверено только то, что эти шаги пройдут в их окружении.
+
+Categories:
+  - Internet
+  - Security
+
+License: GPL-3.0-only
+
+AuthorName: confeden
+SourceCode: https://github.com/confeden/Nova-Android
+IssueTracker: https://github.com/confeden/Nova-Android/issues
+
+# Приложение работает через несвободные сетевые службы (Cloudflare WARP/MASQUE,
+# прокси Opera). Ярлык-предупреждение, а не отказ во включении; указываем сами.
+AntiFeatures:
+  - NonFreeNet
+
+AutoName: Nova
+
+Description: |-
+  Nova — VPN-клиент для Android с несколькими транспортами: WireGuard/AmneziaWG
+  с обфускацией, MASQUE (CONNECT-IP поверх HTTP/3 и HTTP/2), VLESS с REALITY и
+  прокси-режим через серверы Opera.
+
+  Возможности:
+
+  * встроенный набор проверенных профилей AmneziaWG с ранжированием по замерам удержания сессии;
+  * определение замершего обратного потока на живом туннеле: приложение само просит новое рукопожатие и при необходимости переходит на другой узел, не разрывая соединения приложений;
+  * импорт собственных профилей и подписок;
+  * раздельное туннелирование по приложениям;
+  * настройка DNS, в том числе отдельно для выбранного приложения;
+  * раздача туннеля на устройства, подключённые к телефону.
+
+RepoType: git
+Repo: https://github.com/confeden/Nova-Android.git
+
+Builds:
+  - versionName: '1.29'
+    versionCode: 142
+    commit: v1.29
+    subdir: app
+    gradle:
+      - fdroid
+
+    # Собранных бинарников в сборке быть не должно. Удаляем то, что лежит в
+    # репозитории, чтобы APK заведомо содержал только собранное здесь: если
+    # какой-то шаг ниже отвалится, сборка упадёт, а не подсунет готовый файл.
+    rm:
+      - app/src/main/jniLibs/arm64-v8a/libgojni.so
+      - app/src/main/jniLibs/armeabi-v7a/libgojni.so
+      - app/src/main/jniLibs/arm64-v8a/liboperaproxy.so
+      - app/src/main/jniLibs/armeabi-v7a/liboperaproxy.so
+      - app/src/main/jniLibs/arm64-v8a/libtun2proxy.so
+      - app/src/main/jniLibs/armeabi-v7a/libtun2proxy.so
+      - app/libs/nova-core-api24-stripped.aar
+
+    # NDK закреплён: этой же версией собирается Go-ядро, расхождение даёт
+    # несовместимости, заметные только на устройстве.
+    ndk: 27.2.12479018
+
+    sudo:
+      - apt-get update
+      - apt-get install -y curl build-essential pkg-config
+      # Go нужен свежее того, что есть в Debian: nova-core требует go 1.26.3.
+      - curl -sSL -o /tmp/go.tgz https://go.dev/dl/go1.26.3.linux-amd64.tar.gz
+      - echo "2b2cfc7148493da5e73981bffbf3353af381d5f93e789c82c79aff64962eb556  /tmp/go.tgz" | sha256sum -c -
+      - rm -rf /usr/local/go
+      - tar -C /usr/local -xzf /tmp/go.tgz
+      # Rust нужен для tun2proxy; cargo-ndk ставится не из Debian, а из crates.io.
+      - apt-get install -y rustc cargo
+      - su -c 'rustup target add aarch64-linux-android armv7-linux-androideabi' vagrant || true
+      - su -c 'cargo install cargo-ndk --locked' vagrant || true
+
+    prebuild:
+      # Go-зависимости ядра: пять проектов подключены через `replace` по путям на
+      # диске, три из них пропатчены. Скрипт тянет закреплённые коммиты и
+      # накладывает патчи из tools/deps/patches — то есть сборка воспроизводима.
+      - cd $$SRC$$ && PATH=/usr/local/go/bin:$PATH tools/deps/fetch_go_deps.sh
+
+    build:
+      # 1. Ядро nova-core (libgojni.so + .aar).
+      - cd $$SRC$$ && PATH=/usr/local/go/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ tools/build_nova_core_aar.sh
+      # 2. Ядро Xray для VLESS+REALITY (libnovaxray.so, libnovaxrayjni.so).
+      - cd $$SRC$$/nova-xray && PATH=/usr/local/go/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ ./build.sh
+      # 3. opera-proxy: клонируется по закреплённому тегу и собирается на месте.
+      - cd $$SRC$$ && PATH=/usr/local/go/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ tools/build_opera_proxy.sh
+      # 4. tun2proxy: тег закреплён на последней версии с нужным нам C-API.
+      - cd $$SRC$$ && ANDROID_NDK_HOME=$$NDK$$ tools/build_tun2proxy.sh
+
+    # Секрет подписи WSS есть только у владельца; стороннему сборщику запрет не
+    # нужен и снимается явным флагом. Работают при этом все транспорты, кроме
+    # релея Telegram через собственные поддомены. Флага `env` в fdroidserver нет
+    # (поймано `fdroid lint`), поэтому значение идёт свойством Gradle.
+    gradleprops:
+      - novaAllowUnsignedRelease=true
+
+AutoUpdateMode: Version v%v
+UpdateCheckMode: Tags
+CurrentVersion: '1.29'
+CurrentVersionCode: 142

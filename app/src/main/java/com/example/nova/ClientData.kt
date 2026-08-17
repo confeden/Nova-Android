@@ -972,6 +972,16 @@ class ClientData(context: Context) {
         attemptTotal: Int = 0,
         transport: String = "",
         notice: String = "",
+        /**
+         * `null` означает «нет новостей», а не «регистрации нет».
+         *
+         * `saveServiceState` зовут из десятков мест по любому поводу — от смены
+         * счётчика попыток до перечитывания настроек. Если бы отсутствие
+         * параметра означало `false`, ступень регистрации гасла бы на первой же
+         * посторонней публикации. На поле `transport` этот дефект уже был
+         * пойман на устройстве, и повторять его здесь незачем.
+         */
+        registering: Boolean? = null,
     ) {
         val normalizedState = state.ifBlank { NovaVpnService.STATE_STOPPED }
         val normalizedBackend = backend.ifBlank { NovaVpnService.BACKEND_WARP }
@@ -1016,6 +1026,13 @@ class ClientData(context: Context) {
         if (normalizedState == NovaVpnService.STATE_CONNECTED) {
             clearTransientConnectingPending()
         }
+        // Остановленная служба никого не регистрирует: здесь флаг снимается сам,
+        // иначе зависший `true` пережил бы отключение и запер бы настройки.
+        val normalizedRegistering = when {
+            normalizedState == NovaVpnService.STATE_STOPPED -> false
+            registering != null -> registering
+            else -> readServiceStateFile().optBoolean("registering", false)
+        }
         writeServiceStateFile(
             normalizedState,
             normalizedBackend,
@@ -1023,8 +1040,26 @@ class ClientData(context: Context) {
             attemptTotal,
             normalizedTransport,
             normalizedNotice,
+            normalizedRegistering,
         )
     }
+
+    /**
+     * Идёт ли прямо сейчас регистрация устройства в Cloudflare.
+     *
+     * Ключ MASQUE выдаётся только изнутри поднятого туннеля, поэтому при первом
+     * выборе MASQUE цикл поднимает WARP как ступень регистрации. Снаружи это
+     * выглядело как обычное подключение, которое почему-то полминуты стоит с
+     * пустым пингом: пользователь успевал решить, что всё сломалось, и нажать
+     * отключение или сменить протокол — то есть уронить ровно тот туннель, через
+     * который выдаётся ключ.
+     *
+     * Флаг живёт в файле, а не в `SharedPreferences`: состояние пишет процесс
+     * `:vpn`, а читает UI-процесс, и `commit()` любого из них откатывает карту
+     * другого (GOTCHA про кросс-процессный откат).
+     */
+    fun isDeviceRegistrationInProgress(): Boolean =
+        readServiceStateFile().optBoolean("registering", false)
 
     /**
      * Транспорт, который на самом деле несёт туннель прямо сейчас: `MASQUE`,
@@ -3023,12 +3058,14 @@ class ClientData(context: Context) {
         attemptTotal: Int,
         transport: String,
         notice: String,
+        registering: Boolean,
     ) {
         val payload = JSONObject().apply {
             put("state", state)
             put("backend", backend)
             put("transport", transport)
             put("notice", notice)
+            put("registering", registering)
             put("attempt_ordinal", attemptOrdinal.coerceAtLeast(0))
             put("attempt_total", attemptTotal.coerceAtLeast(0))
             put("updated_at", System.currentTimeMillis())

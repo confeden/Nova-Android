@@ -26,6 +26,12 @@ var activeDevice *device.Device
 var activeTunDevice tun.Device
 var stopChan chan struct{}
 var stateMu sync.Mutex
+
+// activePeerKey — публичный ключ пира текущего туннеля, нужный ForceHandshake.
+// Device.LookupPeer экспортирован, а сама карта пиров — нет, поэтому ключ
+// запоминается при подъёме туннеля. Пир у нас всегда ровно один.
+var activePeerKey device.NoisePublicKey
+var activePeerKeySet bool
 var tunReadLogBudget atomic.Int64
 var tunWriteLogBudget atomic.Int64
 var dnsInterceptLogBudget atomic.Int64
@@ -175,10 +181,20 @@ func StartWireGuard(fd int, conf string) error {
 		return err
 	}
 
+	peerKey, peerKeyOK := parsePeerPublicKeyFromUAPI(uapiConf)
+
 	stateMu.Lock()
 	activeDevice = dev
 	activeTunDevice = tunDevice
+	activePeerKey = peerKey
+	activePeerKeySet = peerKeyOK
 	stateMu.Unlock()
+
+	if !peerKeyOK {
+		// Молчаливое «выключено» в этом проекте запрещено: без ключа
+		// ForceHandshake навсегда останется no-op, и это надо видеть.
+		log.Printf("Peer public key not recovered from UAPI: forced handshake disabled for this tunnel")
+	}
 
 	log.Println("WireGuard started successfully. Entering LOCK state...")
 
@@ -202,6 +218,8 @@ func StopWireGuard() {
 	tunDevice := activeTunDevice
 	activeDevice = nil
 	activeTunDevice = nil
+	activePeerKey = device.NoisePublicKey{}
+	activePeerKeySet = false
 	stateMu.Unlock()
 
 	// First unblock StartWireGuard so Java-side retries are not stuck behind Close().
@@ -217,6 +235,117 @@ func StopWireGuard() {
 	if tunDevice != nil {
 		_ = tunDevice.Close()
 	}
+}
+
+// parsePeerPublicKeyFromUAPI достаёт `public_key=<hex>` из готового UAPI-текста.
+//
+// Берём именно из UAPI, а не из исходного INI: к этому моменту ключ уже прошёл
+// разбор и перекодирование, то есть проверен ровно так же, как его увидит ядро.
+func parsePeerPublicKeyFromUAPI(uapiConf string) (device.NoisePublicKey, bool) {
+	var key device.NoisePublicKey
+	for _, line := range strings.Split(uapiConf, "\n") {
+		value, ok := strings.CutPrefix(strings.TrimSpace(line), "public_key=")
+		if !ok {
+			continue
+		}
+		if err := key.FromHex(strings.TrimSpace(value)); err != nil {
+			log.Printf("Failed to parse peer public key from UAPI: %v", err)
+			return device.NoisePublicKey{}, false
+		}
+		return key, true
+	}
+	return device.NoisePublicKey{}, false
+}
+
+// ForceHandshake просит ядро начать рукопожатие немедленно.
+//
+// Зачем. Собственный таймер WireGuard пересобирает сессию только через
+// пятнадцать секунд молчания (KeepaliveTimeout 10 с + RekeyTimeout 5 с), и всё
+// это время пакеты уходят в никуда: в замере на Mi A1 провал длился 15,3 с, а
+// само восстановление после рукопожатия заняло 34 мс. Наблюдение за потоком
+// живёт на стороне Android (TunnelStallDetector), сюда приходит уже готовое
+// решение.
+//
+// Безопасность вызова обеспечивает само ядро: SendHandshakeInitiation выходит
+// без действия, если предыдущее рукопожатие было отправлено меньше RekeyTimeout
+// назад. То есть худший исход лишнего вызова — no-op, а не шторм рукопожатий.
+// isRetry=false намеренно: это новая попытка по наблюдению, и счётчик
+// handshakeAttempts надо обнулить, иначе можно упереться в MaxTimerHandshakes и
+// уронить пира.
+//
+// Возвращает true, если запрос дошёл до пира. Это не обещание, что пакет ушёл:
+// факт отправки печатает само ядро строкой «Sending handshake initiation».
+func ForceHandshake() bool {
+	stateMu.Lock()
+	dev := activeDevice
+	key := activePeerKey
+	keyOK := activePeerKeySet
+	stateMu.Unlock()
+
+	if dev == nil || !keyOK {
+		return false
+	}
+	peer := dev.LookupPeer(key)
+	if peer == nil {
+		log.Printf("Forced handshake skipped: peer not found")
+		return false
+	}
+	if err := peer.SendHandshakeInitiation(false); err != nil {
+		log.Printf("Forced handshake failed: %v", err)
+		return false
+	}
+	return true
+}
+
+// SwitchPeerEndpoint переводит живой туннель на другой адрес того же пира.
+//
+// Почему это бесшовно. У всех встроенных сидов один и тот же внутренний адрес
+// `172.16.0.2`, а внутри одной личности совпадают ещё и приватный ключ с
+// IPv6-адресом — различается только `Endpoint`. Значит смена узла внутри
+// личности не требует ни нового TUN, ни переустановки VpnService: интерфейс,
+// его адреса, маршруты и все открытые сокеты приложений остаются на месте.
+// Наружу это ровно то же, что штатный роуминг WireGuard при смене сети.
+//
+// Маршрут на прежний узел не мешает: исходящий UDP-сокет ядра защищён через
+// VpnService.protect(), а не выведен из туннеля отдельным маршрутом, поэтому
+// новый адрес не нужно ни исключать, ни добавлять.
+//
+// Рукопожатие после смены обязательно: у нового узла Cloudflare нашей сессии
+// нет, старый keypair там не примут. Пробуем сразу; если ядро откажет по
+// частоте (меньше RekeyTimeout с прошлого), его собственный таймер добьёт это
+// в течение пяти секунд.
+func SwitchPeerEndpoint(endpoint string) bool {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return false
+	}
+
+	stateMu.Lock()
+	dev := activeDevice
+	key := activePeerKey
+	keyOK := activePeerKeySet
+	stateMu.Unlock()
+
+	if dev == nil || !keyOK {
+		return false
+	}
+
+	// update_only обязателен: без него UAPI создаст второго пира с тем же
+	// ключом вместо правки существующего.
+	uapi := fmt.Sprintf("public_key=%s\nupdate_only=true\nendpoint=%s\n",
+		hex.EncodeToString(key[:]), endpoint)
+	if err := dev.IpcSet(uapi); err != nil {
+		log.Printf("Failed to switch peer endpoint to %s: %v", endpoint, err)
+		return false
+	}
+	log.Printf("Peer endpoint switched to %s", endpoint)
+
+	if peer := dev.LookupPeer(key); peer != nil {
+		if err := peer.SendHandshakeInitiation(false); err != nil {
+			log.Printf("Handshake after endpoint switch failed: %v", err)
+		}
+	}
+	return true
 }
 
 func GetWireGuardRuntimeStats() string {

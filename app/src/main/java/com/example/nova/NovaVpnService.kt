@@ -292,13 +292,35 @@ class NovaVpnService : OperaNativeVpnService() {
     private val vpnConsistencyRunnable = object : Runnable {
         override fun run() {
             try {
-                sampleTunnelRekeyChurn()
+                sampleTunnelHealth()
                 reconcileSystemVpnConsistency()
             } finally {
                 vpnConsistencyHandler.postDelayed(this, nextVpnConsistencyIntervalMs())
             }
         }
     }
+    private val tunnelStallDetector = TunnelStallDetector()
+    private val liveNodeRotation = LiveNodeRotation()
+
+    /** Режим текущей попытки — нужен, чтобы cooldown лёг на тот же ключ, что и перебор. */
+    private var activeEndpointMode = ""
+
+    /**
+     * Пока детектор подозревает провал, опрос учащается. Иначе шаг наблюдения
+     * (4,5 с) сам стал бы задержкой: провал, начавшийся сразу после тика, был бы
+     * замечен только через два шага, то есть почти к тому же пятнадцатисекундному
+     * сроку, ради обгона которого всё и сделано.
+     */
+    @Volatile
+    private var tunnelStallSuspected = false
+
+    /** Чтобы «форсировать нечего» сказать один раз за туннель, а не каждый тик. */
+    @Volatile
+    private var tunnelStallForceUnavailableLogged = false
+
+    /** Передача отказа обычному переподключению делается один раз за туннель. */
+    @Volatile
+    private var stallHandoverRequested = false
     private val warpConfigDiscoveryStopRequested = AtomicBoolean(false)
     private val warpConfigDiscoveryRunning = AtomicBoolean(false)
     private val operaEndpointPrewarmRunning = AtomicBoolean(false)
@@ -485,6 +507,18 @@ class NovaVpnService : OperaNativeVpnService() {
     companion object {
         var isRunning = false
         /** Окно замера перерукопожатий и порог, после которого сессия считается нестабильной. */
+        /** Шаг наблюдения, пока детектор подозревает замерший data-plane. */
+        private const val TUNNEL_STALL_WATCH_INTERVAL_MS = 1_500L
+
+        /**
+         * Пауза, на которую отправляется узел, брошенный из-за пропавшего потока.
+         *
+         * Замер показал, что тот же узел через полчаса вёз трафик без потерь, —
+         * значит запрет должен быть временным. Десять минут: достаточно, чтобы
+         * не вернуться на него в этой же сессии, и мало, чтобы не выбрасывать
+         * рабочий узел надолго.
+         */
+        private const val STALLED_NODE_COOLDOWN_MS = 600_000L
         private const val TUNNEL_REKEY_WINDOW_MS = 120_000L
         private const val TUNNEL_REKEY_ALERT_COUNT = 2
 
@@ -1825,6 +1859,29 @@ class NovaVpnService : OperaNativeVpnService() {
     }
 
     /**
+     * Объявляет экрану, что идёт регистрация устройства.
+     *
+     * Ключ MASQUE выдаётся только изнутри поднятого туннеля, поэтому первый
+     * выбор MASQUE поднимает WARP как ступень регистрации. Снаружи это почти
+     * полминуты выглядело обычным подключением с пустым пингом — и пользователь
+     * успевал нажать отключение или сменить протокол, то есть уронить тот самый
+     * туннель, через который выдаётся ключ. Экран по этому флагу пишет
+     * «РЕГИСТРАЦИЯ...» и запирает выбор протокола.
+     */
+    private fun markDeviceRegistrationInProgress(clientData: ClientData, active: Boolean) {
+        if (currentState.isBlank()) return
+        clientData.saveServiceState(
+            currentState,
+            currentBackendLabel,
+            currentAttemptOrdinal,
+            currentAttemptTotal,
+            currentTransportLabel,
+            currentTransportNotice,
+            registering = active,
+        )
+    }
+
+    /**
      * Транспорт попытки определяется движком её режима — единственный признак,
      * по которому MASQUE отличим от WireGuard/AWG внутри одного бэкенда WARP.
      */
@@ -1842,6 +1899,7 @@ class NovaVpnService : OperaNativeVpnService() {
         // выставленная попытка к этому моменту и есть удачная.
         activeEndpointHost = attempt.endpointHost
         activeEndpointPort = attempt.port
+        activeEndpointMode = attempt.mode.name
     }
 
     /**
@@ -5072,11 +5130,15 @@ class NovaVpnService : OperaNativeVpnService() {
                             "внутри туннеля api.cloudflareclient.com доступен. Как только " +
                             "ключ будет получен, вернёмся на MASQUE сами."
                     )
+                    // Короче ста символов намеренно: подсказка живёт в поле на две
+                    // строки по 12sp, и прежний текст на 1080 точках обрезался на
+                    // полуслове — пользователь читал обрывок и решал, что сломалось.
                     publishTransportNotice(
                         clientData,
-                        "Готовим MASQUE: выпускаем ключ устройства через временное " +
-                            "подключение. Переключимся на MASQUE автоматически.",
+                        "Регистрируем устройство через временное подключение. " +
+                            "MASQUE включится сам.",
                     )
+                    markDeviceRegistrationInProgress(clientData, true)
                 } else if (!isUserStopped && masqueIdentity != null && !skipMasqueForCooldown) {
                     // Выбранный вручную MASQUE идёт на второй и третий круг.
                     //
@@ -18523,12 +18585,246 @@ class NovaVpnService : OperaNativeVpnService() {
      * во время работы. `last_handshake_time_sec` уже отдаёт ядро — считаем по
      * нему, без правок в самом amneziawg-go.
      */
-    private fun sampleTunnelRekeyChurn() {
+    /**
+     * Один снимок счётчиков за тик — два наблюдателя над ним.
+     *
+     * `readTunnelStats` дёргает `IpcGet` ядра, и делать это дважды за тик незачем:
+     * оба признака строятся из одних и тех же `rx_bytes`/`tx_bytes`/
+     * `last_handshake_time_sec`. Разница в горизонте: churn судит узел по
+     * двухминутному окну и влияет только на порядок следующего перебора, а
+     * детектор замершего data-plane обязан успеть за секунды и действует сразу.
+     */
+    private fun sampleTunnelHealth() {
         if (currentState != STATE_CONNECTED || !novaCoreTunnelActive) {
             resetTunnelRekeyChurn()
+            tunnelStallDetector.reset()
+            liveNodeRotation.reset()
+            tunnelStallSuspected = false
+            tunnelStallForceUnavailableLogged = false
+            stallHandoverRequested = false
             return
         }
         val stats = readTunnelStats()
+        sampleTunnelRekeyChurn(stats)
+        sampleTunnelDataPlaneStall(stats)
+    }
+
+    /**
+     * Замечает, что туннель поднят, мы шлём, а обратно не идёт ничего — и просит
+     * ядро начать рукопожатие, не дожидаясь его собственных пятнадцати секунд.
+     *
+     * Замер на Mi A1 (Ростелеком): провал длился 15,3 с и закончился строкой
+     * `Retrying handshake because we stopped hearing back after 15 seconds`,
+     * ответ на которое пришёл за 34 мс. Всё, что видел пользователь, было
+     * ожиданием, а не починкой. Логика решения — в чистом [TunnelStallDetector],
+     * здесь только действие и журнал.
+     */
+    private fun sampleTunnelDataPlaneStall(stats: TunnelStats) {
+        val outcome = tunnelStallDetector.observe(
+            TunnelStallDetector.Sample(
+                uptimeMs = SystemClock.uptimeMillis(),
+                rxBytes = stats.rxBytes,
+                txBytes = stats.txBytes,
+            )
+        )
+        tunnelStallSuspected = outcome.state == TunnelStallDetector.State.SUSPECTED
+        if (outcome.state != TunnelStallDetector.State.STALLED) return
+
+        if (!outcome.shouldForceHandshake) {
+            // Рукопожатие уже пробовали и оно не вернуло поток. Значит сломана
+            // не сессия, а путь — уходим с узла, не роняя интерфейс.
+            rotateAwayFromStalledNode(outcome)
+            return
+        }
+
+        LogManager.log(
+            "Обратный поток пропал: ${outcome.reason}. Не ждём таймер WireGuard — " +
+                "просим рукопожатие сейчас (срабатывание ${tunnelStallDetector.triggerCount})."
+        )
+        val asked = try {
+            Nova.forceHandshake()
+        } catch (t: Throwable) {
+            LogManager.log("Форсированное рукопожатие не удалось: ${t.message}")
+            false
+        }
+        // Молчаливое «не сработало» запрещено: без этой строки отключённый
+        // детектор был бы неотличим от исправного туннеля.
+        if (!asked && !tunnelStallForceUnavailableLogged) {
+            tunnelStallForceUnavailableLogged = true
+            LogManager.log(
+                "Форсировать рукопожатие на этом транспорте нечем " +
+                    "(${currentTransportLabel.ifBlank { "транспорт не назван" }}): " +
+                    "ядро не нашло WireGuard-пира. Детектор остаётся наблюдателем."
+            )
+        }
+    }
+
+    /**
+     * Уводит живую сессию с узла, который перестал возвращать поток.
+     *
+     * Бесшовность держится на одном свойстве встроенного набора: у всех сидов
+     * внутренний адрес `172.16.0.2`, а внутри одной личности совпадают ещё и
+     * приватный ключ с IPv6. Значит переход между узлами одной личности — правка
+     * единственного поля пира по UAPI, без нового TUN и без переустановки
+     * VpnService. Открытые соединения приложений это переживают так же, как
+     * переезд телефона с Wi-Fi на LTE.
+     *
+     * Решение о переходе принимает чистый [LiveNodeRotation]; здесь — сбор
+     * кандидатов, само переключение и последствия для замеров.
+     */
+    private fun rotateAwayFromStalledNode(outcome: TunnelStallDetector.Outcome) {
+        if (currentTransportLabel == TRANSPORT_MASQUE) {
+            if (!tunnelStallForceUnavailableLogged) {
+                tunnelStallForceUnavailableLogged = true
+                LogManager.log(
+                    "Обратный поток пропал: ${outcome.reason}. Бесшовный уход с узла " +
+                        "сделан для WireGuard/AWG, на MASQUE его нет — только фиксируем."
+                )
+            }
+            return
+        }
+
+        val clientData = ClientData(this)
+        val candidates = buildSeamlessRotationCandidates(clientData)
+        if (candidates.isEmpty()) {
+            LogManager.log(
+                "Обратный поток пропал: ${outcome.reason}. Бесшовно уходить некуда: " +
+                    "у текущей личности нет других узлов."
+            )
+            return
+        }
+
+        when (
+            val decision = liveNodeRotation.decide(
+                nowUptimeMs = SystemClock.uptimeMillis(),
+                currentHost = activeEndpointHost,
+                currentPort = activeEndpointPort,
+                candidates = candidates,
+            )
+        ) {
+            is LiveNodeRotation.Decision.Settling -> {
+                LogManager.log(
+                    "Обратный поток пропал: ${outcome.reason}. Узел сменён " +
+                        "${decision.waitedMs} мс назад — даём ему договорить, не дёргаем."
+                )
+            }
+
+            is LiveNodeRotation.Decision.Exhausted -> {
+                // Обещание «дальше обычное переподключение» обязано что-то делать.
+                // В первом прогоне эта строка печаталась каждые девять секунд, а
+                // реконнект не запускал никто: снаружи это неотличимо от зависшего
+                // туннеля, и правило «молчаливый отказ запрещён» нарушала именно
+                // она — обещанием без действия.
+                if (stallHandoverRequested) return
+                stallHandoverRequested = true
+                LogManager.log(
+                    "Обратный поток пропал: ${outcome.reason}. Бесшовный уход исчерпан " +
+                        "(${decision.reason}) — запускаем обычное переподключение."
+                )
+                if (!isUserStopped && !explicitStopRequested) {
+                    triggerReconnectForNetworkChange(clientData)
+                }
+            }
+
+            is LiveNodeRotation.Decision.Switch -> {
+                val abandoned = "$activeEndpointHost:$activeEndpointPort"
+                val switched = try {
+                    Nova.switchPeerEndpoint(decision.endpoint)
+                } catch (t: Throwable) {
+                    LogManager.log("Не удалось сменить узел на ${decision.endpoint}: ${t.message}")
+                    false
+                }
+                if (!switched) {
+                    LogManager.log(
+                        "Ядро отказалось сменить узел на ${decision.endpoint}. " +
+                            "Остаёмся на $abandoned, лечение отдаём обычному переподключению."
+                    )
+                    return
+                }
+
+                // Узел бросаем на cooldown, а не «портим» ему замеры: время
+                // жизни у метки короткое и она честно называется временной.
+                rememberTransientDegradedWarpProfile(
+                    engine = "wireguard",
+                    mode = activeEndpointMode,
+                    host = activeEndpointHost,
+                    port = activeEndpointPort,
+                    cooldownMs = STALLED_NODE_COOLDOWN_MS,
+                )
+
+                activeEndpointHost = decision.host
+                activeEndpointPort = decision.port
+                // Счётчики привязаны к узлу: окно, начатое на брошенном, нельзя
+                // засчитывать новому. Детектор тоже начинает с чистого листа.
+                resetTunnelRekeyChurn()
+                tunnelStallDetector.reset()
+                tunnelStallSuspected = false
+
+                LogManager.log(
+                    "Бесшовно уходим с $abandoned на ${decision.endpoint} " +
+                        "(переход ${decision.ordinal}, в запасе ${decision.remaining}): " +
+                        "${outcome.reason}. Интерфейс и соединения не трогаем."
+                )
+            }
+        }
+    }
+
+    /**
+     * Узлы, на которые можно перейти, не роняя интерфейс: та же личность,
+     * что у текущего профиля.
+     *
+     * Личность определяется приватным ключом из `rawConfig`. Совпадение ключа
+     * гарантирует совпадение внутренних адресов — в наборе у каждой личности
+     * ровно один IPv6 на все её узлы, а IPv4 общий у всех пятидесяти.
+     */
+    private fun buildSeamlessRotationCandidates(
+        clientData: ClientData,
+    ): List<LiveNodeRotation.Candidate> {
+        val configs = runCatching { clientData.getWarpVerifiedConfigs() }
+            .getOrElse {
+                LogManager.log("Не удалось прочитать список профилей для смены узла: ${it.message}")
+                return emptyList()
+            }
+        val host = activeEndpointHost.trim().removePrefix("[").removeSuffix("]")
+        val current = configs.firstOrNull {
+            it.host.trim().removePrefix("[").removeSuffix("]").equals(host, ignoreCase = true) &&
+                it.port == activeEndpointPort
+        } ?: return emptyList()
+        val identity = extractPrivateKey(current.rawConfig) ?: return emptyList()
+
+        val nowMs = System.currentTimeMillis()
+        return configs
+            .asSequence()
+            .filter { it.port in 1..65535 && it.host.isNotBlank() }
+            .filter { extractPrivateKey(it.rawConfig) == identity }
+            .filterNot {
+                isTransientlyDegradedWarpProfile("wireguard", it.mode, it.host, it.port, nowMs)
+            }
+            .map { config ->
+                // Ранг: чем выше накопленная оценка, тем раньше пробуем. Порядок
+                // сида остаётся последним разрывом ничьей — он несёт ручной ранг
+                // с Pixel 4a и на неизмеренной сети заменить его нечем.
+                val score = runCatching { clientData.getWarpVerifiedPriorityScore(config, nowMs) }
+                    .getOrDefault(0.0)
+                LiveNodeRotation.Candidate(
+                    host = config.host,
+                    port = config.port,
+                    rank = (-score * 1000).toInt() + config.seedOrder.coerceAtMost(1_000),
+                )
+            }
+            .toList()
+    }
+
+    private fun extractPrivateKey(rawConfig: String): String? {
+        return rawConfig.lineSequence()
+            .map { it.trim() }
+            .firstOrNull { it.startsWith("PrivateKey", ignoreCase = true) }
+            ?.substringAfter('=', "")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    private fun sampleTunnelRekeyChurn(stats: TunnelStats) {
         val handshakeSec = stats.lastHandshakeTimeSec
         if (handshakeSec <= 0L) return
         val nowMs = SystemClock.elapsedRealtime()
@@ -19235,7 +19531,13 @@ class NovaVpnService : OperaNativeVpnService() {
             true
         }
         return when (currentState) {
-            STATE_CONNECTED -> if (interactive) 4_500L else 4_000L
+            // Подозрение на замерший data-plane важнее экономии: шаг 4,5 с сам по
+            // себе съел бы фору перед пятнадцатисекундным таймером ядра.
+            STATE_CONNECTED -> when {
+                tunnelStallSuspected -> TUNNEL_STALL_WATCH_INTERVAL_MS
+                interactive -> 4_500L
+                else -> 4_000L
+            }
             STATE_CONNECTING -> if (interactive) 3_200L else 3_800L
             else -> if (interactive) 9_000L else 12_000L
         }
@@ -20677,17 +20979,26 @@ class NovaVpnService : OperaNativeVpnService() {
      */
     private fun returnToMasqueAfterRegistrationBootstrap() {
         if (masqueRegistrationBootstrapGenerationId == 0) return
+        // Флаг регистрации снимается на КАЖДОМ выходе, а не только на успешном:
+        // застрявший `true` запер бы пользователю выбор протокола до перезапуска
+        // службы, и снаружи это выглядело бы как зависший экран.
         if (!isConnectGenerationCurrent(masqueRegistrationBootstrapGenerationId)) {
             masqueRegistrationBootstrapGenerationId = 0
+            markDeviceRegistrationInProgress(ClientData(applicationContext), false)
             return
         }
-        if (isUserStopped || explicitStopRequested) return
+        if (isUserStopped || explicitStopRequested) {
+            markDeviceRegistrationInProgress(ClientData(applicationContext), false)
+            return
+        }
         val clientData = ClientData(applicationContext)
         if (clientData.getExitRegionPreference().trim().lowercase(Locale.US) != "masque") {
             masqueRegistrationBootstrapGenerationId = 0
+            markDeviceRegistrationInProgress(clientData, false)
             return
         }
         masqueRegistrationBootstrapGenerationId = 0
+        markDeviceRegistrationInProgress(clientData, false)
         LogManager.log(
             "Ключ MASQUE выпущен через временный туннель. Возвращаемся на выбранный протокол."
         )

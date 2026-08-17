@@ -3642,11 +3642,13 @@ class MainActivity : AppCompatActivity() {
         ipv4Candidate.seenCount = 0
         ipv6Candidate.value = ""
         ipv6Candidate.seenCount = 0
-        applyStatusStyle(
-            text = statusText,
-            textColor = Color.parseColor("#C99514"),
-            textGlowColor = Color.parseColor("#F1C64A"),
-        )
+        if (!applyDeviceRegistrationStatusIfActive()) {
+            applyStatusStyle(
+                text = statusText,
+                textColor = Color.parseColor("#C99514"),
+                textGlowColor = Color.parseColor("#F1C64A"),
+            )
+        }
         updateAttemptProgressDisplay()
         resetLatencyDisplay()
         updateIpDisplay()
@@ -3669,11 +3671,13 @@ class MainActivity : AppCompatActivity() {
             currentIpv6 = "..."
             currentCountry = "--"
         }
-        applyStatusStyle(
-            text = "ПРОВЕРКА ТУННЕЛЯ...",
-            textColor = Color.parseColor("#C99514"),
-            textGlowColor = Color.parseColor("#F1C64A"),
-        )
+        if (!applyDeviceRegistrationStatusIfActive()) {
+            applyStatusStyle(
+                text = "ПРОВЕРКА ТУННЕЛЯ...",
+                textColor = Color.parseColor("#C99514"),
+                textGlowColor = Color.parseColor("#F1C64A"),
+            )
+        }
         updateAttemptProgressDisplay()
         requestVpnNetwork()
         updateIpDisplay()
@@ -3716,11 +3720,13 @@ class MainActivity : AppCompatActivity() {
             setBackdropConnectedInstant()
         }
         connectedUiAwaitingProof = false
-        applyStatusStyle(
-            text = "АКТИВНО : РАБОТАЕТ",
-            textColor = Color.parseColor("#13A10E"),
-            textGlowColor = Color.parseColor("#13A10E"),
-        )
+        if (!applyDeviceRegistrationStatusIfActive()) {
+            applyStatusStyle(
+                text = "АКТИВНО : РАБОТАЕТ",
+                textColor = Color.parseColor("#13A10E"),
+                textGlowColor = Color.parseColor("#13A10E"),
+            )
+        }
         updateAttemptProgressDisplay()
         btnConnect.text = "ОТКЛЮЧИТЬ"
         btnNextProfile.visibility = View.VISIBLE
@@ -4202,6 +4208,25 @@ class MainActivity : AppCompatActivity() {
         }
         val activeVpn = findCurrentVpnNetwork() ?: return false
         return isSystemVpnLikelyNova(activeVpn)
+    }
+
+    /**
+     * Пока идёт регистрация устройства, статус говорит именно о ней.
+     *
+     * Ключ MASQUE выдаётся только изнутри поднятого туннеля, поэтому первый
+     * выбор MASQUE поднимает WARP как ступень регистрации. На экране это почти
+     * полминуты выглядело обычным «АКТИВНО : РАБОТАЕТ» с пустым пингом — и
+     * пользователь успевал решить, что зависло, и нажать отключение или сменить
+     * протокол, уронив ровно тот туннель, через который выдаётся ключ.
+     */
+    private fun applyDeviceRegistrationStatusIfActive(): Boolean {
+        if (!clientData.isDeviceRegistrationInProgress()) return false
+        applyStatusStyle(
+            text = "РЕГИСТРАЦИЯ... ОЖИДАЙТЕ",
+            textColor = Color.parseColor("#C99514"),
+            textGlowColor = Color.parseColor("#F1C64A"),
+        )
+        return true
     }
 
     private fun applyStatusStyle(

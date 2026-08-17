@@ -147,11 +147,27 @@ object AppUpdateManager {
         val reason: String,
     )
 
+    /**
+     * Работает ли встроенный механизм обновления в этой сборке.
+     *
+     * В сборке для F-Droid — нет: каталог выдаёт обновления сам, а его правила
+     * запрещают приложению самому скачивать исполняемые файлы. В сборке для
+     * релизов на GitHub — да, ровно как раньше.
+     *
+     * Выключение сделано флагом, а не удалением кода: один и тот же исходник
+     * собирается в оба варианта, и поведение обычной сборки не меняется.
+     * Глушатся здесь **все** входы, а не кнопка в настройках: запуск по
+     * расписанию, проверка при старте, докачка и установка приходят мимо UI.
+     */
+    val isUpdaterEnabled: Boolean get() = BuildConfig.UPDATER_ENABLED
+
     fun hasReadyDownloadedUpdate(context: Context): Boolean {
+        if (!isUpdaterEnabled) return false
         return getReadyDownloadedUpdate(context) != null
     }
 
     fun getReadyDownloadedVersion(context: Context): String {
+        if (!isUpdaterEnabled) return ""
         return getReadyDownloadedUpdate(context)?.version.orEmpty()
     }
 
@@ -166,6 +182,7 @@ object AppUpdateManager {
      * становилось невидимым совсем.
      */
     fun getAvailableUpdateVersion(context: Context): String {
+        if (!isUpdaterEnabled) return ""
         val appContext = context.applicationContext
         val clientData = ClientData(appContext)
         if (getReadyDownloadedUpdate(appContext, clientData) != null) return ""
@@ -182,6 +199,7 @@ object AppUpdateManager {
      * которого приложение попадало под категорию hostile downloader.
      */
     fun startUserRequestedDownload(context: Context): Boolean {
+        if (!isUpdaterEnabled) return false
         val appContext = context.applicationContext
         val clientData = ClientData(appContext)
         val metadata = buildStoredMetadata(clientData) ?: return false
@@ -190,6 +208,7 @@ object AppUpdateManager {
     }
 
     fun syncSchedule(context: Context) {
+        if (!isUpdaterEnabled) return
         val appContext = context.applicationContext
         val clientData = ClientData(appContext)
         getReadyDownloadedUpdate(appContext, clientData)
@@ -223,6 +242,7 @@ object AppUpdateManager {
     fun isCheckInProgress(): Boolean = updateCheckInProgress.get()
 
     fun enqueueImmediateCheck(context: Context, reason: String) {
+        if (!isUpdaterEnabled) return
         val appContext = context.applicationContext
         val clientData = ClientData(appContext)
         if (!clientData.getAutoAppUpdate()) return
@@ -240,6 +260,7 @@ object AppUpdateManager {
     }
 
     fun performUpdateCheck(context: Context): Boolean {
+        if (!isUpdaterEnabled) return false
         if (!updateCheckInProgress.compareAndSet(false, true)) {
             LogManager.log("Проверка обновлений уже выполняется. Повторный запуск пропускаем.")
             return false
@@ -281,6 +302,15 @@ object AppUpdateManager {
     }
 
     fun performManualUpdateCheck(context: Context): ManualUpdateCheckResult {
+        if (!isUpdaterEnabled) {
+            // Молчаливый отказ здесь был бы хуже всего: пользователь жмёт кнопку
+            // и не понимает, почему ничего не происходит. Кнопку в этой сборке
+            // прячут, но путь всё равно обязан отвечать честно.
+            return ManualUpdateCheckResult(
+                kind = ManualUpdateCheckResult.Kind.NO_UPDATE,
+                message = "Обновления в этой сборке выдаёт F-Droid",
+            )
+        }
         if (!updateCheckInProgress.compareAndSet(false, true)) {
             return ManualUpdateCheckResult(
                 kind = ManualUpdateCheckResult.Kind.CHECKING,
@@ -530,6 +560,7 @@ object AppUpdateManager {
     }
 
     fun handleAction(context: Context, intent: Intent) {
+        if (!isUpdaterEnabled) return
         val appContext = context.applicationContext
         when (intent.action) {
             ACTION_DOWNLOAD_UPDATE -> {
@@ -556,6 +587,7 @@ object AppUpdateManager {
     }
 
     fun handleDownloadComplete(context: Context, downloadId: Long) {
+        if (!isUpdaterEnabled) return
         val appContext = context.applicationContext
         val clientData = ClientData(appContext)
         if (downloadId <= 0L || downloadId != clientData.getUpdateDownloadId()) return
@@ -848,6 +880,7 @@ object AppUpdateManager {
      * открылся, и лишнего человек не увидит.
      */
     fun onPackageReplaced(context: Context) {
+        if (!isUpdaterEnabled) return
         val appContext = context.applicationContext
         val version = getInstalledVersion(appContext)
         NotificationManagerCompat.from(appContext).cancel(NOTIFICATION_READY_ID)
@@ -933,10 +966,12 @@ object AppUpdateManager {
     }
 
     fun installReadyUpdate(context: Context) {
+        if (!isUpdaterEnabled) return
         launchInstaller(context.applicationContext)
     }
 
     fun resumePendingInstallIfAllowed(context: Context) {
+        if (!isUpdaterEnabled) return
         val appContext = context.applicationContext
         val clientData = ClientData(appContext)
         if (!clientData.consumeResumeInstallAfterPermissionGrant()) return

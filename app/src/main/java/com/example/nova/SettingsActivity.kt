@@ -282,6 +282,12 @@ class SettingsActivity : AppCompatActivity() {
 
             updateTrafficMaskUi(swTrafficMask, rgTrafficMaskMode, etTrafficMaskHost, tvTrafficMaskActive)
 
+            // Регистрация устройства запирает выбор протокола, а заканчивается
+            // она сама. Без этой строки запрет снимался бы только при уходе с
+            // экрана и возврате: пользователь, дождавшийся конца регистрации
+            // прямо здесь, видел бы серые кнопки и считал их сломанными.
+            refreshConnectionSelector()
+
         }
 
     }
@@ -377,6 +383,15 @@ class SettingsActivity : AppCompatActivity() {
         pbManualUpdate = findViewById(R.id.pb_manual_update)
 
         tvManualUpdateStatus = findViewById(R.id.tv_manual_update_status)
+
+        // В сборке для F-Droid обновления выдаёт каталог, а собственный
+        // загрузчик выключен целиком (AppUpdateManager.isUpdaterEnabled).
+        // Оставлять при этом переключатель и кнопку проверки нельзя: они
+        // выглядели бы рабочими и молча ничего не делали.
+        if (!AppUpdateManager.isUpdaterEnabled) {
+            findViewById<View>(R.id.row_auto_update)?.visibility = View.GONE
+            findViewById<View>(R.id.row_manual_update_block)?.visibility = View.GONE
+        }
 
         rbMaskAuto = RadioButton(this).apply { id = View.generateViewId() }
         rbMaskCustom = RadioButton(this).apply { id = View.generateViewId() }
@@ -2822,6 +2837,22 @@ class SettingsActivity : AppCompatActivity() {
 
 
 
+    /** Перенастраивает выбор протокола по текущему состоянию службы. */
+    private fun refreshConnectionSelector() {
+        val title = findViewById<TextView>(R.id.tv_connection_selector_title) ?: return
+        val group = findViewById<RadioGroup>(R.id.rg_exit_region) ?: return
+        val summary = findViewById<TextView>(R.id.tv_exit_last) ?: return
+        val buttons = listOfNotNull(
+            findViewById<RadioButton>(R.id.rb_exit_auto),
+            findViewById<RadioButton>(R.id.rb_exit_ru),
+            findViewById<RadioButton>(R.id.rb_exit_masque),
+            findViewById<RadioButton>(R.id.rb_exit_eu),
+            findViewById<RadioButton>(R.id.rb_exit_us),
+        )
+        if (buttons.size < 5) return
+        configureConnectionSelector(title, group, buttons, summary)
+    }
+
     private fun configureConnectionSelector(
 
         titleView: TextView,
@@ -2904,6 +2935,14 @@ class SettingsActivity : AppCompatActivity() {
 
 
 
+        // Доступность кнопок задаётся заново на каждом заходе, а не правится
+        // поверх прежней: экран перенастраивается в onResume, и «выключено»,
+        // поставленное временным запретом, иначе пережило бы его причину.
+        buttons.forEach {
+            it.isEnabled = true
+            it.alpha = 1f
+        }
+
         val operaTransportSupported = OperaProxyManager.isSupportedOnDevice(this)
 
         if (!operaTransportSupported) {
@@ -2937,6 +2976,31 @@ class SettingsActivity : AppCompatActivity() {
         }
 
 
+
+        // Пока идёт регистрация устройства, выбор протокола заперт.
+        //
+        // Ключ MASQUE выдаётся только изнутри поднятого туннеля, и смена
+        // протокола в этот момент роняет ровно тот туннель, через который его
+        // выдают: регистрация начинается заново, а снаружи это выглядит как
+        // «MASQUE не включается». Запрет временный и снимается сам — флаг живёт
+        // в состоянии службы и обнуляется на её остановке.
+        if (clientData.isDeviceRegistrationInProgress()) {
+            buttons.forEach {
+                it.isEnabled = false
+                it.alpha = 0.45f
+            }
+            summaryView.text =
+                "Идёт регистрация устройства — выбор протокола станет доступен, когда она закончится."
+            radioGroup.setOnCheckedChangeListener(null)
+            when (clientData.getExitRegionPreference()) {
+                "eu" -> radioGroup.check(rbExitEu.id)
+                "us" -> radioGroup.check(rbExitUs.id)
+                "ru" -> radioGroup.check(rbExitRu.id)
+                "masque" -> radioGroup.check(rbExitMasque.id)
+                else -> radioGroup.check(rbExitAuto.id)
+            }
+            return
+        }
 
         radioGroup.setOnCheckedChangeListener(null)
 

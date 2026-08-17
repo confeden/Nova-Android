@@ -73,6 +73,11 @@ android {
     namespace = "com.example.nova"
     compileSdk = 35
 
+    // Версия закреплена намеренно: этой же сборкой собирается Go-ядро
+    // (tools/build_nova_core_aar.sh), и расхождение NDK между JNI-слоем и ядром
+    // — источник несовместимостей, которые проявляются только на устройстве.
+    ndkVersion = "27.2.12479018"
+
     buildFeatures {
         buildConfig = true
     }
@@ -85,9 +90,60 @@ android {
         versionName = appVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // Собираем ровно те архитектуры, для которых в репозитории есть
+        // нативные зависимости. Без этого CMake пошёл бы собирать x86/x86_64 и
+        // упал бы на импортируемом libtun2proxy.so, которого для них нет.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
+    }
+
+    /**
+     * JNI-слой к tun2proxy собирается из исходников (`src/main/cpp`), а не лежит
+     * готовым файлом.
+     *
+     * Раньше в репозитории хранились два бинарника одного и того же слоя под
+     * разными именами — `libnative-lib.so` для arm64 и `libtun2proxy_jni.so`
+     * для armeabi-v7a, — хотя `native-lib.cpp` лежал рядом и просто не был
+     * подключён к сборке. Правила F-Droid запрещают готовые бинарники, а здесь
+     * они к тому же были лишними.
+     */
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
+    /**
+     * Откуда приложение получает обновления.
+     *
+     * `github` — обычная сборка, которую владелец выкладывает в релизы: встроенный
+     * механизм обновления работает как работал. `fdroid` — сборка для каталога
+     * F-Droid, где обновления выдаёт сам каталог, а собственный загрузчик обязан
+     * молчать: их правило запрещает приложению самому тянуть исполняемые файлы.
+     *
+     * Различие ровно одно — флаг [BuildConfig.UPDATER_ENABLED]. Кода апдейтера
+     * это не удаляет и на сборку для GitHub не влияет: варианты собираются из
+     * одних и тех же исходников.
+     */
+    flavorDimensions += "distribution"
+    productFlavors {
+        create("github") {
+            dimension = "distribution"
+            isDefault = true
+            buildConfigField("boolean", "UPDATER_ENABLED", "true")
+        }
+        create("fdroid") {
+            dimension = "distribution"
+            buildConfigField("boolean", "UPDATER_ENABLED", "false")
+        }
     }
 
     applicationVariants.all {
+        // Имя файла не зависит от варианта: у владельца в релизах лежит
+        // `Nova_<версия>.apk`, и менять это из-за появления flavor нельзя.
         outputs.map { it as com.android.build.gradle.internal.api.BaseVariantOutputImpl }
             .forEach { output -> output.outputFileName = "Nova_${appVersionName}.apk" }
     }
@@ -147,6 +203,11 @@ android {
 // секрета у нас остаётся прежней.
 val allowUnsignedRelease: Boolean =
     System.getenv("NOVA_ALLOW_UNSIGNED_RELEASE") == "1" ||
+        // Свойство Gradle нужно сборщикам, которые не управляют окружением и не
+        // правят local.properties: F-Droid передаёт флаги только через
+        // `gradleprops`, то есть как -PnovaAllowUnsignedRelease=true.
+        providers.gradleProperty("novaAllowUnsignedRelease").orNull
+            ?.trim().equals("true", ignoreCase = true) ||
         rootProject.file("local.properties")
             .takeIf { it.exists() }
             ?.let { file ->

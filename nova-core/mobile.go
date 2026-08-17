@@ -201,6 +201,27 @@ func StopVPN() {
 	novaengine.StopMasque()
 }
 
+// ForceHandshake asks the live WireGuard tunnel to start a handshake now.
+//
+// The kernel's own timer waits fifteen seconds of silence before rebuilding the
+// session, while the rebuild itself measured 34 ms. Detection lives on the
+// Android side (TunnelStallDetector); this is only the trigger.
+//
+// Returns false when there is no WireGuard tunnel to poke — MASQUE sessions
+// included, since they have no peer. The caller must report that, not swallow it.
+func ForceHandshake() bool {
+	return novaengine.ForceHandshake()
+}
+
+// SwitchPeerEndpoint moves the live WireGuard tunnel to another address of the
+// same peer, without touching the TUN, its addresses or any app socket.
+//
+// Only valid between endpoints that share the tunnel identity — same private
+// key and same inner addresses. Picking the candidate is the caller's job.
+func SwitchPeerEndpoint(endpoint string) bool {
+	return novaengine.SwitchPeerEndpoint(endpoint)
+}
+
 // GetVPNStats returns current WireGuard peer stats in UAPI format.
 func GetVPNStats() string {
 	if stats := novaengine.GetMasqueRuntimeStats(); strings.TrimSpace(stats) != "" {

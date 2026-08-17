@@ -1,7 +1,13 @@
-### Метаданные F-Droid для Nova. ЧЕРНОВИК — до подачи прогнать `fdroid build`.
+### Метаданные F-Droid для Nova.
 #
 # Кладётся в форк fdroiddata как metadata/com.brent.nova.yml,
 # оттуда merge request в gitlab.com/fdroid/fdroiddata.
+#
+# ДО ПОДАЧИ: тег v1.29 в публичном репозитории должен содержать удаление плагина
+# `org.gradle.toolchains.foojay-resolver-convention` из settings.gradle.kts —
+# сканер F-Droid считает его «usual suspect» (плагин умеет докачивать JDK) и
+# останавливает сборку. Проверочный прогон делался на теге с этой правкой.
+# Комментарии здесь на русском: перед merge request их надо сократить/перевести.
 #
 # ЧТО ПРОВЕРЕНО ЛОКАЛЬНО:
 #   * лицензия GPL-3.0 (дословный текст FSF);
@@ -14,15 +20,24 @@
 #   * libtun2proxy.so собирается из tun2proxy/tun2proxy@v0.7.21
 #     (tools/build_tun2proxy.sh), режим Opera EU проверен на устройстве.
 #
-# ЧТО НЕ ПРОВЕРЕНО И ТРЕБУЕТ ПРОГОНА У НИХ:
-#   * шаги ниже собирают нативные библиотеки на их buildserver. Локально работают
-#     сами скрипты, но не эта последовательность в их окружении. До merge request
-#     обязателен `fdroid build --on-server com.brent.nova` из клона fdroiddata —
-#     рецепт с четырьмя тулчейнами с первого раза не проходит почти никогда.
-#   * рабочий каталог шагов prebuild/build в fdroidserver надо подтвердить: ниже
-#     всюду явный `cd`, чтобы не зависеть от умолчания.
-#   * всё, что раньше было готовым бинарником, теперь имеет шаг сборки. Не
-#     проверено только то, что эти шаги пройдут в их окружении.
+# ПРОВЕРЕНО ПОЛНЫМ ПРОГОНОМ НА LINUX (WSL, Ubuntu 26.04, fdroidserver 2.4.3):
+#   * `fdroid lint com.brent.nova` — чисто, код возврата 0;
+#   * `fdroid build -l` (без `-t -f`) — «1 build succeeded»: checkout тега,
+#     удаление семи бинарников по `rm`, `scandelete`, local.properties, чистка
+#     подписи, `prebuild`, все четыре шага `build` и `assembleFdroidRelease`;
+#   * на выходе неподписанный `com.brent.nova_142.apk`, 60,4 МБ: versionCode
+#     142, versionName 1.29, только arm64-v8a и armeabi-v7a, 12 нативных
+#     библиотек — все собраны в этом же прогоне, x86 в APK нет.
+#
+# ЧТО НЕ ПРОВЕРЕНО:
+#   * блок `sudo`: fdroidserver выполняет его только с `--on-server`, локально
+#     он печатает предупреждение и пропускается. Всё, что он ставит (Go 1.26.3,
+#     gomobile, rustup с целями под Android, cargo-ndk), для проверки было
+#     поставлено руками теми же командами, но через сам fdroid не прогонялось.
+#   * шаги prebuild/build выполняются в каталоге `subdir`, то есть в `app/`, а не
+#     в корне проекта. Переменной `$$SRC$$` в fdroidserver нет: `$$name$$` —
+#     это подстановка srclib, и произвольное имя превращается в мусор вида
+#     `17374SRC17374`.
 
 Categories:
   - Internet
@@ -82,34 +97,71 @@ Builds:
     # несовместимости, заметные только на устройстве.
     ndk: 27.2.12479018
 
+    # gvisor держит в своём дереве готовые бинарники «sentry» — образы VDSO и
+    # sighandler под amd64/arm64. Nova берёт из gvisor только сетевой стек
+    # (pkg/tcpip), sentry не собирается и в APK не попадает, поэтому каталог
+    # удаляется до сканирования: в дереве сборки готовых бинарников не остаётся
+    # вообще. Каталог появляется на шаге prebuild, до сканирования.
+    scandelete:
+      - build/deps/gvisor/pkg/sentry
+
     sudo:
       - apt-get update
-      - apt-get install -y curl build-essential pkg-config
+      - apt-get install -y curl build-essential pkg-config unzip
       # Go нужен свежее того, что есть в Debian: nova-core требует go 1.26.3.
       - curl -sSL -o /tmp/go.tgz https://go.dev/dl/go1.26.3.linux-amd64.tar.gz
       - echo "2b2cfc7148493da5e73981bffbf3353af381d5f93e789c82c79aff64962eb556  /tmp/go.tgz" | sha256sum -c -
       - rm -rf /usr/local/go
       - tar -C /usr/local -xzf /tmp/go.tgz
-      # Rust нужен для tun2proxy; cargo-ndk ставится не из Debian, а из crates.io.
-      - apt-get install -y rustc cargo
-      - su -c 'rustup target add aarch64-linux-android armv7-linux-androideabi' vagrant || true
-      - su -c 'cargo install cargo-ndk --locked' vagrant || true
+      # Ядро собирается `gomobile bind`, поэтому нужен сам gomobile. Версия та
+      # же, что у golang.org/x/mobile в nova-core/go.mod: bind-код и рантайм
+      # должны быть из одной ревизии. Ставим в /usr/local/go/bin — этот каталог
+      # шаги сборки и так добавляют в PATH.
+      - GOBIN=/usr/local/go/bin /usr/local/go/bin/go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20260120165949-40bd9ace6ce4
+      - GOBIN=/usr/local/go/bin /usr/local/go/bin/go install golang.org/x/mobile/cmd/gobind@v0.0.0-20260120165949-40bd9ace6ce4
+      # Rust нужен для tun2proxy. Ставим rustup, а не пакеты Debian: в них нет
+      # стандартной библиотеки под Android, без которой кросс-сборки не будет.
+      - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
+      - su vagrant -c 'RUSTUP_INIT_SKIP_PATH_CHECK=yes sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable --no-modify-path'
+      - su vagrant -c '$HOME/.cargo/bin/rustup target add aarch64-linux-android armv7-linux-androideabi'
+      - su vagrant -c '$HOME/.cargo/bin/cargo install cargo-ndk --locked'
 
     prebuild:
       # Go-зависимости ядра: пять проектов подключены через `replace` по путям на
       # диске, три из них пропатчены. Скрипт тянет закреплённые коммиты и
       # накладывает патчи из tools/deps/patches — то есть сборка воспроизводима.
-      - cd $$SRC$$ && PATH=/usr/local/go/bin:$PATH tools/deps/fetch_go_deps.sh
+      #
+      # Скрипты запускаются через `bash`, а не напрямую: в репозитории они лежат
+      # с режимом 100644 (собираются на Windows, где git не хранит бит +x), и
+      # прямой вызов на Linux даёт «Permission denied».
+      - (cd .. && PATH=/usr/local/go/bin:$PATH bash tools/deps/fetch_go_deps.sh)
+      # Иначе Gradle сам ищет JVM по системе и может взять для toolchain любую,
+      # включая JRE без компилятора: локальный прогон падал на «Toolchain
+      # installation … does not provide the required capabilities:
+      # [JAVA_COMPILER]». С выключенным поиском берётся JVM, на которой запущен
+      # сам Gradle, то есть результат не зависит от набора JVM на машине сборки.
+      # Свойство читается только из gradle.properties: через `gradleprops` оно
+      # уезжает как `-P`, а такие настройки Gradle из `-P` не берёт — проверено.
+      # `printf` с переводом строки в начале обязателен: gradle.properties в
+      # репозитории заканчивается без перевода строки, и `echo >>` приклеивает
+      # строку к `org.gradle.workers.max=8`, ломая обе.
+      - (cd .. && printf '\norg.gradle.java.installations.auto-detect=false\n' >> gradle.properties)
 
+    # Каждый шаг — в подоболочке. fdroidserver склеивает все команды списка в
+    # одну строку через «;» и выполняет одним `bash -c`, поэтому смена каталога
+    # протекает в следующий шаг: без скобок после `cd ..` первого шага второй
+    # искал бы `../nova-xray` уже вне репозитория. Хуже того, такая ошибка не
+    # роняет сборку: неудачный `cd` внутри `&&`-списка `set -e` не считает, и
+    # остальные шаги молча работают не там, где нужно.
     build:
       # 1. Ядро nova-core (libgojni.so + .aar).
-      - cd $$SRC$$ && PATH=/usr/local/go/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ tools/build_nova_core_aar.sh
+      - (cd .. && PATH=/usr/local/go/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ bash tools/build_nova_core_aar.sh)
       # 2. Ядро Xray для VLESS+REALITY (libnovaxray.so, libnovaxrayjni.so).
-      - cd $$SRC$$/nova-xray && PATH=/usr/local/go/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ ./build.sh
+      - (cd ../nova-xray && PATH=/usr/local/go/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ bash build.sh)
       # 3. opera-proxy: клонируется по закреплённому тегу и собирается на месте.
-      - cd $$SRC$$ && PATH=/usr/local/go/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ tools/build_opera_proxy.sh
+      - (cd .. && PATH=/usr/local/go/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ bash tools/build_opera_proxy.sh)
       # 4. tun2proxy: тег закреплён на последней версии с нужным нам C-API.
-      - cd $$SRC$$ && ANDROID_NDK_HOME=$$NDK$$ tools/build_tun2proxy.sh
+      - (cd .. && PATH=$HOME/.cargo/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ bash tools/build_tun2proxy.sh)
 
     # Секрет подписи WSS есть только у владельца; стороннему сборщику запрет не
     # нужен и снимается явным флагом. Работают при этом все транспорты, кроме

@@ -5,9 +5,6 @@ plugins {
     alias(libs.plugins.jetbrains.kotlin.android)
 }
 
-val appVersionCode = 142
-val appVersionName = "1.29"
-
 val keystoreProperties = Properties()
 val keystorePropertiesFile = rootProject.file("keystore.properties")
 val hasReleaseKeystore = keystorePropertiesFile.exists().also { exists ->
@@ -86,8 +83,12 @@ android {
         applicationId = "com.brent.nova"
         minSdk = 24 // Android 7.0; более новые API вызываются под проверкой SDK_INT
         targetSdk = 34
-        versionCode = appVersionCode
-        versionName = appVersionName
+        // Числа стоят литералами намеренно: F-Droid читает версию из этого файла
+        // регулярным выражением (`fdroid checkupdates`, режим `Tags`) и переменную
+        // не раскрывает — со `versionCode = appVersionCode` он не находит версию
+        // вовсе и не видит новых релизов. Единственный источник версии — здесь.
+        versionCode = 142
+        versionName = "1.29"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -145,7 +146,7 @@ android {
         // Имя файла не зависит от варианта: у владельца в релизах лежит
         // `Nova_<версия>.apk`, и менять это из-за появления flavor нельзя.
         outputs.map { it as com.android.build.gradle.internal.api.BaseVariantOutputImpl }
-            .forEach { output -> output.outputFileName = "Nova_${appVersionName}.apk" }
+            .forEach { output -> output.outputFileName = "Nova_$versionName.apk" }
     }
 
     signingConfigs {

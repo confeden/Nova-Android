@@ -29,11 +29,18 @@
 #     142, versionName 1.29, только arm64-v8a и armeabi-v7a, 12 нативных
 #     библиотек — все собраны в этом же прогоне, x86 в APK нет.
 #
+# БЛОК `sudo` ПРОВЕРЕН ОТДЕЛЬНО, в чистой Ubuntu 26.04 (fdroidserver выполняет
+# его только с `--on-server`): команды склеены через «; » и прогнаны одной
+# строкой через `bash -e -u -o pipefail -x -c`, как это делает fdroidserver,
+# код возврата 0. Результат: Go 1.26.3, gomobile и gobind в /usr/local/go/bin,
+# у пользователя `vagrant` — rustc 1.97.1 с целями aarch64-linux-android и
+# armv7-linux-androideabi и cargo-ndk 4.1.2, а `sdkmanager` от root положил
+# cmake 3.22.1 (с ninja), platform-35 и build-tools 35.0.1 в SDK, которым root
+# владеет — ровно как на их buildserver.
+#
 # ЧТО НЕ ПРОВЕРЕНО:
-#   * блок `sudo`: fdroidserver выполняет его только с `--on-server`, локально
-#     он печатает предупреждение и пропускается. Всё, что он ставит (Go 1.26.3,
-#     gomobile, rustup с целями под Android, cargo-ndk), для проверки было
-#     поставлено руками теми же командами, но через сам fdroid не прогонялось.
+#   * прогон целиком именно на их buildserver (`fdroid build --on-server`):
+#     локально он покупается ценой `dpkg --purge sudo` и блокировки root.
 #   * шаги prebuild/build выполняются в каталоге `subdir`, то есть в `app/`, а не
 #     в корне проекта. Переменной `$$SRC$$` в fdroidserver нет: `$$name$$` —
 #     это подстановка srclib, и произвольное имя превращается в мусор вида
@@ -125,6 +132,20 @@ Builds:
       - su vagrant -c 'RUSTUP_INIT_SKIP_PATH_CHECK=yes sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable --no-modify-path'
       - su vagrant -c '$HOME/.cargo/bin/rustup target add aarch64-linux-android armv7-linux-androideabi'
       - su vagrant -c '$HOME/.cargo/bin/cargo install cargo-ndk --locked'
+      # CMake из SDK. В их образе его нет вообще: из apt ставятся только JDK,
+      # apksigner, curl, git, unzip, patch, rsync и sdkmanager, а внутри SDK
+      # запись для сборщика открыта намеренно только в `build-tools` и
+      # `platforms` (их provision-android-sdk: «allow gradle to install newer
+      # build-tools and platforms»), то есть каталог `cmake` создать некому.
+      # Nova без него не собирается: JNI-слой к tun2proxy идёт через CMake, и
+      # версия закреплена в app/build.gradle.kts. Ставим их же `sdkmanager` от
+      # root. Platform и build-tools указаны явно, чтобы не зависеть от того,
+      # что догрузит сам Gradle: собирается ровно то, на чём проверено.
+      # ANDROID_HOME берётся из /etc/profile.d/bsenv.sh, который создаёт их
+      # provisioning: `sudo` вычищает окружение, и переменной в шаге нет. Если
+      # файла нет (сборка не на их buildserver), `sdkmanager` упадёт сам и
+      # скажет, что каталог SDK не задан — молчаливого пропуска не будет.
+      - test -f /etc/profile.d/bsenv.sh && . /etc/profile.d/bsenv.sh; sdkmanager 'cmake;3.22.1' 'platforms;android-35' 'build-tools;35.0.1'
 
     prebuild:
       # Go-зависимости ядра: пять проектов подключены через `replace` по путям на

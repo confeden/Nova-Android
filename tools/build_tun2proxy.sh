@@ -50,6 +50,13 @@ git -C "$work_dir" checkout -q "$TAG"
 export GIT_HASH="${TAG}"
 export BUILD_TIME="${TAG}"
 
+# Пути в артефакт не зашиваем. Rust иначе кладёт в libtun2proxy.so абсолютные
+# пути каталога сборки и реестра crates, из-за чего два прогона дают разные
+# байты, — поймано на сравнении воспроизводимой сборки F-Droid. Каталог реестра
+# берём у самого cargo: он зависит от CARGO_HOME, а тот на разных машинах разный.
+cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$work_dir=/build --remap-path-prefix=$cargo_home=/cargo"
+
 echo "==> cargo ndk (arm64-v8a, armeabi-v7a)"
 (
     cd "$work_dir"

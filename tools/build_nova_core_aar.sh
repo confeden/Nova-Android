@@ -85,8 +85,13 @@ STRIPPED_AAR="$REPO_ROOT/app/libs/nova-core-api24-stripped.aar"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
+# -trimpath обязателен, а не «желательно»: без него Go зашивает в libgojni.so
+# абсолютные пути каталогов сборки, и два прогона на одной машине дают разные
+# байты. Поймано на сравнении воспроизводимой сборки F-Droid: расходились ровно
+# те библиотеки, чьи скрипты собирали без -trimpath (libgojni и libtun2proxy),
+# а собранные с ним libnovaxray и liboperaproxy совпадали.
 echo "==> gomobile bind (androidapi 24)"
-(cd "$REPO_ROOT/nova-core" && gomobile bind -androidapi 24 -target=android -o "$WORK_DIR/nova-core.aar" .)
+(cd "$REPO_ROOT/nova-core" && gomobile bind -trimpath -androidapi 24 -target=android -o "$WORK_DIR/nova-core.aar" .)
 
 echo "==> распаковка"
 unzip -q "$WORK_DIR/nova-core.aar" -d "$WORK_DIR/aar"

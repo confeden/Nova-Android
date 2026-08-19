@@ -34,11 +34,11 @@ build_abi() {
   staging="$(mktemp -d)"
   echo "==> $abi"
 
+  # -buildvcs=false: иначе Go штампует в библиотеку ревизию и время коммита
+  # нашего репозитория, и один и тот же исходный код из двух клонов даёт разные
+  # байты — поймано сравнением со сборкой F-Droid.
   CGO_ENABLED=1 GOOS=android GOARCH="$goarch" \
     CC="$TOOLCHAIN/${triple}${API_LEVEL}-clang${CLANG_EXT}" \
-    # -buildvcs=false: иначе Go штампует в библиотеку ревизию и время
-    # коммита нашего репозитория, и один и тот же исходный код из двух
-    # клонов даёт разные байты — поймано сравнением со сборкой F-Droid.
     go build -buildmode=c-shared -trimpath -buildvcs=false -ldflags="$LDFLAGS" \
     -o "$staging/libnovaxray.so" .
 

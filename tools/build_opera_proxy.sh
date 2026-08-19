@@ -53,6 +53,9 @@ if [ ! -d "$work_dir/.git" ]; then
 fi
 git -C "$work_dir" checkout -q "$TAG"
 
+# `-buildvcs=false` по той же причине, что и в nova-xray/build.sh: Go иначе
+# штампует в библиотеку ревизию и время коммита того репозитория, в котором идёт
+# сборка, и артефакт перестаёт зависеть только от исходного кода.
 build_one() {
     local abi="$1" goarch="$2" cc="$3"
     echo "==> $abi"
@@ -60,10 +63,10 @@ build_one() {
         cd "$work_dir"
         if [ -n "$cc" ]; then
             CGO_ENABLED=1 GOOS=android GOARCH="$goarch" GOARM=7 CC="$cc" \
-                go build -trimpath -ldflags="-s -w" -o "$out_dir/$abi/liboperaproxy.so" .
+                go build -trimpath -buildvcs=false -ldflags="-s -w" -o "$out_dir/$abi/liboperaproxy.so" .
         else
             CGO_ENABLED=0 GOOS=android GOARCH="$goarch" \
-                go build -trimpath -ldflags="-s -w" -o "$out_dir/$abi/liboperaproxy.so" .
+                go build -trimpath -buildvcs=false -ldflags="-s -w" -o "$out_dir/$abi/liboperaproxy.so" .
         fi
     )
     ls -l "$out_dir/$abi/liboperaproxy.so"

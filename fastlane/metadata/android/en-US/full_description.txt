@@ -1,0 +1,12 @@
+Nova is a VPN client for Android with several transports: WireGuard/AmneziaWG with obfuscation, MASQUE (CONNECT-IP over HTTP/3 and HTTP/2), VLESS with REALITY, and a proxy mode through Opera's servers.
+
+Features:
+
+* a bundled set of tested AmneziaWG profiles, ranked by session-hold measurements;
+* detection of a stalled return stream on a live tunnel: the app asks for a new handshake itself and, if that does not help, moves to another node without dropping application connections;
+* import of your own profiles and subscriptions;
+* per-app split tunnelling;
+* DNS settings, including a separate resolver for a chosen app;
+* sharing the tunnel with devices tethered to the phone.
+
+The transports rely on non-free network services: Cloudflare WARP/MASQUE and Opera's proxy servers.

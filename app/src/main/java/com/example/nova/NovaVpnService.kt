@@ -6829,13 +6829,21 @@ class NovaVpnService : OperaNativeVpnService() {
                     tunnelUp = false
                 }
             }
+            // Про «запасную цепочку» здесь говорить нельзя: в эту фазу заходят только
+            // при выбранном VLESS, а при выбранном VLESS обычный пул WARP выключен —
+            // цепочки просто нет, и вызывающий код сразу останавливает службу. Пока
+            // здесь стояло «Продолжаем по запасной цепочке», лог обещал переход на
+            // встроенные профили, которого не происходило, и жалобы читались как
+            // «оно само переключается на встроенные».
             if (!tunnelUp) {
-                LogManager.log("Ни один профиль VLESS не ответил. Продолжаем по запасной цепочке.")
+                LogManager.log(
+                    "Ни один профиль VLESS не ответил. Других протоколов в этом режиме нет."
+                )
                 publishTransportNotice(clientData, "Ни один профиль VLESS не ответил.")
             } else {
                 LogManager.log(
                     "VLESS: круг пройден целиком, ни один профиль не удержал трафик. " +
-                        "Уходим в запасную цепочку."
+                        "Других протоколов в этом режиме нет."
                 )
             }
             return false
@@ -7048,7 +7056,8 @@ class NovaVpnService : OperaNativeVpnService() {
      * одинаково честна и когда приложение внутри VPN, и когда снаружи.
      */
     private fun hasVlessProxyConnectivity(socksPort: Int, timeoutMs: Int): Boolean {
-        val host = "api.ipify.org"
+        // Литеральный адрес Cloudflare: DNS через прокси для пробы не нужен.
+        val host = CloudflareTrace.PROBE_HOST
         return try {
             openSocksTunnel(socksPort, host, 80, timeoutMs)?.use { socket ->
                 val output = socket.getOutputStream()
@@ -20789,8 +20798,8 @@ class NovaVpnService : OperaNativeVpnService() {
                 // системный VALIDATED без DNS не выставляется. Живой туннель, гонявший
                 // трафик, из-за этого раз за разом гасился как «не дал tunnel-probe».
                 val writer = socket.getOutputStream().bufferedWriter()
-                writer.write("GET http://api.ipify.org/ HTTP/1.1\r\n")
-                writer.write("Host: api.ipify.org\r\n")
+                writer.write("GET http://" + CloudflareTrace.PROBE_HOST + CloudflareTrace.PATH + " HTTP/1.1" + CloudflareTrace.CRLF)
+                writer.write("Host: " + CloudflareTrace.PROBE_HOST + CloudflareTrace.CRLF)
                 writer.write("Connection: close\r\n\r\n")
                 writer.flush()
                 val statusLine = socket.getInputStream().bufferedReader().readLine().orEmpty()
@@ -21127,52 +21136,13 @@ class NovaVpnService : OperaNativeVpnService() {
             return null
         }
 
-        val ipv4Trace = fetchExitTraceFromUrls(
-            network,
-            listOf(
-                "http://1.1.1.1/cdn-cgi/trace",
-                "http://1.0.0.1/cdn-cgi/trace",
-            )
-        )
-        val ipv6Trace = fetchExitTraceFromUrls(
-            network,
-            listOf(
-                "http://[2606:4700:4700::1111]/cdn-cgi/trace",
-                "http://[2606:4700:4700::1001]/cdn-cgi/trace",
-            )
-        )
-        val genericTrace = fetchExitTraceFromUrls(
-            network,
-            listOf(
-                "https://www.cloudflare.com/cdn-cgi/trace",
-                "https://cloudflare.com/cdn-cgi/trace",
-            )
-        )
+        val ipv4Trace = fetchExitTraceFromUrls(network, CloudflareTrace.IPV4_URLS)
+        val ipv6Trace = fetchExitTraceFromUrls(network, CloudflareTrace.IPV6_URLS)
+        val genericTrace = fetchExitTraceFromUrls(network, CloudflareTrace.HOSTNAME_URLS)
 
-        val ipv4 = ipv4Trace?.ipv4.orEmpty().ifBlank {
-            genericTrace?.ipv4.orEmpty()
-        }.ifBlank {
-            fetchExitPlainIpFromUrls(
-                network,
-                listOf(
-                    "https://api4.ipify.org",
-                    "https://ipv4.icanhazip.com",
-                    "https://v4.ident.me",
-                )
-            ).orEmpty()
-        }
-        val ipv6 = ipv6Trace?.ipv6.orEmpty().ifBlank {
-            genericTrace?.ipv6.orEmpty()
-        }.ifBlank {
-            fetchExitPlainIpFromUrls(
-                network,
-                listOf(
-                    "https://api6.ipify.org",
-                    "https://ipv6.icanhazip.com",
-                    "https://v6.ident.me",
-                )
-            ).orEmpty()
-        }
+        // Только Cloudflare: адрес и страна приходят одним ответом ([CloudflareTrace]).
+        val ipv4 = ipv4Trace?.ipv4.orEmpty().ifBlank { genericTrace?.ipv4.orEmpty() }
+        val ipv6 = ipv6Trace?.ipv6.orEmpty().ifBlank { genericTrace?.ipv6.orEmpty() }
         val badgeTrace = ipv4Trace ?: ipv6Trace ?: genericTrace
         if (ipv4.isBlank() && ipv6.isBlank() && badgeTrace?.country.orEmpty().isBlank()) return null
         return ExitSnapshot(
@@ -21257,36 +21227,19 @@ class NovaVpnService : OperaNativeVpnService() {
 
     private fun fetchExitSnapshotViaOperaProxy(): ExitSnapshot? {
         val proxy = Proxy(Proxy.Type.HTTP, OperaProxyManager.getLoopbackProxyAddress(this))
-        val genericTrace = fetchExitTraceFromUrlsViaProxy(
-            proxy,
-            listOf(
-                "https://www.cloudflare.com/cdn-cgi/trace",
-                "https://cloudflare.com/cdn-cgi/trace",
-            )
-        )
-        val ipv4 = fetchExitPlainIpFromUrlsViaProxy(
-            proxy,
-            listOf(
-                "http://api.ipify.org",
-                "http://v4.ident.me",
-                "http://ipv4.icanhazip.com",
-                "https://api4.ipify.org",
-            )
-        ).orEmpty()
-        val ipv6 = fetchExitPlainIpFromUrlsViaProxy(
-            proxy,
-            listOf(
-                "http://v6.ident.me",
-                "http://ipv6.icanhazip.com",
-                "https://api6.ipify.org",
-            )
-        ).orEmpty()
+        // Только Cloudflare, зато с трёх входов: через HTTP-прокси проходят и
+        // литеральные адреса, и имена ([CloudflareTrace]).
+        val genericTrace = fetchExitTraceFromUrlsViaProxy(proxy, CloudflareTrace.HOSTNAME_URLS)
+        val ipv4Trace = fetchExitTraceFromUrlsViaProxy(proxy, CloudflareTrace.IPV4_URLS)
+        val ipv6Trace = fetchExitTraceFromUrlsViaProxy(proxy, CloudflareTrace.IPV6_URLS)
+        val ipv4 = ipv4Trace?.ipv4.orEmpty().ifBlank { genericTrace?.ipv4.orEmpty() }
+        val ipv6 = ipv6Trace?.ipv6.orEmpty().ifBlank { genericTrace?.ipv6.orEmpty() }
         if (ipv4.isBlank() && ipv6.isBlank() && genericTrace?.country.orEmpty().isBlank()) return null
         return ExitSnapshot(
             ipv4 = ipv4,
             ipv6 = ipv6,
-            country = genericTrace?.country.orEmpty(),
-            colo = genericTrace?.colo.orEmpty(),
+            country = (ipv4Trace ?: genericTrace)?.country.orEmpty(),
+            colo = (ipv4Trace ?: genericTrace)?.colo.orEmpty(),
         )
     }
 

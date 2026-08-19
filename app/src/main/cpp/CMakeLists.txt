@@ -5,6 +5,14 @@ project(tun2proxy_jni LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Воспроизводимая сборка. Без первой строки в объектный файл уходит абсолютный
+# путь исходника, а он у F-Droid свой; отсюда меняется и build-id, который
+# компоновщик считает по содержимому. Проверено: две сборки одного коммита по
+# разным путям давали libtun2proxy_jni.so одинакового размера с разным
+# build-id — единственным отличием.
+add_compile_options(-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=/nova/cpp)
+add_link_options(-Wl,--build-id=none)
+
 add_library(tun2proxy_jni SHARED native-lib.cpp)
 
 target_include_directories(

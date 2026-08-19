@@ -1388,14 +1388,9 @@ object OperaProxyManager {
     ): Boolean {
         val startedAt = System.currentTimeMillis()
         val proxy = Proxy(Proxy.Type.HTTP, InetSocketAddress(BIND_HOST, port))
-        val probeUrls = listOf(
-            "https://cp.cloudflare.com/generate_204",
-            "https://connectivitycheck.gstatic.com/generate_204",
-            "https://www.google.com/generate_204",
-            "http://v4.ident.me",
-            "http://ipv4.icanhazip.com",
-            "http://api.ipify.org",
-        )
+        // Только Cloudflare: раньше сюда были вписаны gstatic, google, ident.me,
+        // icanhazip и ipify — пять чужих сервисов ради ответа «канал жив».
+        val probeUrls = CloudflareTrace.PROBE_URLS
         for (url in probeUrls) {
             val remainingMs = budgetMs - (System.currentTimeMillis() - startedAt)
             // Меньше полусекунды — это уже не проба, а лишний таймаут.

@@ -1,0 +1,15 @@
+diff --git a/build.rs b/build.rs
+index a628cef..83e140e 100644
+--- a/build.rs
++++ b/build.rs
+@@ -5,7 +5,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
+     }
+ 
+     // Get the build time
+-    let build_time = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
++    println!("cargo:rerun-if-env-changed=BUILD_TIME");
++    let build_time = std::env::var("BUILD_TIME")
++        .unwrap_or_else(|_| chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string());
+     println!("cargo:rustc-env=BUILD_TIME={build_time}");
+ 
+     #[cfg(target_os = "windows")]

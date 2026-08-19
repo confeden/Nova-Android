@@ -30,9 +30,19 @@ object ImportedSourcePolicy {
      * «AUTO» при единственной доступной семье — это не выбор, а его отсутствие:
      * выбирать не из чего, и подставлять надо то единственное, что есть.
      *
-     * Протокол, которого больше нет ни у одного профиля (все AWG удалили, остались
-     * WireGuard), тоже откатывается в «AUTO»: иначе сохранённый выбор молча отсекает
-     * весь список, shortlist получается пустым и подключение останавливается.
+     * Протокол, которого больше нет ни у одного профиля, выбором тоже не является:
+     * подписку заменили, и оставшийся с прошлого набора «AWG» при одних только
+     * профилях VLESS означает ровно то же, что «AUTO» — человек для нового набора
+     * ничего не выбирал. Поэтому такой протокол не просто отбрасывается: дальше
+     * работает то же правило схлопывания, что и для «AUTO».
+     *
+     * Проверено на устройстве: пока устаревший выбор возвращал «AUTO» без
+     * схлопывания, импортированные профили не перебирались вовсе — фаза VLESS не
+     * запускалась (`shouldUseVlessTransport` требует именно `vless`),
+     * импортированных AWG не было, shortlist получался пустым, и служба гасла со
+     * строкой `USER WARP: режим импортированных конфигураций (AUTO), но shortlist
+     * пуст`, объявив себя при этом WARP. Снаружи это выглядело как «подключаюсь
+     * своими VLESS, а оно уходит на встроенные».
      */
     fun resolveEffectiveProtocol(preference: String?, availableFamilies: List<String>): String {
         val families = availableFamilies
@@ -41,10 +51,10 @@ object ImportedSourcePolicy {
             .distinct()
         if (families.isEmpty()) return AUTO
         val normalizedPreference = normalize(preference)
-        if (normalizedPreference != AUTO && normalizedPreference.isNotEmpty()) {
-            return if (normalizedPreference in families) normalizedPreference else AUTO
+        val chosen = normalizedPreference.takeIf {
+            it.isNotEmpty() && it != AUTO && it in families
         }
-        return families.singleOrNull() ?: AUTO
+        return chosen ?: families.singleOrNull() ?: AUTO
     }
 
     /**

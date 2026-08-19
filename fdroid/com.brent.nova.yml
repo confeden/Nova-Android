@@ -1,13 +1,20 @@
 ### Метаданные F-Droid для Nova.
 #
-# Кладётся в форк fdroiddata как metadata/com.brent.nova.yml,
-# оттуда merge request в gitlab.com/fdroid/fdroiddata.
+# Это документированный оригинал. В форк fdroiddata уезжает копия без
+# комментариев: их полностью вычищает `fdroid rewritemeta`, а их CI сравнивает
+# свой прогон rewritemeta с файлом из merge request. Правим здесь, значения
+# переносим в metadata/com.brent.nova.yml форка.
 #
-# ДО ПОДАЧИ: тег v1.29 в публичном репозитории должен содержать удаление плагина
-# `org.gradle.toolchains.foojay-resolver-convention` из settings.gradle.kts —
-# сканер F-Droid считает его «usual suspect» (плагин умеет докачивать JDK) и
-# останавливает сборку. Проверочный прогон делался на теге с этой правкой.
-# Комментарии здесь на русском: перед merge request их надо сократить/перевести.
+# Подано: gitlab.com/fdroid/fdroiddata/-/merge_requests/46057, ветка
+# com.brent.nova в форке cryptolab.net/fdroiddata.
+#
+# ТЕГ v1.29 в публичном репозитории обязан содержать:
+#   * settings.gradle.kts без плагина
+#     `org.gradle.toolchains.foojay-resolver-convention` — сканер F-Droid считает
+#     его «usual suspect» (плагин умеет докачивать JDK) и останавливает сборку;
+#   * каталог `fastlane/metadata/android/<локаль>/` — тексты каталог забирает из
+#     дерева собираемого тега, а не из ветки по умолчанию.
+# Тег из-за этого переставлялся; проверочные прогоны делались на нём.
 #
 # ЧТО ПРОВЕРЕНО ЛОКАЛЬНО:
 #   * лицензия GPL-3.0 (дословный текст FSF);
@@ -63,27 +70,45 @@ AntiFeatures:
 
 AutoName: Nova
 
-Description: |-
-  Nova — VPN-клиент для Android с несколькими транспортами: WireGuard/AmneziaWG
-  с обфускацией, MASQUE (CONNECT-IP поверх HTTP/3 и HTTP/2), VLESS с REALITY и
-  прокси-режим через серверы Opera.
-
-  Возможности:
-
-  * встроенный набор проверенных профилей AmneziaWG с ранжированием по замерам удержания сессии;
-  * определение замершего обратного потока на живом туннеле: приложение само просит новое рукопожатие и при необходимости переходит на другой узел, не разрывая соединения приложений;
-  * импорт собственных профилей и подписок;
-  * раздельное туннелирование по приложениям;
-  * настройка DNS, в том числе отдельно для выбранного приложения;
-  * раздача туннеля на устройства, подключённые к телефону.
+# Summary/description здесь нет намеренно: рецензент F-Droid просит держать в
+# fdroiddata только метаданные сборки, а тексты — в структуре fastlane нашего
+# репозитория (`fastlane/metadata/android/<локаль>/`), откуда каталог забирает
+# их сам. Так их правит владелец без merge request в fdroiddata.
 
 RepoType: git
 Repo: https://github.com/confeden/Nova-Android.git
 
+# Воспроизводимая сборка. `Binaries` — адрес эталонного APK в релизе GitHub:
+# F-Droid соберёт своё, сравнит с ним и опубликует эталон, подписанный ключом
+# владельца, а `AllowedAPKSigningKeys` закрепляет отпечаток этого сертификата
+# (`apksigner verify --print-certs`). Режим выбирается один раз навсегда: перейти
+# потом на подпись ключом F-Droid нельзя — у пользователей сменилась бы подпись,
+# и обновления перестали бы ставиться.
+#
+# Ссылка ведёт на отдельный файл `-fdroid`, а не на основной APK релиза. Причин
+# две, обе проверены сравнением: основной собран из варианта `github` со
+# встроенным загрузчиком обновлений, а F-Droid собирает вариант `fdroid`; и в
+# основном лежат секреты владельца (подпись WSS, пароль релея Opera), которых у
+# стороннего сборщика нет и быть не должно — они попадают в classes.dex. Эталон
+# `-fdroid` — это ровно то, что делает этот рецепт, только подписанное ключом
+# владельца через `apksigner`.
+#
+# Чтобы сравнение проходило, понадобилось (каждое — измеренная причина, не
+# перестраховка):
+#   * `-trimpath` в gomobile и `--remap-path-prefix` в Rust — иначе в .so
+#     попадают абсолютные пути каталога сборки;
+#   * свой `Cargo.lock` для tun2proxy: upstream держит его в .gitignore, версии
+#     зависимостей разрешались заново на каждой сборке;
+#   * патч `build.rs` tun2proxy: он зашивал в бинарник `chrono::Utc::now()`;
+#   * `vcsInfo.include = false` в Gradle: AGP кладёт в APK снимок состояния git
+#     той машины, где шла сборка.
+Binaries: https://github.com/confeden/Nova-Android/releases/download/v%v/Nova_%v-fdroid.apk
+AllowedAPKSigningKeys: 8440f6c63f26d461fefa6f7556303dac762768f9daeb31de01598ff55dc9336f
+
 Builds:
-  - versionName: '1.29'
-    versionCode: 142
-    commit: v1.29
+  - versionName: '1.29.4'
+    versionCode: 148
+    commit: v1.29.4
     subdir: app
     gradle:
       - fdroid
@@ -129,9 +154,12 @@ Builds:
       # Rust нужен для tun2proxy. Ставим rustup, а не пакеты Debian: в них нет
       # стандартной библиотеки под Android, без которой кросс-сборки не будет.
       - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
-      - su vagrant -c 'RUSTUP_INIT_SKIP_PATH_CHECK=yes sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable --no-modify-path'
+      # Версии закреплены: `stable` и «последний cargo-ndk» переезжают со временем,
+      # и та же сборка через месяц дала бы другой libtun2proxy.so — воспроизводимость
+      # сломалась бы молча.
+      - su vagrant -c 'RUSTUP_INIT_SKIP_PATH_CHECK=yes sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain 1.97.1 --no-modify-path'
       - su vagrant -c '$HOME/.cargo/bin/rustup target add aarch64-linux-android armv7-linux-androideabi'
-      - su vagrant -c '$HOME/.cargo/bin/cargo install cargo-ndk --locked'
+      - su vagrant -c '$HOME/.cargo/bin/cargo install cargo-ndk --version 4.1.2 --locked'
       # CMake из SDK. В их образе его нет вообще: из apt ставятся только JDK,
       # apksigner, curl, git, unzip, patch, rsync и sdkmanager, а внутри SDK
       # запись для сборщика открыта намеренно только в `build-tools` и
@@ -142,10 +170,13 @@ Builds:
       # root. Platform и build-tools указаны явно, чтобы не зависеть от того,
       # что догрузит сам Gradle: собирается ровно то, на чём проверено.
       # ANDROID_HOME берётся из /etc/profile.d/bsenv.sh, который создаёт их
-      # provisioning: `sudo` вычищает окружение, и переменной в шаге нет. Если
-      # файла нет (сборка не на их buildserver), `sdkmanager` упадёт сам и
-      # скажет, что каталог SDK не задан — молчаливого пропуска не будет.
-      - test -f /etc/profile.d/bsenv.sh && . /etc/profile.d/bsenv.sh; sdkmanager 'cmake;3.22.1' 'platforms;android-35' 'build-tools;35.0.1'
+      # provisioning: `sudo` вычищает окружение, и переменной в шаге нет. Файл и
+      # `sdkmanager` — отдельными командами: список шагов не должен склеивать
+      # команды через «;» или «&&» (замечание рецензента), а окружение всё равно
+      # переносится — весь список исполняет одна оболочка. Нет файла — команда
+      # упадёт вслух, молчаливого пропуска не будет.
+      - . /etc/profile.d/bsenv.sh
+      - sdkmanager "cmake;3.22.1" "platforms;android-35" "build-tools;35.0.1"
 
     prebuild:
       # Go-зависимости ядра: пять проектов подключены через `replace` по путям на
@@ -155,7 +186,14 @@ Builds:
       # Скрипты запускаются через `bash`, а не напрямую: в репозитории они лежат
       # с режимом 100644 (собираются на Windows, где git не хранит бит +x), и
       # прямой вызов на Linux даёт «Permission denied».
-      - (cd .. && PATH=/usr/local/go/bin:$PATH bash tools/deps/fetch_go_deps.sh)
+      #
+      # `cd` — отдельным шагом. Весь список исполняет одна оболочка, поэтому
+      # смена каталога переносится на следующие шаги; склеивать команды через
+      # «&&» нельзя (замечание рецензента), а отдельный `cd` заодно честнее:
+      # неудачный `cd` внутри «&&»-списка `set -e` не считает и молча оставляет
+      # остальные шаги работать не в том каталоге.
+      - cd ..
+      - PATH=/usr/local/go/bin:$PATH bash tools/deps/fetch_go_deps.sh
       # Иначе Gradle сам ищет JVM по системе и может взять для toolchain любую,
       # включая JRE без компилятора: локальный прогон падал на «Toolchain
       # installation … does not provide the required capabilities:
@@ -166,23 +204,25 @@ Builds:
       # `printf` с переводом строки в начале обязателен: gradle.properties в
       # репозитории заканчивается без перевода строки, и `echo >>` приклеивает
       # строку к `org.gradle.workers.max=8`, ломая обе.
-      - (cd .. && printf '\norg.gradle.java.installations.auto-detect=false\n' >> gradle.properties)
+      - printf '\norg.gradle.java.installations.auto-detect=false\n' >> gradle.properties
 
-    # Каждый шаг — в подоболочке. fdroidserver склеивает все команды списка в
-    # одну строку через «;» и выполняет одним `bash -c`, поэтому смена каталога
-    # протекает в следующий шаг: без скобок после `cd ..` первого шага второй
-    # искал бы `../nova-xray` уже вне репозитория. Хуже того, такая ошибка не
-    # роняет сборку: неудачный `cd` внутри `&&`-списка `set -e` не считает, и
-    # остальные шаги молча работают не там, где нужно.
+    # Каждый шаг — одна команда. Список исполняет одна оболочка, поэтому смена
+    # каталога переносится дальше по списку, и `cd` стоит отдельными шагами.
+    # Начинается список в каталоге `subdir`, то есть в `app/`, — отсюда первый
+    # `cd ..`; шаги `prebuild` и `build` исполняются разными оболочками, так что
+    # каталог для `build` надо задавать заново.
     build:
+      - cd ..
       # 1. Ядро nova-core (libgojni.so + .aar).
-      - (cd .. && PATH=/usr/local/go/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ bash tools/build_nova_core_aar.sh)
+      - PATH=/usr/local/go/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ bash tools/build_nova_core_aar.sh
       # 2. Ядро Xray для VLESS+REALITY (libnovaxray.so, libnovaxrayjni.so).
-      - (cd ../nova-xray && PATH=/usr/local/go/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ bash build.sh)
+      - cd nova-xray
+      - PATH=/usr/local/go/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ bash build.sh
+      - cd ..
       # 3. opera-proxy: клонируется по закреплённому тегу и собирается на месте.
-      - (cd .. && PATH=/usr/local/go/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ bash tools/build_opera_proxy.sh)
+      - PATH=/usr/local/go/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ bash tools/build_opera_proxy.sh
       # 4. tun2proxy: тег закреплён на последней версии с нужным нам C-API.
-      - (cd .. && PATH=$HOME/.cargo/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ bash tools/build_tun2proxy.sh)
+      - PATH=$HOME/.cargo/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ bash tools/build_tun2proxy.sh
 
     # Секрет подписи WSS есть только у владельца; стороннему сборщику запрет не
     # нужен и снимается явным флагом. Работают при этом все транспорты, кроме
@@ -193,5 +233,5 @@ Builds:
 
 AutoUpdateMode: Version v%v
 UpdateCheckMode: Tags
-CurrentVersion: '1.29'
-CurrentVersionCode: 142
+CurrentVersion: '1.29.4'
+CurrentVersionCode: 148

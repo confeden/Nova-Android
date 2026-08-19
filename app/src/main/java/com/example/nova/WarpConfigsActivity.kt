@@ -560,10 +560,34 @@ class WarpConfigsActivity : AppCompatActivity() {
                 ordinal = 0,
                 total = 0,
             )
-            vpnPermissionLauncher.launch(prepareIntent)
+            requestVpnConsentOrExplain(prepareIntent, savedCount)
             return
         }
         startDiscoveryService()
+    }
+
+    /**
+     * Запрашивает согласие на VPN и, если прошивка не может его показать,
+     * пишет причину в ту же строку состояния вместо молчаливого падения.
+     */
+    private fun requestVpnConsentOrExplain(prepareIntent: Intent, savedCount: Int): Boolean {
+        if (VpnConsent.request(vpnPermissionLauncher, prepareIntent)) return true
+        clientData.saveWarpDiscoverySnapshot(
+            running = false,
+            foundCount = savedCount,
+            message = VpnConsent.UNAVAILABLE_SHORT,
+            ordinal = 0,
+            total = 0,
+        )
+        updateDiscoveryUi(
+            running = false,
+            message = VpnConsent.UNAVAILABLE_SHORT,
+            foundCount = savedCount,
+            ordinal = 0,
+            total = 0,
+        )
+        Toast.makeText(this, VpnConsent.UNAVAILABLE_HINT, Toast.LENGTH_LONG).show()
+        return false
     }
 
     private fun startDiscoveryService() {
@@ -615,7 +639,7 @@ class WarpConfigsActivity : AppCompatActivity() {
                 ordinal = 0,
                 total = 0,
             )
-            vpnPermissionLauncher.launch(prepareIntent)
+            requestVpnConsentOrExplain(prepareIntent, savedCount)
             return
         }
         startAdaptationService()

@@ -967,7 +967,18 @@ class ClientData(context: Context) {
     fun getGatewayPortalPort(): Int = 1371
     fun saveServiceState(
         state: String,
-        backend: String = NovaVpnService.BACKEND_WARP,
+        /**
+         * `null` означает «нет новостей», как и у `transport`: остаётся тот бэкенд,
+         * который уже записан.
+         *
+         * Раньше по умолчанию стоял `BACKEND_WARP`, и любая публикация без бэкенда
+         * перекрашивала сессию в WARP — в том числе остановка из главного экрана и
+         * из плитки. Проверено на устройстве: после неудачного перебора своих
+         * профилей VLESS в `service_state.json` оставалось `backend=WARP`, и экран
+         * подписывал происходящее встроенным профилем. Это и читалось как «Nova
+         * сама переключается на встроенные».
+         */
+        backend: String? = null,
         attemptOrdinal: Int = 0,
         attemptTotal: Int = 0,
         transport: String = "",
@@ -984,7 +995,9 @@ class ClientData(context: Context) {
         registering: Boolean? = null,
     ) {
         val normalizedState = state.ifBlank { NovaVpnService.STATE_STOPPED }
-        val normalizedBackend = backend.ifBlank { NovaVpnService.BACKEND_WARP }
+        val normalizedBackend = backend?.trim()?.takeIf { it.isNotEmpty() }
+            ?: readServiceStateFile().optString("backend").trim().takeIf { it.isNotEmpty() }
+            ?: NovaVpnService.BACKEND_WARP
         // Пустой транспорт на живом туннеле означает «служба ничего не сообщила»,
         // а не «это WARP», и затирать им уже известный нельзя.
         //

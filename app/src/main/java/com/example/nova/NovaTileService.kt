@@ -44,7 +44,7 @@ class NovaTileService : TileService() {
             clientData.clearTransientConnectingPending()
             clientData.clearSoftReapplyPending()
             clientData.clearRestartSession()
-            clientData.saveServiceState(NovaVpnService.STATE_STOPPED, NovaVpnService.BACKEND_WARP)
+            clientData.saveServiceState(NovaVpnService.STATE_STOPPED)
             val intent = Intent(this, NovaVpnService::class.java)
             intent.action = "STOP_VPN"
             startService(intent)
@@ -185,7 +185,7 @@ class NovaTileService : TileService() {
             if (persistedState != NovaVpnService.STATE_STOPPED) {
                 clientData.clearTransientConnectingPending()
                 clientData.clearSoftReapplyPending()
-                clientData.saveServiceState(NovaVpnService.STATE_STOPPED, NovaVpnService.BACKEND_WARP)
+                clientData.saveServiceState(NovaVpnService.STATE_STOPPED)
             }
             return NovaVpnService.STATE_STOPPED
         }
@@ -198,7 +198,7 @@ class NovaTileService : TileService() {
         }
 
         if (persistedState != NovaVpnService.STATE_STOPPED) {
-            clientData.saveServiceState(NovaVpnService.STATE_STOPPED, NovaVpnService.BACKEND_WARP)
+            clientData.saveServiceState(NovaVpnService.STATE_STOPPED)
         }
         return NovaVpnService.STATE_STOPPED
     }

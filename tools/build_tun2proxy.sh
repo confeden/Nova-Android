@@ -41,26 +41,58 @@ if [ ! -d "$work_dir/.git" ]; then
     git -C "$work_dir" remote add origin "$REPO"
     git -C "$work_dir" fetch -q --depth 1 origin "refs/tags/$TAG:refs/tags/$TAG"
 fi
-git -C "$work_dir" checkout -q "$TAG"
+# `-f`: дерево должно быть ровно тем, что в теге, иначе патч ниже ляжет второй раз.
+git -C "$work_dir" checkout -q -f "$TAG"
+
+# Патч воспроизводимости. `build.rs` зашивал в бинарник `chrono::Utc::now()`, и
+# две сборки одного тега давали разные байты — найдено diffoscope: расходилась
+# строка версии в `.rodata`, а следом и суффиксы `.llvm.<n>` у локальных
+# символов того же модуля. После патча время берётся из окружения.
+git -C "$work_dir" apply "$root_dir/tools/deps/patches/tun2proxy.patch"
+
+# Свой Cargo.lock. Upstream держит его в .gitignore, то есть версии зависимостей
+# разрешаются заново на каждой сборке: два клона одного тега, сделанные в разные
+# дни, дают разный libtun2proxy.so (поймано — расходились и .text, и .rodata,
+# пока не сравнили сами Cargo.lock: 0.7.39 против 0.7.40 у пары транзитивных
+# крейтов). Файл рядом фиксирует весь граф; `--locked` ниже требует, чтобы cargo
+# именно его и использовал, а не молча обновил.
+cp "$root_dir/tools/deps/tun2proxy-Cargo.lock" "$work_dir/Cargo.lock"
 
 # `build.rs` подставляет GIT_HASH только если рядом есть полная история git, а
 # у shallow-клона по тегу её нет — сборка падала бы на `env!("GIT_HASH")`.
-# Задаём сами, причём фиксированными значениями: для воспроизводимой сборки это
-# лучше, чем реальная отметка времени.
+# BUILD_TIME берём из даты коммита самого тега (UTC): значение осмысленное и
+# одинаковое на любой машине в любой день.
 export GIT_HASH="${TAG}"
-export BUILD_TIME="${TAG}"
+BUILD_TIME="$(TZ=UTC git -C "$work_dir" log -1 --format=%cd --date=format-local:'%Y-%m-%d %H:%M:%S')"
+export BUILD_TIME
 
 # Пути в артефакт не зашиваем. Rust иначе кладёт в libtun2proxy.so абсолютные
 # пути каталога сборки и реестра crates, из-за чего два прогона дают разные
 # байты, — поймано на сравнении воспроизводимой сборки F-Droid. Каталог реестра
 # берём у самого cargo: он зависит от CARGO_HOME, а тот на разных машинах разный.
+#
+# Флаги идут через CARGO_ENCODED_RUSTFLAGS, а не RUSTFLAGS: RUSTFLAGS cargo
+# делит по пробелам, и на пути с пробелом («Nova Android») сборка падала с
+# «--remap-path-prefix must contain '='». Разделитель здесь — 0x1f, пробелы
+# внутри значения безопасны.
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
-export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$work_dir=/build --remap-path-prefix=$cargo_home=/cargo"
+rust_flags=()
+if [ -n "${RUSTFLAGS:-}" ]; then
+    read -r -a rust_flags <<<"$RUSTFLAGS"
+    unset RUSTFLAGS
+fi
+rust_flags+=("--remap-path-prefix=$work_dir=/build" "--remap-path-prefix=$cargo_home=/cargo")
+unit_sep=$'\x1f'
+encoded=""
+for flag in "${rust_flags[@]}"; do
+    encoded="${encoded:+$encoded$unit_sep}$flag"
+done
+export CARGO_ENCODED_RUSTFLAGS="$encoded"
 
 echo "==> cargo ndk (arm64-v8a, armeabi-v7a)"
 (
     cd "$work_dir"
-    cargo ndk -t arm64-v8a -t armeabi-v7a --platform "$API" build --release
+    cargo ndk -t arm64-v8a -t armeabi-v7a --platform "$API" build --release --locked
 )
 
 cp "$work_dir/target/aarch64-linux-android/release/libtun2proxy.so" "$out_dir/arm64-v8a/libtun2proxy.so"

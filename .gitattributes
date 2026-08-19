@@ -1,0 +1,7 @@
+# Скрипты сборки и патчи обязаны быть с LF. Windows-клиент с core.autocrlf=true
+# иначе положит в рабочее дерево CRLF, а такой файл на сборочной машине F-Droid
+# (Linux) либо не применяется как патч, либо падает с «\r: command not found».
+*.sh text eol=lf
+*.patch text eol=lf
+*.lock text eol=lf
+gradlew text eol=lf

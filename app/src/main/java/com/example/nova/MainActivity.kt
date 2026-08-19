@@ -470,6 +470,14 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Диагностическая сборка уводит на экран самодиагностики: на устройстве,
+        // где главный экран не открывается, дальше идти незачем. В обычных
+        // сборках DIAGNOSTICS равен false и ветка вырезается компилятором.
+        if (BuildConfig.DIAGNOSTICS) {
+            startActivity(android.content.Intent(this, DiagnosticsActivity::class.java))
+            finish()
+            return
+        }
         LogManager.setAppContext(this)
         clientData = ClientData(this)
         warpDiscoverySnapshot = clientData.getWarpDiscoverySnapshot()
@@ -1217,10 +1225,11 @@ class MainActivity : AppCompatActivity() {
         missingVpnSinceMs = 0L
         clientData.clearSoftReapplyPending()
         clientData.clearTransientConnectingPending()
-        clientData.saveServiceState(
-            NovaVpnService.STATE_STOPPED,
-            NovaVpnService.BACKEND_WARP,
-        )
+        // Бэкенд не называем: остановка не меняет того, чем подключались. Пока здесь
+        // стоял `BACKEND_WARP`, любая локальная остановка переписывала VLESS-сессию
+        // на WARP, и экран после неудачи со своими профилями подписывал её встроенным
+        // профилем.
+        clientData.saveServiceState(NovaVpnService.STATE_STOPPED)
     }
 
     private fun markServiceConnectingLocally(backend: String) {
@@ -2114,51 +2123,17 @@ class MainActivity : AppCompatActivity() {
             return null
         }
 
-        val ipv4Trace = fetchTraceInfoFromUrls(
-            network,
-            listOf(
-                "http://1.1.1.1/cdn-cgi/trace",
-                "http://1.0.0.1/cdn-cgi/trace",
-            )
-        )
-        val ipv6Trace = fetchTraceInfoFromUrls(
-            network,
-            listOf(
-                "http://[2606:4700:4700::1111]/cdn-cgi/trace",
-                "http://[2606:4700:4700::1001]/cdn-cgi/trace",
-            )
-        )
-        val genericTrace = fetchTraceInfoFromUrls(
-            network,
-            listOf(
-                "https://www.cloudflare.com/cdn-cgi/trace",
-                "https://cloudflare.com/cdn-cgi/trace",
-            )
-        )
+        val ipv4Trace = fetchTraceInfoFromUrls(network, CloudflareTrace.IPV4_URLS)
+        val ipv6Trace = fetchTraceInfoFromUrls(network, CloudflareTrace.IPV6_URLS)
+        val genericTrace = fetchTraceInfoFromUrls(network, CloudflareTrace.HOSTNAME_URLS)
 
+        // Только Cloudflare: адрес и страна приходят одним ответом и разойтись не
+        // могут, а сторонних определителей адреса здесь больше нет ([CloudflareTrace]).
         val ipv4 = ipv4Trace?.ip.orEmpty().ifBlank {
             genericTrace?.ip.orEmpty().takeIf(::isIpv4Address).orEmpty()
-        }.ifBlank {
-            fetchPlainIpFromUrls(
-                network,
-                listOf(
-                    "https://api4.ipify.org",
-                    "https://ipv4.icanhazip.com",
-                    "https://v4.ident.me",
-                )
-            ).orEmpty()
         }
         val ipv6 = ipv6Trace?.ip.orEmpty().ifBlank {
             genericTrace?.ip.orEmpty().takeUnless(::isIpv4Address).orEmpty()
-        }.ifBlank {
-            fetchPlainIpFromUrls(
-                network,
-                listOf(
-                    "https://api6.ipify.org",
-                    "https://ipv6.icanhazip.com",
-                    "https://v6.ident.me",
-                )
-            ).orEmpty()
         }
         val badgeTrace = ipv4Trace ?: ipv6Trace ?: genericTrace
         if (ipv4.isBlank() && ipv6.isBlank()) return null
@@ -2260,71 +2235,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun fetchIpSnapshotViaOperaProxy(): IpSnapshot? {
-        val fastTrace = listOf("1.1.1.1", "1.0.0.1")
+        // Прокси Opera ходит и по литералам, и по именам, поэтому пробуем оба входа
+        // Cloudflare подряд; сторонних определителей адреса здесь нет.
+        val fastTrace = CloudflareTrace.PROXY_TRACE_HOSTS
             .firstNotNullOfOrNull { host ->
-                readTextViaOperaProxySocket(host, "/cdn-cgi/trace", timeoutMs = 2200)
+                readTextViaOperaProxySocket(host, CloudflareTrace.PATH, timeoutMs = 2200)
                     ?.let(::parseTraceInfo)
             }
-        val fastIpv4 = fastTrace?.ip?.takeIf(::isIpv4Address).orEmpty().ifBlank {
-            listOf(
-                "api.ipify.org",
-                "v4.ident.me",
-                "ipv4.icanhazip.com",
-            ).firstNotNullOfOrNull { host ->
-                readTextViaOperaProxySocket(host, "/", timeoutMs = 2200)
-                    ?.lineSequence()
-                    ?.firstOrNull()
-                    ?.trim()
-                    ?.takeIf(::isIpv4Address)
-            }.orEmpty()
-        }
+        val fastIpv4 = fastTrace?.ip?.takeIf(::isIpv4Address).orEmpty()
         val proxy = Proxy(Proxy.Type.HTTP, OperaProxyManager.getLoopbackProxyAddress(this))
-        val genericTrace = fastTrace ?: fetchTraceInfoFromUrlsViaProxy(
-            proxy,
-            listOf(
-                "https://www.cloudflare.com/cdn-cgi/trace",
-                "https://cloudflare.com/cdn-cgi/trace",
-            )
-        )
+        val genericTrace = fastTrace
+            ?: fetchTraceInfoFromUrlsViaProxy(proxy, CloudflareTrace.HOSTNAME_URLS)
 
         val ipv4 = fastIpv4.ifBlank {
-            fetchPlainIpFromUrlsViaProxy(
-            proxy,
-            listOf(
-                "http://api.ipify.org",
-                "http://v4.ident.me",
-                "http://ipv4.icanhazip.com",
-                "https://api4.ipify.org",
-            )
-            ).orEmpty().ifBlank {
-                fetchPlainIpFromUrlsViaProxy(
-                    proxy,
-                    listOf(
-                        "http://icanhazip.com",
-                        "http://ifconfig.me/ip",
-                        "https://api.ipify.org",
-                    )
-                ).orEmpty()
-            }
+            genericTrace?.ip.orEmpty().takeIf(::isIpv4Address).orEmpty()
         }
-        val ipv6 = genericTrace?.ip?.takeUnless(::isIpv4Address).orEmpty().ifBlank {
-            fetchPlainIpFromUrlsViaProxy(
-                proxy,
-                listOf(
-                    "http://v6.ident.me",
-                    "http://ipv6.icanhazip.com",
-                    "https://api6.ipify.org",
-                )
-            ).orEmpty()
-                .ifBlank {
-                    fetchPlainIpFromUrlsViaProxy(
-                        proxy,
-                        listOf(
-                            "https://api64.ipify.org",
-                        )
-                    ).orEmpty()
-                }
-        }
+        val ipv6 = genericTrace?.ip?.takeUnless(::isIpv4Address).orEmpty()
         val badgeTrace = genericTrace
         if (ipv4.isBlank() && ipv6.isBlank()) return null
         return IpSnapshot(
@@ -2884,17 +2810,17 @@ class MainActivity : AppCompatActivity() {
 
     private fun measureLatencyViaOperaProxy(timeoutMs: Int): Int {
         val startedAt = System.currentTimeMillis()
+        // Оба набора — Cloudflare, просто разные входы: чередование нужно, чтобы не
+        // долбить один адрес, а не для того, чтобы опрашивать разных поставщиков.
         val probes = if (usePrimaryLatencyServer) {
             listOf(
-                "api.ipify.org" to "/",
-                "1.1.1.1" to "/cdn-cgi/trace",
-                "v4.ident.me" to "/",
+                CloudflareTrace.IPV4_HOSTS[0] to CloudflareTrace.PATH,
+                "www.cloudflare.com" to CloudflareTrace.PATH,
             )
         } else {
             listOf(
-                "v4.ident.me" to "/",
-                "1.0.0.1" to "/cdn-cgi/trace",
-                "api.ipify.org" to "/",
+                CloudflareTrace.IPV4_HOSTS[1] to CloudflareTrace.PATH,
+                "one.one.one.one" to CloudflareTrace.PATH,
             )
         }
         for ((host, path) in probes) {
@@ -2906,9 +2832,9 @@ class MainActivity : AppCompatActivity() {
         return try {
             val proxy = Proxy(Proxy.Type.HTTP, OperaProxyManager.getLoopbackProxyAddress(this))
             val fallbackUrls = if (usePrimaryLatencyServer) {
-                listOf("http://api.ipify.org", "http://v4.ident.me")
+                CloudflareTrace.IPV4_URLS
             } else {
-                listOf("http://v4.ident.me", "http://api.ipify.org")
+                CloudflareTrace.IPV4_URLS.reversed()
             }
             for (url in fallbackUrls) {
                 if (!readTextFromUrlViaProxy(proxy, url, timeoutMs).isNullOrBlank()) {
@@ -3092,7 +3018,13 @@ class MainActivity : AppCompatActivity() {
                 LogManager.log("Обнаружен другой активный VPN. Android попросит заменить его на Nova.")
             }
             pendingVpnPermissionFlowGeneration = existingFlowGeneration
-            vpnPermissionLauncher.launch(intent)
+            if (!VpnConsent.request(vpnPermissionLauncher, intent)) {
+                pendingVpnPermissionFlowGeneration = null
+                cancelStartFlow()
+                markServiceStoppedLocally()
+                renderVpnConsentUnavailableState()
+                Toast.makeText(this, VpnConsent.UNAVAILABLE_HINT, Toast.LENGTH_LONG).show()
+            }
         } else {
             registerAndStart(existingFlowGeneration)
         }
@@ -3796,6 +3728,22 @@ class MainActivity : AppCompatActivity() {
             text = "РАЗРЕШИ VPN",
             textColor = Color.parseColor("#F6D365"),
             textGlowColor = Color.parseColor("#F6D365"),
+        )
+        btnConnect.text = "ПОДКЛЮЧИТЬ"
+        applyPrimaryActionInterlock()
+    }
+
+    /**
+     * Состояние «согласие на VPN запросить невозможно»: в прошивке нет окна
+     * согласия. Отдельная строка, а не «РАЗРЕШИ VPN», потому что разрешать
+     * человеку нечем — совет уходит в подсказку и лог ([VpnConsent]).
+     */
+    private fun renderVpnConsentUnavailableState() {
+        renderStoppedState()
+        applyStatusStyle(
+            text = "НЕТ ОКНА VPN",
+            textColor = Color.parseColor("#FF6B6B"),
+            textGlowColor = Color.parseColor("#FF6B6B"),
         )
         btnConnect.text = "ПОДКЛЮЧИТЬ"
         applyPrimaryActionInterlock()

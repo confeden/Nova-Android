@@ -5,6 +5,40 @@ plugins {
     alias(libs.plugins.jetbrains.kotlin.android)
 }
 
+/**
+ * Диагностическая сборка: `./gradlew :app:assembleGithubRelease -PnovaDiagnostics`.
+ *
+ * Включает [com.example.nova.DiagnosticsActivity] (отдельный вход в лаунчере и
+ * перенаправление с главного экрана) и ранний перехват падений. Нужна там, где
+ * приложение показывает белый экран, а подключить ADB нельзя: отчёт выводится на
+ * экран крупным текстом и QR-кодом, человек фотографирует.
+ *
+ * В обычных сборках и в сборке F-Droid флага нет: компоненты выключены в
+ * манифесте, `BuildConfig.DIAGNOSTICS` равен `false`, zxing не подключается.
+ *
+ * Версию диагностической сборки задают правкой литералов ниже на время сборки
+ * (так уехала `1.29.debug-2`, versionCode 144): менять их выражением нельзя —
+ * `fdroid checkupdates` читает версию регулярным выражением.
+ */
+val novaDiagnostics = providers.gradleProperty("novaDiagnostics").isPresent
+
+/**
+ * Быстрая сборка для проверок: `./gradlew :app:assembleGithubRelease -PnovaFastBuild`.
+ *
+ * Замер профиля на правке одного файла: вся сборка 31 с, из них
+ * `lintVitalAnalyzeGithubRelease` 26,3 с и `minifyGithubReleaseWithR8` 23,0 с
+ * (идут параллельно), а компиляция Kotlin — 0,7 с. То есть время съедают ровно
+ * два релизных шага, и в быстром режиме они выключаются.
+ *
+ * Флаг ничего не меняет без явной передачи: релизы и сборки F-Droid идут с R8 и
+ * lint как раньше. APK быстрого режима **нельзя публиковать** — он не обфусцирован
+ * и не прошёл проверку lint.
+ */
+val novaFastBuild = providers.gradleProperty("novaFastBuild").isPresent
+if (novaFastBuild) {
+    logger.lifecycle("novaFastBuild: R8 и lint выключены — сборка только для проверок")
+}
+
 val keystoreProperties = Properties()
 val keystorePropertiesFile = rootProject.file("keystore.properties")
 val hasReleaseKeystore = keystorePropertiesFile.exists().also { exists ->
@@ -83,12 +117,17 @@ android {
         applicationId = "com.brent.nova"
         minSdk = 24 // Android 7.0; более новые API вызываются под проверкой SDK_INT
         targetSdk = 34
+        buildConfigField("boolean", "DIAGNOSTICS", novaDiagnostics.toString())
+        manifestPlaceholders["novaDiagnosticsEnabled"] = novaDiagnostics.toString()
+        // Главный экран выключается только в диагностической сборке — чтобы в
+        // лаунчере остался один значок и человек не открыл падающий экран.
+        manifestPlaceholders["novaMainEnabled"] = (!novaDiagnostics).toString()
         // Числа стоят литералами намеренно: F-Droid читает версию из этого файла
         // регулярным выражением (`fdroid checkupdates`, режим `Tags`) и переменную
         // не раскрывает — со `versionCode = appVersionCode` он не находит версию
         // вовсе и не видит новых релизов. Единственный источник версии — здесь.
-        versionCode = 142
-        versionName = "1.29"
+        versionCode = 148
+        versionName = "1.29.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -164,10 +203,28 @@ android {
         }
     }
 
+    /**
+     * Проверка релизной сборки после lint не запускается в быстром режиме: по
+     * замерам профиля `lintVitalAnalyze` — самая долгая задача сборки (26 с из 31).
+     */
+    lint {
+        checkReleaseBuilds = !novaFastBuild
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            // AGP кладёт в APK `META-INF/version-control-info.textproto` — снимок
+            // состояния git той машины, где шла сборка. Для воспроизводимой
+            // сборки это тупик: у F-Droid свой клон, и файл заведомо другой
+            // (поймано сравнением с их сборкой). Приложению он не нужен.
+            vcsInfo {
+                include = false
+            }
+            // В быстром режиме R8 и сжатие ресурсов выключены: вторая по времени
+            // задача (23 с). Итог — APK крупнее и без обфускации, годится только
+            // для проверок, не для публикации.
+            isMinifyEnabled = !novaFastBuild
+            isShrinkResources = !novaFastBuild
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             if (hasReleaseKeystore) {
                 signingConfig = signingConfigs.getByName("release")
@@ -288,6 +345,12 @@ if (operaRelayPassword.isEmpty()) {
 }
 
 dependencies {
+    // QR нужен только экрану самодиагностики. В обычной сборке библиотека не
+    // подключается вовсе, а код зовёт её через рефлексию и молча обходится без
+    // неё — размер APK и состав зависимостей F-Droid при этом не меняются.
+    if (novaDiagnostics) {
+        implementation("com.google.zxing:core:3.5.3")
+    }
     implementation("org.apache.commons:commons-compress:1.27.1")
     implementation("org.tukaani:xz:1.10")
     implementation(libs.androidx.core.ktx)

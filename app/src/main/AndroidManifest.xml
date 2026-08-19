@@ -57,10 +57,18 @@
             android:name="com.example.nova.PRODUCT_NAME"
             android:value="@string/app_name" />
         
+        <!--
+            В диагностической сборке главный экран выключен целиком: в лаунчере
+            остаётся один значок — «Nova диагностика». Иначе человек открывает
+            привычную иконку, падение случается до нашей строки перенаправления
+            (её выполняет `onCreate` уже после `super.onCreate`, а именно там и
+            разворачивается тема AppCompat), и он снова видит белый экран.
+        -->
         <activity
             android:name=".MainActivity"
             android:banner="@drawable/tv_app_banner"
             android:configChanges="keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+            android:enabled="${novaMainEnabled}"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -76,7 +84,48 @@
             </intent-filter>
         </activity>
         
-        <activity 
+        <!--
+            Самодиагностика. Включается только сборкой с `-PnovaDiagnostics`; в
+            обычных сборках компонент выключен и в лаунчере не виден.
+
+            Всё здесь выбрано против одного и того же симптома — белого экрана.
+            Тема системная, а не `Theme.Nova`: экран рисуется, даже когда ломается
+            именно наша тема. Процесс `:diag` не поднимает провайдеров основного
+            процесса, поэтому открывается и при падении приложения на старте.
+            Аппаратное ускорение выключено: на прошивке с неисправным GPU-драйвером
+            остальные окна остаются белыми, а это — нет.
+        -->
+        <activity
+            android:name=".DiagnosticsActivity"
+            android:banner="@drawable/tv_app_banner"
+            android:enabled="${novaDiagnosticsEnabled}"
+            android:exported="true"
+            android:hardwareAccelerated="false"
+            android:label="Nova диагностика"
+            android:process=":diag"
+            android:theme="@android:style/Theme.Black.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            Провайдер создаётся до Application.onCreate, поэтому обработчик
+            падений успевает встать раньше кода, который падает.
+        -->
+        <provider
+            android:name=".DiagnosticsCrashCatcher"
+            android:authorities="${applicationId}.diagnostics"
+            android:enabled="${novaDiagnosticsEnabled}"
+            android:exported="false"
+            android:initOrder="1000" />
+
+        <activity
             android:name=".SettingsActivity"
             android:label="Настройки"
             android:launchMode="singleTop"

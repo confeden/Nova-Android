@@ -687,6 +687,79 @@ func (t *AndroidTUN) Write(buffs [][]byte, offset int) (int, error) {
 	return len(buffs), nil
 }
 
+// Сколько перехваченных DNS-запросов разрешено резолвить одновременно.
+//
+// Ограничение нужно на случай шторма запросов: без него каждая новая горутина
+// висела бы на своём таймауте, а память и сокеты кончались бы молча. Переполнение
+// очереди означает «не перехватываем», и пакет уходит в туннель как обычный.
+var dnsInterceptInFlight = make(chan struct{}, 32)
+
+// Пишет в TUN ответ, собранный перехватом DNS.
+//
+// Под тем же мьютексом, что и закрытие устройства: иначе поздний ответ мог бы
+// прийти уже после `Close()` и записаться в закрытый дескриптор.
+func (t *AndroidTUN) writeInterceptedResponse(packet []byte) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.file == nil {
+		return
+	}
+	if _, err := t.file.Write(packet); err != nil && dnsInterceptLogBudget.Add(-1) >= 0 {
+		log.Printf("DNS intercept response write failed: %v", err)
+	}
+}
+
+// Резолвит перехваченный запрос и отвечает на него, не задерживая чтение из TUN.
+//
+// Почему отдельной горутиной. У wireguard-go одна `RoutineReadFromTUN`, и раньше
+// резолвинг шёл прямо в ней: каждый запрос ждал ответа апстрима до 2,5 с на адрес.
+// Импортированный профиль со своим DNS внутри туннеля (например `10.2.0.1`),
+// который не отвечает, останавливал этим весь исходящий поток — рукопожатие есть,
+// первый пинг проходит, а дальше тишина. Воспроизведено на устройстве: с прежним
+// порядком резолверов тот же профиль давал 100 % потерь и `curl` по IP не работал,
+// с асинхронным ответом — 0 % потерь и рабочий HTTPS.
+func (t *AndroidTUN) answerInterceptedDNS(
+	query []byte,
+	upstreams []string,
+	timeout time.Duration,
+	queryName string,
+	buildResponse func(payload []byte) ([]byte, error),
+) bool {
+	select {
+	case dnsInterceptInFlight <- struct{}{}:
+	default:
+		return false
+	}
+	go func() {
+		defer func() { <-dnsInterceptInFlight }()
+		responsePayload, upstream, err := resolveDNSPayload(query, upstreams, timeout)
+		if err != nil {
+			if dnsInterceptLogBudget.Add(-1) >= 0 {
+				log.Printf("DNS intercept failed (name=%s): %v", queryName, err)
+			}
+			return
+		}
+		responsePacket, err := buildResponse(responsePayload)
+		if err != nil {
+			if dnsInterceptLogBudget.Add(-1) >= 0 {
+				log.Printf("DNS intercept response build failed (name=%s): %v", queryName, err)
+			}
+			return
+		}
+		t.writeInterceptedResponse(responsePacket)
+		if dnsInterceptLogBudget.Add(-1) >= 0 {
+			log.Printf(
+				"DNS intercept answered locally via %s (query=%dB response=%dB, name=%s)",
+				upstream,
+				len(query),
+				len(responsePayload),
+				queryName,
+			)
+		}
+	}()
+	return true
+}
+
 func (t *AndroidTUN) Flush() error {
 	return nil
 }
@@ -805,26 +878,19 @@ func (t *AndroidTUN) tryHandleDNSInterceptIPv4(packet []byte, cfg dnsInterceptCo
 	if !intercept {
 		return false, nil
 	}
-	responsePayload, upstream, err := resolveDNSPayload(dnsPayload, upstreams, cfg.timeout)
-	if err != nil {
-		return false, err
-	}
-
-	responsePacket, err := buildIPv4UDPResponsePacket(dstIP, srcIP, dstPort, srcPort, responsePayload)
-	if err != nil {
-		return false, err
-	}
-	if _, err := t.file.Write(responsePacket); err != nil {
-		return false, err
-	}
-	if dnsInterceptLogBudget.Add(-1) >= 0 {
-		log.Printf(
-			"DNS intercept answered locally via %s (query=%dB response=%dB, ip=4, name=%s)",
-			upstream,
-			len(dnsPayload),
-			len(responsePayload),
-			queryName,
-		)
+	handed := t.answerInterceptedDNS(
+		dnsPayload,
+		upstreams,
+		cfg.timeout,
+		queryName,
+		func(payload []byte) ([]byte, error) {
+			return buildIPv4UDPResponsePacket(dstIP, srcIP, dstPort, srcPort, payload)
+		},
+	)
+	if !handed {
+		// Очередь резолвинга переполнена: пакет не перехватываем, пусть идёт в
+		// туннель обычным путём — это лучше, чем потерять запрос.
+		return false, errors.New("dns intercept queue is full")
 	}
 	return true, nil
 }
@@ -874,26 +940,17 @@ func (t *AndroidTUN) tryHandleDNSInterceptIPv6(packet []byte, cfg dnsInterceptCo
 	if !intercept {
 		return false, nil
 	}
-	responsePayload, upstream, err := resolveDNSPayload(dnsPayload, upstreams, cfg.timeout)
-	if err != nil {
-		return false, err
-	}
-
-	responsePacket, err := buildIPv6UDPResponsePacket(dstIP, srcIP, dstPort, srcPort, responsePayload)
-	if err != nil {
-		return false, err
-	}
-	if _, err := t.file.Write(responsePacket); err != nil {
-		return false, err
-	}
-	if dnsInterceptLogBudget.Add(-1) >= 0 {
-		log.Printf(
-			"DNS intercept answered locally via %s (query=%dB response=%dB, ip=6, name=%s)",
-			upstream,
-			len(dnsPayload),
-			len(responsePayload),
-			queryName,
-		)
+	handed := t.answerInterceptedDNS(
+		dnsPayload,
+		upstreams,
+		cfg.timeout,
+		queryName,
+		func(payload []byte) ([]byte, error) {
+			return buildIPv6UDPResponsePacket(dstIP, srcIP, dstPort, srcPort, payload)
+		},
+	)
+	if !handed {
+		return false, errors.New("dns intercept queue is full")
 	}
 	return true, nil
 }

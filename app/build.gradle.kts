@@ -126,8 +126,8 @@ android {
         // регулярным выражением (`fdroid checkupdates`, режим `Tags`) и переменную
         // не раскрывает — со `versionCode = appVersionCode` он не находит версию
         // вовсе и не видит новых релизов. Единственный источник версии — здесь.
-        versionCode = 148
-        versionName = "1.29.4"
+        versionCode = 149
+        versionName = "1.30"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

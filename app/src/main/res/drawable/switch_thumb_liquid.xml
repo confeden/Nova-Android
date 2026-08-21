@@ -6,11 +6,25 @@
     и material до 1.12.0 переключатели приехали мелкими и с подписью «ВКЛ» внутри.
     Свои размеры и своя форма делают внешний вид независимым от того, что решит
     следующая версия библиотеки.
+
+    Круг отодвинут от краёв смещениями слоя, а не `inset`. `SwitchCompat` растягивает
+    бегунок по вертикали на всю высоту переключателя, поэтому обычный круг рисовался
+    овалом во всю дорожку и выглядел срезанным сверху и снизу. `inset` тут не
+    подходит: библиотека распознаёт `InsetDrawable`, прибавляет его отступы обратно и
+    вместе с ними ужимает всю дорожку — проверено на устройстве, зазор не появился.
+    Смещения внутри `layer-list` она так не разбирает, и поля остаются.
 -->
-<shape xmlns:android="http://schemas.android.com/apk/res/android"
-    android:shape="oval">
-    <size
-        android:width="24dp"
-        android:height="24dp"/>
-    <solid android:color="#FFFFFF"/>
-</shape>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:top="3dp"
+        android:bottom="3dp"
+        android:left="3dp"
+        android:right="3dp">
+        <shape android:shape="oval">
+            <size
+                android:width="23dp"
+                android:height="23dp"/>
+            <solid android:color="#FFFFFF"/>
+        </shape>
+    </item>
+</layer-list>

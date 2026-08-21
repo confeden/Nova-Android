@@ -8,13 +8,18 @@
 # Подано: gitlab.com/fdroid/fdroiddata/-/merge_requests/46057, ветка
 # com.brent.nova в форке cryptolab.net/fdroiddata.
 #
-# ТЕГ v1.29 в публичном репозитории обязан содержать:
+# ЛЮБОЙ ТЕГ в публичном репозитории обязан содержать:
 #   * settings.gradle.kts без плагина
 #     `org.gradle.toolchains.foojay-resolver-convention` — сканер F-Droid считает
 #     его «usual suspect» (плагин умеет докачивать JDK) и останавливает сборку;
 #   * каталог `fastlane/metadata/android/<локаль>/` — тексты каталог забирает из
 #     дерева собираемого тега, а не из ветки по умолчанию.
 # Тег из-за этого переставлялся; проверочные прогоны делались на нём.
+#
+# После слияния запись о новой версии каталог добавляет сам (`AutoUpdateMode`), а
+# `Binaries` заставляет его скачать `Nova_<версия>-fdroid.apk` из релиза этого
+# тега. Отсюда правило: тег без эталонного APK в релизе — это красная сборка, и
+# никакой merge request об этом уже не спросит.
 #
 # ЧТО ПРОВЕРЕНО ЛОКАЛЬНО:
 #   * лицензия GPL-3.0 (дословный текст FSF);
@@ -65,8 +70,13 @@ IssueTracker: https://github.com/confeden/Nova-Android/issues
 
 # Приложение работает через несвободные сетевые службы (Cloudflare WARP/MASQUE,
 # прокси Opera). Ярлык-предупреждение, а не отказ во включении; указываем сами.
+# Пояснение к ярлыку обязательно (замечание рецензента): без него в каталоге
+# видно только «NonFreeNet», и непонятно, что именно несвободно.
 AntiFeatures:
-  - NonFreeNet
+  NonFreeNet:
+    en-US: The built-in transports connect to Cloudflare WARP/MASQUE and Opera's proxy
+      servers, whose server side is not free software. Profiles imported by the user
+      go to servers of their own choosing.
 
 AutoName: Nova
 
@@ -106,9 +116,9 @@ Binaries: https://github.com/confeden/Nova-Android/releases/download/v%v/Nova_%v
 AllowedAPKSigningKeys: 8440f6c63f26d461fefa6f7556303dac762768f9daeb31de01598ff55dc9336f
 
 Builds:
-  - versionName: '1.29.4'
-    versionCode: 148
-    commit: v1.29.4
+  - versionName: '1.30'
+    versionCode: 149
+    commit: v1.30
     subdir: app
     gradle:
       - fdroid
@@ -233,5 +243,5 @@ Builds:
 
 AutoUpdateMode: Version v%v
 UpdateCheckMode: Tags
-CurrentVersion: '1.29.4'
-CurrentVersionCode: 148
+CurrentVersion: '1.30'
+CurrentVersionCode: 149

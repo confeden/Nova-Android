@@ -295,6 +295,14 @@ class ClientData(context: Context) {
      * `warp_imported_only_mode` и отладочного ключа AWG; лечение то же.
      */
     private val masqueConfigFile = AtomicFile(File(appContext.filesDir, "masque_config.json"))
+    /**
+     * Отметка версии, с которой в прошлый раз запускалось приложение.
+     *
+     * Файл, а не настройки: значение читают оба процесса, а `SharedPreferences` в
+     * `MODE_PRIVATE` кэшируются каждым процессом отдельно — второй процесс увидел бы
+     * старое значение и повторил сброс.
+     */
+    private val appVersionStateFile = AtomicFile(File(appContext.filesDir, "app_version_state.json"))
     private val transportLatencyFile = AtomicFile(File(appContext.filesDir, "transport_latency.json"))
     private val vlessSubscriptionFile = AtomicFile(File(appContext.filesDir, "vless_subscription.json"))
     private val operaStateFile = AtomicFile(File(appContext.filesDir, "opera_state.json"))
@@ -1815,6 +1823,44 @@ class ClientData(context: Context) {
         }
         prefs.edit().putString(key, encodeRegistrationProfileStats(next)).commit()
     }
+    /**
+     * Режим экрана «SNI маскировка»: `auto` или `custom`.
+     *
+     * Это выбор пользователя, поэтому живёт в настройках, а не в файле состояния:
+     * пишет его только главный процесс, служба лишь читает — и читает через
+     * extras при переустановке туннеля, как остальные настройки.
+     */
+    fun getSniMaskMode(): String = SniMaskPolicy.normalizeMode(prefs.getString("sni_mask_mode", SniMaskPolicy.MODE_AUTO))
+
+    fun setSniMaskMode(value: String?) {
+        prefs.edit().putString("sni_mask_mode", SniMaskPolicy.normalizeMode(value)).commit()
+    }
+
+    /** Сырая строка, как её набрал пользователь: показываем её же при возврате на экран. */
+    fun getSniCustomListRaw(): String = prefs.getString("sni_mask_custom_list", "").orEmpty()
+
+    fun setSniCustomListRaw(value: String?) {
+        prefs.edit().putString("sni_mask_custom_list", value.orEmpty().trim()).commit()
+    }
+
+    fun getSniCustomHosts(): List<String> = SniMaskPolicy.parseCustomList(getSniCustomListRaw())
+
+    /**
+     * Наборы имён для маскировки: проверенные российские, большой российский список
+     * и зарубежный.
+     *
+     * Списки лежат в ассетах (`white.sni`, `traffic_mask_russia.sni`,
+     * `traffic_mask_global.sni`) и кэшируются каталогом, поэтому файл читается один
+     * раз за процесс. Российский список большой — 59 тысяч имён, — но нужен нам не
+     * целиком: политике хватает начала, а `buildOrder` берёт из него не больше
+     * `MAX_ORDER` кандидатов.
+     */
+    fun getSniMaskPools(): SniMaskPolicy.Pools = SniMaskPolicy.Pools(
+        white = TrafficMaskCatalog.getWhiteHosts(appContext),
+        russia = TrafficMaskCatalog.getRussiaHosts(appContext).take(SNI_RUSSIA_POOL_LIMIT),
+        global = TrafficMaskCatalog.getGlobalHosts(appContext),
+    )
+
     fun getTrafficMaskEnabled(): Boolean = prefs.getBoolean("traffic_mask_enabled", true)
     fun setTrafficMaskEnabled(enabled: Boolean) {
         prefs.edit().putBoolean("traffic_mask_enabled", enabled).commit()
@@ -2145,6 +2191,46 @@ class ClientData(context: Context) {
         val merged = ProfileRotation.mergeKeepingOrder(known, fresh)
         saveOperaPinnedEndpoints(country = country, endpoints = merged)
         return getOperaPinnedEndpoints(country)
+    }
+
+    /**
+     * Когда лента опубликованных адресов Opera опрашивалась в последний раз.
+     *
+     * Две отметки, а не одна: успех держит ленту свежей часами, а попытка не даёт
+     * долбить сеть по кругу, когда до GitHub не достучаться. Живут они в
+     * `opera_state.json`, потому что читает и пишет их процесс `:vpn`, а
+     * `SharedPreferences` откатывает записи соседнего процесса.
+     */
+    fun getOperaEndpointFeedSyncedAt(): Long = operaStateLong(OPERA_FEED_SYNCED_AT_KEY)
+
+    fun getOperaEndpointFeedAttemptAt(): Long = operaStateLong(OPERA_FEED_ATTEMPT_AT_KEY)
+
+    fun markOperaEndpointFeedAttempt(nowMs: Long = System.currentTimeMillis()) {
+        editOperaState { it.put(OPERA_FEED_ATTEMPT_AT_KEY, nowMs) }
+    }
+
+    fun markOperaEndpointFeedSynced(nowMs: Long = System.currentTimeMillis()) {
+        editOperaState { it.put(OPERA_FEED_SYNCED_AT_KEY, nowMs) }
+    }
+
+    /**
+     * Прокси для вызовов API SurfEasy, заданный пользователем в настройках.
+     *
+     * Живёт в `opera_state.json`, а не в настройках: пишет его UI, а читает
+     * процесс `:vpn`, и через `SharedPreferences` значение до него не дошло бы —
+     * так уже молча пропал отладочный ключ «AWG без junk».
+     */
+    fun getCustomOperaApiProxy(): String = operaStateString(OPERA_CUSTOM_API_PROXY_KEY)
+
+    fun setCustomOperaApiProxy(value: String) {
+        val clean = value.trim().take(200)
+        editOperaState { state ->
+            if (clean.isEmpty()) {
+                state.remove(OPERA_CUSTOM_API_PROXY_KEY)
+            } else {
+                state.put(OPERA_CUSTOM_API_PROXY_KEY, clean)
+            }
+        }
     }
 
     fun promoteOperaPinnedEndpoint(country: String, endpoint: String) {
@@ -2618,6 +2704,16 @@ class ClientData(context: Context) {
         }
     }
 
+    /**
+     * Адреса DNS, запросы к которым обязаны идти напрямую к провайдеру, мимо VPN.
+     *
+     * Требование владельца: Xbox DNS используется во всех режимах, и обращения к нему
+     * не должны заворачиваться в туннель. Реализуется исключением этих адресов из
+     * маршрутов `VpnService.Builder`: пакет к ним просто не попадает в TUN — ни к
+     * перехвату DNS в ядре (WARP/MASQUE), ни в tun2proxy (Opera, VLESS).
+     */
+    fun getDirectBypassDnsServers(): List<String> = XBOX_DNS_SERVERS
+
     fun getPreferredVpnDnsServers(
         backendLabel: String = getServiceBackend(),
         countryHint: String? = null,
@@ -2685,22 +2781,19 @@ class ClientData(context: Context) {
             )
         }
 
-        // Xbox DNS выбирается под конкретный выход WARP в России. У прокси-транспортов
-        // (Opera, VLESS) выход задан узлом, и подставлять им региональный резолвер
-        // незачем — там нейтральный Cloudflare.
-        val proxyStyleBackend = isOperaBackendLabel(backendLabel) || isVlessBackendLabel(backendLabel)
-        val preferXboxWarpDns = !proxyStyleBackend && shouldPreferXboxDnsForWarp(countryHint)
-        val primary = when {
-            proxyStyleBackend -> CLOUDFLARE_DNS_SERVERS
-            preferXboxWarpDns -> XBOX_DNS_SERVERS
-            else -> CLOUDFLARE_DNS_SERVERS
-        }
-        val secondary = if (primary === XBOX_DNS_SERVERS) CLOUDFLARE_DNS_SERVERS else XBOX_DNS_SERVERS
+        // Xbox DNS идёт первым в любом режиме — решение владельца. Раньше он
+        // подставлялся только на российском выходе WARP, а встроенный AWG с выходом,
+        // скажем, в Финляндии и весь прокси-режим Opera получали Cloudflare. Теперь
+        // порядок один для всех: Xbox впереди, остальные резолверы — запасные.
+        // Порядок в списке и есть порядок обхода: и `VpnService.Builder`, и перехват
+        // DNS в ядре берут следующий адрес, когда предыдущий не ответил.
+        val primary = XBOX_DNS_SERVERS
+        val secondary = CLOUDFLARE_DNS_SERVERS
         val label = when {
-            isOperaBackendLabel(backendLabel) -> "cloudflare-primary-opera"
-            isVlessBackendLabel(backendLabel) -> "cloudflare-primary-vless"
-            preferXboxWarpDns -> "xbox-primary-warp-ru"
-            else -> "cloudflare-primary-warp"
+            isOperaBackendLabel(backendLabel) -> "xbox-primary-opera"
+            isVlessBackendLabel(backendLabel) -> "xbox-primary-vless"
+            shouldPreferXboxDnsForWarp(countryHint) -> "xbox-primary-warp-ru"
+            else -> "xbox-primary-warp"
         }
         return VpnDnsProfile(
             label = label,
@@ -2713,15 +2806,24 @@ class ClientData(context: Context) {
     private fun resolvePreferredOperaBootstrapProfile(
         allowLocalDnsOverride: Boolean,
     ): Pair<String, String> {
+        // Xbox DNS стоит первым и здесь: opera-proxy резолвит свой API до того, как
+        // поднят туннель, то есть по сети оператора — ровно там, где этот резолвер и
+        // должен работать. Дальше идут DNS провайдера и публичные, как раньше.
         if (!allowLocalDnsOverride) {
-            return DEFAULT_OPERA_BOOTSTRAP_RESOLVERS to "public-opera-bootstrap"
+            return (XBOX_BOOTSTRAP_RESOLVER_LIST + DEFAULT_OPERA_BOOTSTRAP_RESOLVER_LIST)
+                .distinct()
+                .joinToString(",") to "xbox-public-opera-bootstrap"
         }
         val providerResolvers = resolveProviderOperaBootstrapResolvers()
         if (providerResolvers.isEmpty()) {
-            return DEFAULT_OPERA_BOOTSTRAP_RESOLVERS to "public-opera-bootstrap"
+            return (XBOX_BOOTSTRAP_RESOLVER_LIST + DEFAULT_OPERA_BOOTSTRAP_RESOLVER_LIST)
+                .distinct()
+                .joinToString(",") to "xbox-public-opera-bootstrap"
         }
-        val combined = (providerResolvers + DEFAULT_OPERA_BOOTSTRAP_RESOLVER_LIST).distinct()
-        return combined.joinToString(",") to "provider-public-opera-bootstrap"
+        val combined = (
+            XBOX_BOOTSTRAP_RESOLVER_LIST + providerResolvers + DEFAULT_OPERA_BOOTSTRAP_RESOLVER_LIST
+            ).distinct()
+        return combined.joinToString(",") to "xbox-provider-public-opera-bootstrap"
     }
 
     private fun resolveProviderOperaBootstrapResolvers(): List<String> {
@@ -6500,6 +6602,22 @@ class ClientData(context: Context) {
         return nextFailures
     }
 
+    /**
+     * Полный цикл WARP/AWG недавно закончился без трафика.
+     *
+     * Используется как условие для догадки «начать с MASQUE»: пока WARP работает,
+     * подменять его нечем. Отметка снимается при первом успешном подключении.
+     */
+    fun hasFreshWarpFullCycleFailure(
+        nowMs: Long = System.currentTimeMillis(),
+        freshnessMs: Long = 6L * 60L * 60L * 1000L,
+    ): Boolean {
+        val failedAt = prefs.getLong("warp_full_cycle_failed_at", 0L)
+        if (failedAt <= 0L) return false
+        val age = nowMs - failedAt
+        return age >= 0L && age <= freshnessMs
+    }
+
     fun clearWarpFullCycleFailureState() {
         prefs.edit()
             .remove("warp_full_cycle_failed_count")
@@ -6599,6 +6717,45 @@ class ClientData(context: Context) {
             setWarpTrafficMaskActiveHost(null)
             markWarpColdReset(nowMs)
         }
+    }
+
+    /**
+     * Стирает выученное прошлой версией, когда приложение обновилось.
+     *
+     * Зачем. Каталог данных переживает установку обновления, и вместе с ним переезжают
+     * замеры, рейтинги профилей, последний удачный режим и ключ MASQUE. Из-за
+     * `stable_last_success_mode` новая версия начинала не с начала очереди, а с того
+     * транспорта, на котором прошлая остановилась: человек ждал встроенный AWG, а
+     * получал MASQUE сразу после нажатия. Единственным лечением было «стереть данные»
+     * — теперь то же самое делает само приложение при смене versionCode.
+     *
+     * Что сохраняется: импортированные профили и подписки (`userImported`), профили,
+     * добавленные вручную (`manual`), и все настройки, включая выбранный регион, —
+     * явный выбор пользователя не трогаем.
+     *
+     * Отметка версии пишется до сброса: если в этот момент стартует второй процесс,
+     * он увидит уже новую версию и не станет стирать всё повторно.
+     */
+    fun resetLearnedStateAfterUpdate(): Boolean {
+        val currentCode = BuildConfig.VERSION_CODE
+        val storedCode = readAtomicJson(appVersionStateFile)
+            ?.optInt("version_code", -1)
+            ?.takeIf { it > 0 }
+        if (storedCode == currentCode) return false
+        writeAtomicRaw(
+            appVersionStateFile,
+            JSONObject().put("version_code", currentCode).toString(),
+        )
+        if (storedCode == null) {
+            LogManager.log("Первый запуск на этой установке: сбрасывать нечего, отмечаем versionCode $currentCode.")
+            return false
+        }
+        LogManager.log(
+            "Обновление $storedCode → $currentCode: стираем замеры, рейтинги профилей, " +
+                "последний удачный режим и ключ MASQUE, чтобы подбор начался с начала."
+        )
+        resetWarpRuntimeState(clearStoredConfig = true)
+        return true
     }
 
     fun resetWarpStoredRegistrationIdentity() {
@@ -8188,6 +8345,9 @@ class ClientData(context: Context) {
         const val TRAFFIC_MASK_POOL_GLOBAL = "global"
         const val TRAFFIC_MASK_POOL_RUSSIA = "russia"
         const val TRAFFIC_MASK_POOL_CUSTOM = "custom"
+        private const val OPERA_FEED_SYNCED_AT_KEY = "opera_endpoint_feed_synced_at"
+        private const val OPERA_FEED_ATTEMPT_AT_KEY = "opera_endpoint_feed_attempt_at"
+        private const val OPERA_CUSTOM_API_PROXY_KEY = "opera_custom_api_proxy"
         var needsRestart = false
         private val POISONED_ENDPOINT_HOSTS = setOf(
             "8.6.112.0",
@@ -8211,11 +8371,32 @@ class ClientData(context: Context) {
             "tls://1.1.1.1:853",
             "tls://8.8.8.8:853",
         )
+        /**
+         * Сколько имён брать из большого российского списка.
+         *
+         * В `traffic_mask_russia.sni` 59 тысяч строк. Держать их все в памяти ради
+         * одного имени на рукопожатие незачем: перебор на узле всё равно не уходит
+         * дальше первых десятков, а взятые подряд имена из начала списка одинаковы
+         * у всех установок — это не секрет, а маскировка.
+         */
+        private const val SNI_RUSSIA_POOL_LIMIT = 512
+
         private val XBOX_DNS_SERVERS = listOf(
             "111.88.96.50",
             "111.88.96.51",
             "2a00:ab00:1233:26::50",
             "2a00:ab00:1233:26::51",
+        )
+
+        /**
+         * Те же адреса в формате, который понимает opera-proxy.
+         *
+         * IPv6 в bootstrap не отдаём: у opera-proxy список резолверов разбирается по
+         * запятой, и адрес с двоеточиями в нём не отличить от `host:port`.
+         */
+        private val XBOX_BOOTSTRAP_RESOLVER_LIST = listOf(
+            "dns://111.88.96.50",
+            "dns://111.88.96.51",
         )
         private val ADGUARD_NO_ADS_DNS_SERVERS = listOf(
             "94.140.14.14",

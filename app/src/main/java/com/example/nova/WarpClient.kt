@@ -765,6 +765,12 @@ class WarpClient(
         limit: Int,
     ): List<String> {
         if (policy == null || !clientData.getTrafficMaskEnabled()) return emptyList()
+        // Регистрация WARP идёт по HTTPS, то есть тоже несёт SNI: список пользователя
+        // с экрана «SNI маскировка» действует и здесь.
+        if (clientData.getSniMaskMode() == SniMaskPolicy.MODE_CUSTOM) {
+            val custom = clientData.getSniCustomHosts()
+            if (custom.isNotEmpty()) return custom.take(limit.coerceAtLeast(1))
+        }
         if (clientData.getTrafficMaskMode() == "custom") {
             return listOfNotNull(clientData.getTrafficMaskHost().takeIf { it.isNotBlank() })
                 .take(limit.coerceAtLeast(1))

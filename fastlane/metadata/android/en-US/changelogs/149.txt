@@ -1,0 +1,6 @@
+- Fixed a stall that killed all traffic on an imported profile whose DNS server lives inside the tunnel.
+- Auto no longer stops after AmneziaWG: it continues to imported VLESS profiles.
+- The next-profile button now walks the whole transport chain instead of one family.
+- New SNI masking screen: automatic rotation or your own list of names.
+- Xbox DNS is used as the default resolver everywhere.
+- Optional proxy for Opera's API calls, for networks where they are blocked.

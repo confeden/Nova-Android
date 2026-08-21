@@ -138,6 +138,12 @@
             android:theme="@style/Theme.Nova.Settings" />
 
         <activity
+            android:name=".SniMaskSettingsActivity"
+            android:label="SNI маскировка"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.Nova.Settings" />
+
+        <activity
             android:name=".BackgroundSettingsActivity"
             android:label="Фон главного экрана"
             android:launchMode="singleTop"

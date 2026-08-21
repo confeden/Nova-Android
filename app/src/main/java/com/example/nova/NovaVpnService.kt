@@ -136,6 +136,14 @@ class NovaVpnService : OperaNativeVpnService() {
     private var masqueRegistrationBootstrapGenerationId = 0
     @Volatile
     private var manualWarpProfileSwitchTargetKey: String? = null
+
+    /**
+     * Поколение подключения, которому пользователь кнопкой назначил фазу MASQUE.
+     *
+     * Привязка к поколению, а не булев флаг: цикл может смениться (автоповтор,
+     * recovery), и ручной шаг не должен переезжать в чужое подключение.
+     */
+    private var manualMasqueStepGenerationId: Int = -1
     @Volatile
     private var manualWarpProfileSwitchOrdinal = 0
     @Volatile
@@ -558,6 +566,20 @@ class NovaVpnService : OperaNativeVpnService() {
          * TUN и tun2proxy остаются на месте, и опасного участка просто нет.
          */
         const val ACTION_SWITCH_VLESS_PROFILE = "SWITCH_VLESS_PROFILE"
+
+        /**
+         * Ручной шаг по цепочке транспортов — кнопка «следующий профиль» на главном
+         * экране, дошедшая до конца текущего списка.
+         *
+         * Отдельный extra, а не [EXTRA_EXIT_REGION]: регион из extras служба
+         * записывает в настройки ([applyExplicitReapplyOverrides]), и один шаг
+         * перебора менял бы выбранный пользователем режим навсегда.
+         */
+        const val EXTRA_MANUAL_TRANSPORT_STEP = "manual_transport_step"
+        const val MANUAL_STEP_MASQUE = "masque"
+        const val MANUAL_STEP_OPERA_EU = "opera-eu"
+        const val MANUAL_STEP_OPERA_US = "opera-us"
+        const val MANUAL_STEP_VLESS = "vless"
         const val ACTION_STOP_FOR_SOFT_RESTART = "STOP_FOR_SOFT_RESTART"
         const val ACTION_START_WARP_BOOTSTRAP = "START_WARP_BOOTSTRAP"
         const val ACTION_RUN_WARP_DIAGNOSTICS = "RUN_WARP_DIAGNOSTICS"
@@ -642,6 +664,16 @@ class NovaVpnService : OperaNativeVpnService() {
         const val EXTRA_REAPPLY_TRAFFIC_MASK_ENABLED = "reapply_traffic_mask_enabled"
         const val EXTRA_REAPPLY_TRAFFIC_MASK_MODE = "reapply_traffic_mask_mode"
         const val EXTRA_REAPPLY_TRAFFIC_MASK_HOST = "reapply_traffic_mask_host"
+
+        /**
+         * Настройки экрана «SNI маскировка» едут в службу через extras.
+         *
+         * `SharedPreferences` в `MODE_PRIVATE` кэшируются каждым процессом отдельно,
+         * и `:vpn` продолжал видеть прежний режим: на устройстве это выглядело как
+         * «выбрал свой список, а в рукопожатии всё равно имя из встроенного набора».
+         */
+        const val EXTRA_REAPPLY_SNI_MASK_MODE = "reapply_sni_mask_mode"
+        const val EXTRA_REAPPLY_SNI_MASK_LIST = "reapply_sni_mask_list"
         const val STATE_CONNECTING = "CONNECTING"
         const val STATE_CONNECTED = "CONNECTED"
         const val STATE_STOPPED = "STOPPED"
@@ -807,6 +839,15 @@ class NovaVpnService : OperaNativeVpnService() {
         const val TRANSPORT_MASQUE = "MASQUE"
         const val TRANSPORT_VLESS = "VLESS"
         const val TRANSPORT_WARP = "WARP"
+
+        /**
+         * Импортированный профиль AmneziaWG.
+         *
+         * Отдельная метка нужна экрану: бэкенд у него тот же `WARP`, и без неё
+         * на бейдже писалось «WARP» там, где туннель ведёт на сервер
+         * пользователя, а не в Cloudflare.
+         */
+        const val TRANSPORT_AWG = "AWG"
         const val TRANSPORT_OPERA = "OPERA"
         private const val BACKGROUND_HEARTBEAT_REQUEST_CODE = 4515
         private const val STOP_CLEANUP_CONFIRM_REQUEST_CODE = 4516
@@ -883,6 +924,10 @@ class NovaVpnService : OperaNativeVpnService() {
     override fun onCreate() {
         super.onCreate()
         LogManager.setAppContext(this)
+        // Служба умеет стартовать без экрана — по автозапуску или из плитки, — поэтому
+        // сброс после обновления проверяется и здесь. Отметка версии лежит в файле,
+        // так что второй процесс её увидит и повторять сброс не станет.
+        ClientData(this).resetLearnedStateAfterUpdate()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val filter = android.content.IntentFilter("com.example.nova.STOP_VPN")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -1884,12 +1929,20 @@ class NovaVpnService : OperaNativeVpnService() {
     /**
      * Транспорт попытки определяется движком её режима — единственный признак,
      * по которому MASQUE отличим от WireGuard/AWG внутри одного бэкенда WARP.
+     *
+     * Профиль пользователя показывается как AWG, а не WARP: WARP — это конкретная
+     * служба Cloudflare со встроенными узлами, а импортированный профиль ведёт на
+     * чужой сервер, и подписывать его чужим именем нечестно. Признак — сама попытка:
+     * у импортированных заполнен `importedConfigHost`.
      */
     private fun setCurrentTransportForAttempt(attempt: ConnectionAttempt) {
-        val label = if (attempt.mode.engine.equals("masque", ignoreCase = true)) {
-            TRANSPORT_MASQUE
-        } else {
-            TRANSPORT_WARP
+        val label = when {
+            attempt.mode.engine.equals("masque", ignoreCase = true) -> TRANSPORT_MASQUE
+            // Признак — источник профилей, а не поле попытки: `importedConfigHost`
+            // заполняется и у встроенных семян (там это просто хост verified-конфига),
+            // и по нему встроенный WARP подписывался бы как AWG.
+            ClientData(this).isImportedConfigSourceActive() -> TRANSPORT_AWG
+            else -> TRANSPORT_WARP
         }
         if (currentTransportLabel != label) {
             currentTransportLabel = label
@@ -3261,6 +3314,12 @@ class NovaVpnService : OperaNativeVpnService() {
         if (intent.hasExtra(EXTRA_REAPPLY_TRAFFIC_MASK_HOST)) {
             clientData.setTrafficMaskHost(intent.getStringExtra(EXTRA_REAPPLY_TRAFFIC_MASK_HOST))
         }
+        intent.getStringExtra(EXTRA_REAPPLY_SNI_MASK_MODE)?.let {
+            clientData.setSniMaskMode(it)
+        }
+        if (intent.hasExtra(EXTRA_REAPPLY_SNI_MASK_LIST)) {
+            clientData.setSniCustomListRaw(intent.getStringExtra(EXTRA_REAPPLY_SNI_MASK_LIST))
+        }
     }
 
     private fun reapplyCurrentPreferences(intent: Intent): Boolean {
@@ -3280,7 +3339,8 @@ class NovaVpnService : OperaNativeVpnService() {
                 "region=${clientData.getExitRegionPreference()}, importedSource=${clientData.isImportedWarpOnlyModeEnabled()}, " +
                 "importedActive=${clientData.isImportedConfigSourceActive()}, importedProtocol=${clientData.getImportedProtocolPreference()}, " +
                 "splitMode=${clientData.getSplitMode()}, maskEnabled=${clientData.getTrafficMaskEnabled()}, " +
-                "maskMode=${clientData.getTrafficMaskMode()}, maskHost=${clientData.getTrafficMaskHost()}"
+                "maskMode=${clientData.getTrafficMaskMode()}, maskHost=${clientData.getTrafficMaskHost()}, " +
+                "sniMode=${clientData.getSniMaskMode()}, sniList=${clientData.getSniCustomHosts().size}"
         )
         val regionPreference = normalizeRegionPreference(clientData.getExitRegionPreference())
         LogManager.log("REAPPLY resolved region preference in VPN service: $regionPreference")
@@ -3321,6 +3381,59 @@ class NovaVpnService : OperaNativeVpnService() {
             manualWarpProfileSwitchTotal = 0
         }
         currentWarpMaskHost = null
+
+        // Ручной шаг по цепочке: пользователь дошёл кнопкой до конца списка текущего
+        // транспорта и просит следующий. Сохранённый режим при этом не меняется —
+        // шаг живёт ровно одно подключение.
+        val manualTransportStep = intent.getStringExtra(EXTRA_MANUAL_TRANSPORT_STEP)
+            .orEmpty()
+            .trim()
+            .lowercase(Locale.US)
+        if (manualTransportStep == MANUAL_STEP_OPERA_EU || manualTransportStep == MANUAL_STEP_OPERA_US) {
+            val operaRegion = if (manualTransportStep == MANUAL_STEP_OPERA_US) "us" else "eu"
+            LogManager.log(
+                "Ручной шаг перебора: поднимаем Opera ${operaRegion.uppercase(Locale.US)}. " +
+                    "Выбранный режим ($regionPreference) не трогаем."
+            )
+            setCurrentBackend(BACKEND_OPERA)
+            broadcastState(STATE_CONNECTING)
+            startSafeServiceThread("NovaManualOperaStep") {
+                configureAndStartOperaOnly(operaRegion, connectGenerationId)
+            }
+            isRunning = true
+            return true
+        }
+        if (manualTransportStep == MANUAL_STEP_VLESS) {
+            LogManager.log("Ручной шаг перебора: следующая фаза — импортированные VLESS.")
+            setCurrentBackend(BACKEND_VLESS)
+            currentTransportLabel = TRANSPORT_VLESS
+            broadcastState(STATE_CONNECTING)
+            startSafeServiceThread("NovaManualVlessStep") {
+                if (!waitForPreviousCleanupIfNeeded(connectGenerationId, "manual-vless-step")) {
+                    return@startSafeServiceThread
+                }
+                if (!isConnectGenerationCurrent(connectGenerationId)) return@startSafeServiceThread
+                if (!ensureFreshTransportState(connectGenerationId, "manual-vless-step")) {
+                    return@startSafeServiceThread
+                }
+                installSocketProtector()
+                if (runVlessPhase(clientData, connectGenerationId)) return@startSafeServiceThread
+                if (isUserStopped || !isConnectGenerationCurrent(connectGenerationId)) {
+                    return@startSafeServiceThread
+                }
+                LogManager.log("Ручной шаг VLESS не дал трафика.")
+                broadcastState(STATE_STOPPED)
+            }
+            isRunning = true
+            return true
+        }
+        if (manualTransportStep == MANUAL_STEP_MASQUE) {
+            // Фазу MASQUE включает решение политики, а не отдельный вызов. Помечаем
+            // это подключение как «MASQUE выбран», и решение получается тем же, что
+            // при явном выборе в настройках: без cooldown и с полным сканом.
+            manualMasqueStepGenerationId = connectGenerationId
+            LogManager.log("Ручной шаг перебора: следующая фаза — MASQUE.")
+        }
 
         // VLESS проверяем раньше WARP: с регионом `vless` общая ветка потребовала бы
         // регистрацию WARP и молча возвращала false там, где её нет, — кнопка
@@ -4939,14 +5052,30 @@ class NovaVpnService : OperaNativeVpnService() {
             // «masque» выбором уже не является. Пока он им считался, режим отменялся
             // целиком: фаза MASQUE шла первой, а её провал останавливал службу —
             // до построения импортированного shortlist дело не доходило.
-            val masqueChosenExplicitly = if (importedConfigSourceActive) {
+            // Ручной шаг кнопкой действует ровно как явный выбор, но только на это
+            // подключение: пользователь сам попросил именно MASQUE — значит, ни
+            // cooldown, ни короткий скан кандидатов тут не к месту.
+            val manualMasqueStep = manualMasqueStepGenerationId == connectGenerationId
+            val masqueChosenExplicitly = manualMasqueStep || if (importedConfigSourceActive) {
                 clientData.resolveEffectiveImportedProtocol().equals("masque", ignoreCase = true)
             } else {
                 clientData.getExitRegionPreference().trim().lowercase(Locale.US) == "masque"
             }
+            // Выбран другой транспорт — значит, догадкам здесь не место. В режиме
+            // импортированных «другой выбор» — это протокол, вне его — регион.
+            val otherTransportChosenExplicitly = !masqueChosenExplicitly && if (importedConfigSourceActive) {
+                !clientData.resolveEffectiveImportedProtocol().equals(
+                    ImportedSourcePolicy.AUTO,
+                    ignoreCase = true,
+                )
+            } else {
+                RegionTransportPolicy.isExplicitChoice(clientData.getExitRegionPreference())
+            }
             val masqueStartDecision = MasqueStartPolicy.decide(
                 MasqueStartPolicy.Inputs(
                     masqueChosenExplicitly = masqueChosenExplicitly,
+                    otherTransportChosenExplicitly = otherTransportChosenExplicitly,
+                    warpCycleFailedRecently = clientData.hasFreshWarpFullCycleFailure(),
                     hasCachedIdentity = hasCachedMasqueIdentity,
                     hasStrongVerifiedMasque = hasStrongVerifiedMasquePreferred,
                     hasUserImportedWarpProfiles = hasUserImportedWarpPreferred,
@@ -5802,6 +5931,35 @@ class NovaVpnService : OperaNativeVpnService() {
             if (shouldPauseConnectForMissingUnderlying(clientData, "перехода к Opera/recovery fallback")) {
                 return
             }
+            // «Авто» на своих профилях обязано перебирать их все, а не одну семью.
+            //
+            // Фаза VLESS запускается в начале цикла только когда VLESS выбран явно.
+            // При «Авто» с двумя семьями выбранного протокола нет, фаза не шла вовсе,
+            // и после перебора импортированных AWG цикл уходил в recovery по тем же
+            // AWG — импортированные VLESS не пробовались ни разу. Отсюда жалоба
+            // «авто-режим не объединяет мои профили: мёртвые VLESS даже не перебирало».
+            if (
+                !diagnosticsMode &&
+                !isUserStopped &&
+                isConnectGenerationCurrent(connectGenerationId) &&
+                importedConfigSourceActive &&
+                !clientData.shouldUseVlessTransport() &&
+                clientData.resolveEffectiveImportedProtocol().equals(
+                    ImportedSourcePolicy.AUTO,
+                    ignoreCase = true,
+                ) &&
+                clientData.getVlessProfileLinks().isNotEmpty()
+            ) {
+                LogManager.log(
+                    "Импортированные AWG перебраны и трафика не дали. " +
+                        "В «Авто» очередь не заканчивается на одной семье — переходим к импортированным VLESS."
+                )
+                closeActiveInterface()
+                if (runVlessPhase(clientData, connectGenerationId)) return
+                if (isUserStopped || !isConnectGenerationCurrent(connectGenerationId)) return
+                closeActiveInterface()
+                LogManager.log("Импортированные VLESS тоже не дали трафика.")
+            }
             if (!diagnosticsMode && !isUserStopped && allowOperaFallbackThisCycle && isConnectGenerationCurrent(connectGenerationId)) {
                 currentAttemptOrdinal = 0
                 currentAttemptTotal = 0
@@ -6244,9 +6402,9 @@ class NovaVpnService : OperaNativeVpnService() {
     /**
      * Пересматривает порядок DNS, когда стала известна настоящая страна выхода.
      *
-     * До первого наблюдения импортированный AWG считается российским, поэтому первым
-     * идёт Xbox DNS. Если выход оказался зарубежным, порядок должен смениться на
-     * «сначала DNS из профиля» — и сделать это надо, не роняя соединения.
+     * Сам порядок от страны больше не зависит — Xbox DNS первый всегда, — но список
+     * резолверов Nova может смениться (например, включился профиль без рекламы), и
+     * тогда перехват в ядре надо обновить, не роняя соединения.
      */
     private fun reapplyDnsOrderForObservedCountry(clientData: ClientData, observedCountry: String) {
         val country = observedCountry.trim().uppercase(Locale.US)
@@ -6256,15 +6414,13 @@ class NovaVpnService : OperaNativeVpnService() {
         val importedDns = lastImportedProfileDnsServers
         if (importedDns.isEmpty()) return
 
+        // Резолвер профиля в перехват не возвращаем: он живёт внутри туннеля, а
+        // перехват ходит наружу по защищённому сокету — оттуда он недостижим.
         val novaDns = clientData.getPreferredVpnDnsServers(BACKEND_WARP, country)
-        val desired = if (country == "RU") {
-            (novaDns + importedDns).distinct()
-        } else {
-            (importedDns + novaDns).distinct()
-        }
-        if (desired == current) return
+        val desired = novaDns.filterNot { it in importedDns }.distinct()
+        if (desired.isEmpty() || desired == current) return
         LogManager.log(
-            "Страна выхода определена как $country — меняем порядок DNS на лету, без переподключения."
+            "Страна выхода определена как $country — обновляем порядок резолверов перехвата, без переподключения."
         )
         applyPlainDnsIntercept(desired, reason = "exit-country-$country")
     }
@@ -6331,8 +6487,15 @@ class NovaVpnService : OperaNativeVpnService() {
             .map { it.trim() }
             .filter { it.isNotBlank() }
             .distinct()
+        // У импортированного профиля свой DNS, и он почти всегда живёт внутри туннеля
+        // (`10.2.0.1` и подобные). Порядок тот же, что и в конфиге ядра: сначала Xbox,
+        // потом резолвер профиля.
         val (dnsServers, dnsLabel) = if (importedDnsServers.isNotEmpty()) {
-            importedDnsServers to "imported-awg"
+            val (novaDns, _) = resolveDnsServersForBuilder(
+                clientData = clientData,
+                backendLabel = BACKEND_WARP,
+            )
+            (novaDns + importedDnsServers).distinct() to "xbox-then-imported"
         } else {
             resolveDnsServersForBuilder(
                 clientData = clientData,
@@ -6347,7 +6510,15 @@ class NovaVpnService : OperaNativeVpnService() {
             clientData = clientData,
             backendLabel = BACKEND_WARP,
             countryHint = null,
-            dnsServers = dnsServers,
+            // Перехват DNS в ядре резолвит апстримы наружу, по защищённому сокету, и
+            // резолвер профиля туда попасть не должен: `10.2.0.1` в сети оператора не
+            // существует, а IPv6-адрес профиля даёт «network is unreachable». Такие
+            // запросы не получали ответа никогда — и до асинхронного ответа в ядре
+            // каждый из них ещё и останавливал единственное чтение из TUN, то есть весь
+            // исходящий трафик (воспроизведено на устройстве). Оставляем перехвату
+            // только свои резолверы; профиль остаётся в списке интерфейса и доступен
+            // системе через туннель.
+            dnsServers = dnsServers.filterNot { it in importedDnsServers },
             dnsLabel = dnsLabel,
         )
         builder.setSession("NovaVPN")
@@ -6377,6 +6548,7 @@ class NovaVpnService : OperaNativeVpnService() {
             connectivityManager = connectivityManager,
             underlyingNetwork = underlyingNetwork,
             protectedAddresses = localBypassProtectedAddresses,
+            bypassAddresses = directBypassDnsAddresses(clientData, dnsServers),
         )
         applyUnderlyingNetworkHint(
             builder = builder,
@@ -6572,6 +6744,7 @@ class NovaVpnService : OperaNativeVpnService() {
             enableIpv6DefaultRoute = false,
             connectivityManager = connectivityManager,
             underlyingNetwork = underlyingNetwork,
+            bypassAddresses = directBypassDnsAddresses(clientData, dnsServers),
         )
         applyUnderlyingNetworkHint(
             builder = builder,
@@ -6626,6 +6799,7 @@ class NovaVpnService : OperaNativeVpnService() {
             enableIpv6DefaultRoute = false,
             connectivityManager = connectivityManager,
             underlyingNetwork = underlyingNetwork,
+            bypassAddresses = directBypassDnsAddresses(clientData, dnsServers),
         )
         applyUnderlyingNetworkHint(
             builder = builder,
@@ -7226,6 +7400,10 @@ class NovaVpnService : OperaNativeVpnService() {
                     "WARP активен: фоново проверяем Opera endpoints через текущий VPN, " +
                         "чтобы при ошибках Opera 801/500/502 потом стартовать Opera напрямую через cached override."
                 )
+                // Заодно спрашиваем опубликованную ленту адресов: здесь туннель уже
+                // поднят, а это единственный путь, который работает и там, где до
+                // GitHub напрямую не достучаться.
+                OperaEndpointFeed.refreshIfStale(clientData, LogManager::log)
                 var bootstrapDiscovered = false
                 for ((country, label) in targets) {
                     if (isUserStopped || currentState != STATE_CONNECTED) break
@@ -8703,34 +8881,24 @@ class NovaVpnService : OperaNativeVpnService() {
             // запасных, и если сервер провайдера недоступен, имена перестают
             // разрешаться совсем.
             //
-            // Порядок решает страна выхода. На российском выходе первым идёт Xbox DNS
-            // (правило Nova), а DNS из профиля становится одним из запасных. На
-            // зарубежном — наоборот: профиль главный, серверы Nova подстраховывают.
-            // WireGuard перебирает список по порядку, поэтому важен именно он.
+            // Порядок один и не зависит от страны выхода: сначала Xbox DNS, затем DNS
+            // из профиля как запасной. Раньше на зарубежном выходе профиль вставал
+            // первым, и одно и то же приложение резолвило имена по-разному в
+            // зависимости от того, куда его вывел узел. WireGuard перебирает список по
+            // порядку, поэтому важен именно он.
             val importedDns = importedInterfaceOverrides.dnsServers
-            // Страна берётся по внешнему IP предыдущего наблюдения. Пока выход ни разу
-            // не наблюдался, импортированный AWG считаем российским: подавляющее
-            // большинство таких профилей выдают российский адрес, а Xbox DNS в этой
-            // стране работает и на зарубежном выходе — цена ошибки в эту сторону
-            // меньше, чем в обратную.
             val observedCountry = clientData.getLastExitCountry().trim().uppercase(Locale.US)
-            val countryHint = observedCountry.ifBlank { "RU" }
             val (novaDns, _) = resolveDnsServersForBuilder(
                 clientData = clientData,
                 backendLabel = BACKEND_WARP,
-                countryHint = countryHint,
+                countryHint = observedCountry.ifBlank { null },
             )
-            val russianExit = countryHint == "RU"
-            val merged = if (russianExit) novaDns + importedDns else importedDns + novaDns
-            val result = merged.distinct()
-            // Запоминаем DNS профиля: если позже выяснится, что выход не российский,
-            // порядок поменяется на лету, без переустановки туннеля.
+            val result = (novaDns + importedDns).distinct()
             lastImportedProfileDnsServers = importedDns
             LogManager.log(
-                "DNS импортированного профиля: страна выхода " +
-                    (observedCountry.ifBlank { "неизвестна, считаем RU" }) +
-                    ", порядок ${if (russianExit) "Xbox → профиль" else "профиль → запасные Nova"}: " +
-                    result.joinToString(", ")
+                "DNS импортированного профиля: порядок Xbox → профиль" +
+                    (if (observedCountry.isNotBlank()) " (страна выхода $observedCountry)" else "") +
+                    ": " + result.joinToString(", ")
             )
             result
         } else {
@@ -18133,14 +18301,54 @@ class NovaVpnService : OperaNativeVpnService() {
         // отказ выглядел как отказ узла. Счётчик неудач сдвигает выбор по набору,
         // так что повтор пробует следующее имя.
         val failures = masqueSniFailures[masqueSniKey(mode, host, port)] ?: 0
-        if (adaptive.isNotBlank() && !isCloudflareMasqueSni(adaptive) && failures == 0) {
+        val clientData = ClientData(this)
+        val customMode = clientData.getSniMaskMode() == SniMaskPolicy.MODE_CUSTOM
+        // Свой список пользователя сильнее подсказки от каталога приложений: он для
+        // того и вводится, чтобы решать самому.
+        if (!customMode && adaptive.isNotBlank() && !isCloudflareMasqueSni(adaptive) && failures == 0) {
             return adaptive
         }
         val seed = "$host:$port:${mode.name}".hashCode()
+        val choice = SniMaskPolicy.pick(
+            SniMaskPolicy.Inputs(
+                mode = clientData.getSniMaskMode(),
+                regime = resolveSniRegime(clientData),
+                customHosts = clientData.getSniCustomHosts(),
+                pools = clientData.getSniMaskPools(),
+                seed = seed,
+                attempt = failures,
+            )
+        )
+        if (choice != null && !isCloudflareMasqueSni(choice.host)) {
+            LogManager.log(
+                "SNI маскировка: ${choice.host} (набор ${choice.source}, режим ${clientData.getSniMaskMode()}, " +
+                    "сеть ${resolveSniRegime(clientData).name.lowercase(Locale.US)}, попытка ${failures + 1})"
+            )
+            return choice.host
+        }
+        // Списки пусты или всё в них уже подводило — остаётся встроенный набор.
+        // Пустую строку не возвращаем никогда: без имени ядро подставит собственное
+        // `*.cloudflareclient.com`, а его-то DPI и блокирует (3g).
         val size = MASQUE_NEUTRAL_SNI_POOL.size
         val index = (((seed % size) + size) % size + failures) % size
         return MASQUE_NEUTRAL_SNI_POOL[index]
     }
+
+    /**
+     * Что провайдер делает с доступом — по единственному сигналу, который есть до
+     * первого рукопожатия.
+     *
+     * `RestrictedMobileDetector` отвечает только про сотовую сеть (на Wi-Fi он
+     * возвращает `null`), поэтому «неизвестно» здесь — обычное состояние, а не
+     * сбой. Для политики этого достаточно: неизвестность обрабатывается как чёрный
+     * список, но с российскими именами впереди.
+     */
+    private fun resolveSniRegime(clientData: ClientData): SniMaskPolicy.Regime =
+        when (clientData.getLatestRestrictedMobileStatus(freshnessMs = 5L * 60L * 1000L)) {
+            true -> SniMaskPolicy.Regime.WHITELIST
+            false -> SniMaskPolicy.Regime.BLACKLIST
+            null -> SniMaskPolicy.Regime.UNKNOWN
+        }
 
     private fun masqueSniKey(mode: TransportMode, host: String, port: Int): String =
         "${mode.name}|${host.trim()}|$port"
@@ -19876,6 +20084,32 @@ class NovaVpnService : OperaNativeVpnService() {
      * 853/tcp, DNS остаётся внутри туннеля. Если не пропускает — обход возвращается:
      * строгий Private DNS без доступа к серверу убил бы резолвинг совсем.
      */
+    /**
+     * Адреса DNS, которые надо вывести из маршрутов туннеля.
+     *
+     * Требование владельца: запросы к Xbox DNS идут напрямую к провайдеру в любом
+     * режиме. Способ — не заворачивать их в TUN: тогда пакет уходит по сети оператора
+     * и в WARP/MASQUE (перехват DNS в ядре его не увидит), и в Opera с VLESS (в
+     * tun2proxy он не попадёт). Возвращаем только те адреса, которые действительно
+     * отданы этому туннелю: выводить наружу маршрут, которым никто не пользуется,
+     * незачем.
+     */
+    private fun directBypassDnsAddresses(
+        clientData: ClientData,
+        activeDnsServers: List<String>,
+    ): Set<String> {
+        val active = activeDnsServers.map { it.trim() }.filter { it.isNotBlank() }.toSet()
+        if (active.isEmpty()) return emptySet()
+        val bypass = clientData.getDirectBypassDnsServers()
+            .map { it.trim() }
+            .filter { it.isNotBlank() && it in active }
+            .toSet()
+        if (bypass.isNotEmpty()) {
+            LogManager.log("DNS мимо туннеля (напрямую к провайдеру): ${bypass.joinToString(",")}")
+        }
+        return bypass
+    }
+
     private fun applyPrivateDnsBypass(
         builder: Builder,
         connectivityManager: android.net.ConnectivityManager?,
@@ -19938,11 +20172,13 @@ class NovaVpnService : OperaNativeVpnService() {
         connectivityManager: android.net.ConnectivityManager?,
         underlyingNetwork: android.net.Network?,
         protectedAddresses: Set<String> = emptySet(),
+        bypassAddresses: Set<String> = emptySet(),
     ) {
         val localPrefixes = buildLocalNetworkBypassPrefixes(
             connectivityManager = connectivityManager,
             underlyingNetwork = underlyingNetwork,
             protectedAddresses = protectedAddresses,
+            bypassAddresses = bypassAddresses,
         )
         val excludeRouteMethod = findExcludeRouteMethod(builder)
         if (excludeRouteMethod != null) {
@@ -20007,10 +20243,20 @@ class NovaVpnService : OperaNativeVpnService() {
         }
     }
 
+    /**
+     * Подсети, которые остаются вне туннеля.
+     *
+     * [protectedAddresses] и [bypassAddresses] тянут в разные стороны, и путать их
+     * нельзя: первый список **возвращает** адрес в туннель, вычитая его из подсетей
+     * обхода (так DNS импортированного профиля из частной сети остаётся доступным
+     * через туннель), а второй, наоборот, **выводит** конкретные адреса наружу —
+     * этим уходят мимо VPN запросы к Xbox DNS.
+     */
     private fun buildLocalNetworkBypassPrefixes(
         connectivityManager: android.net.ConnectivityManager?,
         underlyingNetwork: android.net.Network?,
         protectedAddresses: Set<String> = emptySet(),
+        bypassAddresses: Set<String> = emptySet(),
     ): List<String> {
         val prefixes = linkedSetOf(
             "10.0.0.0/8",
@@ -20061,6 +20307,18 @@ class NovaVpnService : OperaNativeVpnService() {
                     }
                 }
             }
+        bypassAddresses.forEach { raw ->
+            val address = runCatching { InetAddress.getByName(raw.trim()) }.getOrNull() ?: return@forEach
+            val host = address.hostAddress?.substringBefore('%').orEmpty()
+            if (host.isBlank()) return@forEach
+            val bits = when (address) {
+                is Inet4Address -> 32
+                is Inet6Address -> 128
+                else -> return@forEach
+            }
+            prefixes += "$host/$bits"
+        }
+
         if (protectedAddresses.isEmpty()) {
             return prefixes.toList()
         }

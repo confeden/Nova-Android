@@ -75,6 +75,13 @@ object OperaProxyManager {
          * по-прежнему набирается напрямую с адреса пользователя.
          */
         val apiRelay: String = "",
+        /**
+         * То же самое, но задано пользователем в настройках. Отдельное поле, а не
+         * значение `apiRelay`: наш релей поднимается через мост (резолвер Go на
+         * Android уходит в `[::1]:53`), а сюда пользователь вводит готовый адрес,
+         * которому мост не нужен и навредил бы — TLS до чужого прокси мы не ведём.
+         */
+        val apiProxy: String = "",
     )
 
     private const val BIND_HOST = "127.0.0.1"
@@ -187,6 +194,44 @@ object OperaProxyManager {
         val value = raw.trim().trim('"', '\'')
         if (value.isEmpty() || value.startsWith("#")) return null
         return if (value.contains("://")) value else "socks5://$value"
+    }
+
+    /**
+     * Прокси для вызовов API, заданный пользователем в настройках.
+     *
+     * Зачем он есть. Рабочий набор endpoint'ов выдаёт только discover, сделанный
+     * не из России. У сборки с релеем для этого есть релей, у остальных —
+     * опубликованный список ([OperaEndpointFeed]); это поле — третий путь, когда
+     * у пользователя есть свой прокси и он хочет ходить через него.
+     *
+     * Пустая строка означает «не задан», и тогда всё работает ровно как прежде.
+     */
+    private fun resolveCustomApiProxy(clientData: ClientData, logger: (String) -> Unit): String {
+        val raw = clientData.getCustomOperaApiProxy()
+        if (raw.isBlank()) return ""
+        val normalized = normalizeApiRelay(raw)
+        if (normalized == null) {
+            logger("Прокси для API из настроек не разобрался, пропускаем его: $raw")
+            return ""
+        }
+        val hostPort = normalized.substringAfter("://").substringAfterLast('@')
+        val host = hostPort.substringBeforeLast(':').trim('[', ']')
+        if (host.isNotEmpty() && !isIpLiteral(host)) {
+            // Не отказ, а предупреждение: решает пользователь. Молча же это
+            // выглядело бы как «прокси не работает» без единой причины в журнале.
+            logger(
+                "Прокси для API задан именем ($host): opera-proxy резолвит его резолвером Go, " +
+                    "а тот на Android уходит в [::1]:53. Надёжнее указать IP-адрес."
+            )
+        }
+        return normalized
+    }
+
+    private fun isIpLiteral(host: String): Boolean {
+        if (host.contains(':')) return true
+        val parts = host.split('.')
+        if (parts.size != 4) return false
+        return parts.all { part -> part.toIntOrNull()?.let { it in 0..255 } == true }
     }
 
     /**
@@ -473,11 +518,20 @@ object OperaProxyManager {
                 if (limit != null && hosts.size > limit) hosts.take(limit) else hosts
             }
             val apiProfiles = orderedOperaApiProfiles(clientData, requestedCountry)
+            // Опубликованный список адресов ложится в тот же кэш, из которого план
+            // ниже берёт override, поэтому спрашиваем ленту до сборки плана.
+            OperaEndpointFeed.refreshBeforeLaunch(
+                clientData = clientData,
+                hasUsableCache = clientData.getOperaPinnedEndpoints(requestedCountry)
+                    .any { !clientData.isOperaPinnedEndpointCoolingDown(requestedCountry, it) },
+                logger = launchLogger,
+            )
             val pinnedEndpoints = clientData.getOperaPinnedEndpoints(requestedCountry)
             val cachedEndpoints = pinnedEndpoints
                 .filterNot { clientData.isOperaPinnedEndpointCoolingDown(requestedCountry, it) }
                 .take(2)
             val apiRelays = apiRelays()
+            val customApiProxy = resolveCustomApiProxy(clientData, launchLogger)
             val launchPlans = buildList {
                 val seenPlans = linkedSetOf<String>()
                 fun appendPlan(
@@ -485,12 +539,13 @@ object OperaProxyManager {
                     endpoint: String?,
                     apiProfile: OperaApiProfile,
                     apiRelay: String = "",
+                    apiProxy: String = "",
                 ) {
                     val normalizedHost = host.trim()
                     val normalizedEndpoint = endpoint?.trim().orEmpty()
-                    val key = "${normalizedEndpoint}|${apiProfile.id}|$normalizedHost|$apiRelay"
+                    val key = "${normalizedEndpoint}|${apiProfile.id}|$normalizedHost|$apiRelay|$apiProxy"
                     if (seenPlans.add(key)) {
-                        add(OperaLaunchPlan(normalizedHost, endpoint, apiProfile, apiRelay))
+                        add(OperaLaunchPlan(normalizedHost, endpoint, apiProfile, apiRelay, apiProxy))
                     }
                 }
                 if (cachedEndpoints.isNotEmpty()) {
@@ -515,6 +570,17 @@ object OperaProxyManager {
                     launchLogger(
                         "Кэшированные Opera endpoints для $requestedCountry сейчас в cooldown после ошибок. " +
                             "Пропускаем override и запускаем discovery/API."
+                    )
+                }
+                // Прокси из настроек идёт раньше наших релеев: его задали руками
+                // и именно для этого, а релей — наш запасной путь.
+                if (customApiProxy.isNotEmpty()) {
+                    for (apiProfile in apiProfiles) {
+                        appendPlan("", null, apiProfile, apiProxy = customApiProxy)
+                    }
+                    launchLogger(
+                        "Вызовы API SurfEasy для $requestedCountry сначала пробуем через прокси из настроек " +
+                            "(${describeApiRelay(customApiProxy)}): туннель при этом набирается напрямую."
                     )
                 }
                 // Discover через свой релей идёт раньше прямого: из России прямой
@@ -552,8 +618,9 @@ object OperaProxyManager {
                 // работал, а на текущей он отдаёт недостижимые адреса.
                 fun discoverTier(plan: OperaLaunchPlan): Int = when {
                     !plan.endpointOverride.isNullOrBlank() -> 0
-                    plan.apiRelay.isNotEmpty() -> 1
-                    else -> 2
+                    plan.apiProxy.isNotEmpty() -> 1
+                    plan.apiRelay.isNotEmpty() -> 2
+                    else -> 3
                 }
                 val rankedPlans = plans.withIndex()
                     .sortedWith(
@@ -699,6 +766,11 @@ object OperaProxyManager {
                     }
                     args += listOf("-api-proxy", bridgedRelay)
                 }
+                if (plan.apiProxy.isNotEmpty()) {
+                    // Прокси пользователя отдаём бинарнику как есть: мост нужен нашему
+                    // релею ради имени и TLS, а здесь ни того, ни другого нет.
+                    args += listOf("-api-proxy", plan.apiProxy)
+                }
 
                 launchLogger("Поднимаем встроенный Opera proxy для $purposeLabel... попытка ${attemptIndex + 1}/${launchPlans.size}")
                 launchLogger("Opera bootstrap DNS: $bootstrapLabel")
@@ -713,6 +785,12 @@ object OperaProxyManager {
                 }
                 if (plan.apiRelay.isNotEmpty()) {
                     launchLogger("Встроенный Opera proxy: API SurfEasy через релей ${describeApiRelay(plan.apiRelay)}")
+                }
+                if (plan.apiProxy.isNotEmpty()) {
+                    launchLogger(
+                        "Встроенный Opera proxy: API SurfEasy через прокси из настроек " +
+                            describeApiRelay(plan.apiProxy)
+                    )
                 }
                 if (plan.apiRelay.isEmpty()) {
                     // Прошлая попытка могла оставить мост поднятым, а этой он не нужен:
@@ -1177,13 +1255,24 @@ object OperaProxyManager {
         // endpoint'ов зависит от того, откуда пришёл запрос, и российскому адресу
         // выдаётся набор, до которого потом всё равно не дозвониться. Пустая строка в
         // конце — прежний прямой путь, он остаётся запасным.
-        val discoveryPasses = (apiRelays() + "").flatMap { relay ->
-            apiProfiles.map { profile -> relay to profile }
+        //
+        // Прокси из настроек, если он задан, идёт впереди релеев: его задали руками.
+        val customApiProxy = resolveCustomApiProxy(clientData, logger)
+        val apiRoutes = buildList {
+            // Пара «наш релей (через мост)» — «прокси пользователя (напрямую)»;
+            // обе пустые означают прямой путь.
+            if (customApiProxy.isNotEmpty()) add("" to customApiProxy)
+            apiRelays().forEach { relay -> add(relay to "") }
+            add("" to "")
         }
-        for ((apiRelay, apiProfile) in discoveryPasses) {
+        val discoveryPasses = apiRoutes.flatMap { route ->
+            apiProfiles.map { profile -> route to profile }
+        }
+        for ((route, apiProfile) in discoveryPasses) {
+            val (apiRelay, apiProxy) = route
             // Через релей маскировать SNI незачем: соединение с API идёт до релея,
             // а имя api2.sec-tunnel.com в открытый эфир не выходит вовсе.
-            val profileHosts = if (apiRelay.isNotEmpty()) {
+            val profileHosts = if (apiRelay.isNotEmpty() || apiProxy.isNotEmpty()) {
                 listOf("")
             } else {
                 maskHostsForApiProfile(apiProfile, candidateHosts)
@@ -1225,11 +1314,17 @@ object OperaProxyManager {
                     }
                     args += listOf("-api-proxy", bridged)
                 }
+                if (apiProxy.isNotEmpty()) {
+                    // Мост здесь не нужен: адрес пользователь задал сам, имени и TLS
+                    // до чужого прокси мы не ведём.
+                    args += listOf("-api-proxy", apiProxy)
+                }
                 logger(
                     "Opera endpoint discovery через текущую сеть/VPN: $requestedCountry " +
                         "попытка ${index + 1}/${profileHosts.size}, API=${apiProfile.label}, DNS=$bootstrapLabel" +
                         (if (fakeSni.isNotBlank()) ", SNI=$fakeSni" else ", без SNI") +
-                        if (apiRelay.isNotEmpty()) ", релей ${describeApiRelay(apiRelay)}" else ""
+                        (if (apiRelay.isNotEmpty()) ", релей ${describeApiRelay(apiRelay)}" else "") +
+                        if (apiProxy.isNotEmpty()) ", прокси из настроек ${describeApiRelay(apiProxy)}" else ""
                 )
 
                 for (launchMode in buildLaunchModes()) {
@@ -1515,6 +1610,16 @@ object OperaProxyManager {
     ): List<String> {
         if (!clientData.getTrafficMaskEnabled()) {
             return listOf("")
+        }
+        // Свой список с экрана «SNI маскировка» сильнее встроенных наборов: `-fake-SNI`
+        // у opera-proxy — такое же TLS-рукопожатие, как у MASQUE, и подставлять туда
+        // что-то своё, когда пользователь назвал имена сам, было бы подменой выбора.
+        if (clientData.getSniMaskMode() == SniMaskPolicy.MODE_CUSTOM) {
+            val custom = clientData.getSniCustomHosts()
+            if (custom.isNotEmpty()) {
+                val offset = ((maskHostRotation % custom.size) + custom.size) % custom.size
+                return custom.subList(offset, custom.size) + custom.subList(0, offset)
+            }
         }
         return when (clientData.getTrafficMaskMode()) {
             "custom" -> listOf(clientData.getTrafficMaskHost())

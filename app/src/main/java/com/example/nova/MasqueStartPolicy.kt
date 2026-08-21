@@ -33,6 +33,16 @@ object MasqueStartPolicy {
      */
     data class Inputs(
         val masqueChosenExplicitly: Boolean,
+        /**
+         * Пользователь выбрал другой транспорт — WARP, VLESS или конкретный регион.
+         *
+         * Отдельный вход, а не отрицание [masqueChosenExplicitly]: «Авто» — это
+         * отсутствие выбора, и догадки там разрешены, а названный транспорт
+         * подменять нельзя ничем.
+         */
+        val otherTransportChosenExplicitly: Boolean = false,
+        /** Полный цикл WARP/AWG недавно не дал трафика на этой установке. */
+        val warpCycleFailedRecently: Boolean = false,
         val hasCachedIdentity: Boolean,
         val hasStrongVerifiedMasque: Boolean,
         val hasUserImportedWarpProfiles: Boolean,
@@ -105,10 +115,24 @@ object MasqueStartPolicy {
             inputs.failureStreak >= AUTO_FIRST_FAILURE_LIMIT &&
             inputs.explicitLockoutFresh
 
+        // Догадка «начать с MASQUE» живёт только в «Авто» и только пока WARP/AWG
+        // действительно не работает на этой сети.
+        //
+        // Дефект, который это чинит: один раз выбранный вручную MASQUE оставлял после
+        // себя проверенные профили, и `hasStrongVerifiedMasque` навсегда ставил его
+        // первым. Дальше он поднимался, статистика подтверждалась, и приложение уже
+        // не возвращалось к WARP ни в «Авто», ни при явно выбранном WARP — снаружи
+        // «после ручного MASQUE всё время MASQUE, помогает только очистка данных».
+        // Оба условия ниже отвечают за одно: догадка должна уметь протухать.
+        val autoGuessAllowed = !explicit &&
+            !inputs.otherTransportChosenExplicitly &&
+            inputs.warpCycleFailedRecently
+
         val masqueFirst = (
             explicit ||
                 (
-                    inputs.hasStrongVerifiedMasque &&
+                    autoGuessAllowed &&
+                        inputs.hasStrongVerifiedMasque &&
                         !inputs.hasUserImportedWarpProfiles &&
                         !inputs.restrictedMobileNetwork &&
                         !inputs.diagnosticsMode &&

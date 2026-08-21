@@ -79,6 +79,8 @@ class NovaTileService : TileService() {
                 putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_ENABLED, clientData.getTrafficMaskEnabled())
                 putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_MODE, clientData.getTrafficMaskMode())
                 putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_HOST, clientData.getTrafficMaskHost())
+                putExtra(NovaVpnService.EXTRA_REAPPLY_SNI_MASK_MODE, clientData.getSniMaskMode())
+                putExtra(NovaVpnService.EXTRA_REAPPLY_SNI_MASK_LIST, clientData.getSniCustomListRaw())
             }
             ContextCompat.startForegroundService(this, intent)
 

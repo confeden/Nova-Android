@@ -157,16 +157,39 @@ class MasqueStartPolicyTest {
     }
 
     @Test
-    fun `в режиме Авто сильные проверенные профили по-прежнему дают MASQUE-first`() {
+    fun `в режиме Авто сильные проверенные профили дают MASQUE-first только после провала WARP`() {
         val strong = ordinaryWifiAuto.copy(
             hasStrongVerifiedMasque = true,
             hasCachedIdentity = true,
         )
-        assertTrue(MasqueStartPolicy.decide(strong).masqueFirst)
+        // Пока WARP работает, накопленная статистика MASQUE его не подменяет: иначе
+        // один раз выбранный вручную MASQUE оставался первым навсегда.
+        assertFalse(MasqueStartPolicy.decide(strong).masqueFirst)
+
+        val afterWarpFailure = strong.copy(warpCycleFailedRecently = true)
+        assertTrue(MasqueStartPolicy.decide(afterWarpFailure).masqueFirst)
 
         // Импортированные пользователем профили важнее накопленной статистики.
-        val withImported = strong.copy(hasUserImportedWarpProfiles = true)
+        val withImported = afterWarpFailure.copy(hasUserImportedWarpProfiles = true)
         assertFalse(MasqueStartPolicy.decide(withImported).masqueFirst)
+    }
+
+    @Test
+    fun `выбранный другой транспорт отменяет догадку про MASQUE`() {
+        val chosenWarp = ordinaryWifiAuto.copy(
+            hasStrongVerifiedMasque = true,
+            hasCachedIdentity = true,
+            warpCycleFailedRecently = true,
+            otherTransportChosenExplicitly = true,
+        )
+        assertFalse(MasqueStartPolicy.decide(chosenWarp).masqueFirst)
+
+        // Явный выбор самого MASQUE догадкой не является и работает как раньше.
+        val chosenMasque = chosenWarp.copy(
+            masqueChosenExplicitly = true,
+            otherTransportChosenExplicitly = false,
+        )
+        assertTrue(MasqueStartPolicy.decide(chosenMasque).masqueFirst)
     }
 
     @Test
@@ -197,6 +220,9 @@ class MasqueStartPolicyTest {
         hasCachedIdentity = true,
         // Именно сильные verified-профили и ставили MASQUE первым.
         hasStrongVerifiedMasque = true,
+        // Догадка разрешена только после провала WARP — иначе проверять здесь нечего:
+        // MASQUE и так не был бы первым, и серия срывов ничего бы не меняла.
+        warpCycleFailedRecently = true,
         failureStreak = MasqueStartPolicy.AUTO_FIRST_FAILURE_LIMIT,
         explicitLockoutFresh = true,
     )

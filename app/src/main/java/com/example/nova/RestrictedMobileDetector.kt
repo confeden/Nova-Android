@@ -17,8 +17,13 @@ object RestrictedMobileDetector {
         val caps = connectivityManager.getNetworkCapabilities(network) ?: return null
         if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) return null
         if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return null
+        // 700 мс, а не 350: сотовое радио после простоя просыпается 100–500 мс (RRC),
+        // и на этом времени первая проба не успевала соединиться на совершенно
+        // обычной сети. Ответ «ограничена» из-за такого промаха дороже лишней
+        // секунды ожидания: он переводит маскировку в режим белого списка и убирает
+        // зарубежные имена из ротации.
         val reachable = probeTargets.any { (host, port) ->
-            tcpProbe(network, host, port, 350)
+            tcpProbe(network, host, port, 700)
         }
         return !reachable
     }

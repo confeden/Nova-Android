@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Экран «SNI маскировка».
+
+    Две опции и ничего больше: «Авто» с ротацией по встроенным спискам и свой
+    список пользователя. Поле для списка показывается только во второй опции —
+    видимое, но неактивное поле читается как «сюда можно писать», и человек пишет
+    туда при выбранном «Авто», а результата не видит.
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true"
+    android:clipToPadding="false"
+    android:paddingLeft="16dp"
+    android:paddingTop="16dp"
+    android:paddingRight="16dp"
+    android:paddingBottom="32dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="SNI маскировка"
+            android:textColor="#50C878"
+            android:textSize="24sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Имя, которое видно провайдеру в рукопожатии, вместо настоящего. Работает там, где рукопожатие идёт по TLS: MASQUE, прокси Opera и обращения к API при регистрации."
+            android:textColor="#AAAAAA"
+            android:textSize="12sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_settings_item"
+            android:backgroundTint="#20FFFFFF"
+            android:orientation="vertical"
+            android:paddingLeft="16dp"
+            android:paddingTop="12dp"
+            android:paddingRight="16dp"
+            android:paddingBottom="12dp">
+
+            <RadioGroup
+                android:id="@+id/rg_sni_mode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <RadioButton
+                    android:id="@+id/rb_sni_auto"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Авто"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="32dp"
+                    android:layout_marginBottom="8dp"
+                    android:text="Приложение выбирает и меняет имя само: сначала российские, затем зарубежные. Если провайдер пускает только к разрешённым адресам, берутся одни российские."
+                    android:textColor="#AAAAAA"
+                    android:textSize="12sp" />
+
+                <RadioButton
+                    android:id="@+id/rb_sni_custom"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Свой список"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="32dp"
+                    android:text="Имена через запятую. Перебираются по кругу: если одно не сработало, берётся следующее."
+                    android:textColor="#AAAAAA"
+                    android:textSize="12sp" />
+            </RadioGroup>
+
+            <EditText
+                android:id="@+id/et_sni_custom_list"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_settings_item"
+                android:backgroundTint="#18FFFFFF"
+                android:hint="vk.com, ya.ru, www.gosuslugi.ru"
+                android:textColorHint="#777777"
+                android:inputType="textMultiLine|textNoSuggestions"
+                android:minLines="2"
+                android:maxLines="6"
+                android:padding="12dp"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/tv_sni_custom_status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:textColor="#AAAAAA"
+                android:textSize="12sp"
+                android:visibility="gone" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_settings_item"
+            android:backgroundTint="#20FFFFFF"
+            android:orientation="vertical"
+            android:paddingLeft="16dp"
+            android:paddingTop="12dp"
+            android:paddingRight="16dp"
+            android:paddingBottom="12dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Сейчас"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tv_sni_state"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:textColor="#AAAAAA"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Профили WireGuard и AmneziaWG маскировать нечем: у них нет TLS, а значит и имени в рукопожатии. Их обфускацию задают параметры самого профиля (Jc, S1–S4, H1–H4, I1–I5)."
+            android:textColor="#777777"
+            android:textSize="12sp" />
+    </LinearLayout>
+</ScrollView>

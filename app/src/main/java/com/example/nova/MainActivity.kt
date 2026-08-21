@@ -480,6 +480,10 @@ class MainActivity : AppCompatActivity() {
         }
         LogManager.setAppContext(this)
         clientData = ClientData(this)
+        // Обновление приложения не должно приносить в новую версию выученное старой:
+        // проверка стоит до первого чтения состояния, иначе снимок успел бы взять
+        // рейтинги и последний режим прошлой версии.
+        clientData.resetLearnedStateAfterUpdate()
         warpDiscoverySnapshot = clientData.getWarpDiscoverySnapshot()
         if (maybeHandleAdbResetIntent(intent)) return
         
@@ -512,6 +516,26 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
             val importedOnly = clientData.isImportedWarpOnlyModeEnabled()
+            // Кнопка ведёт по всей цепочке, а не по одному списку.
+            //
+            // Раньше следующий индекс брался как `(current + 1) % configs.size`, то
+            // есть на пятидесятом встроенном профиле перебор заворачивался на первый
+            // и до EU, US и MASQUE не доходил никогда. А когда транспортом был уже
+            // MASQUE или Opera, кнопка всё равно уходила в ветку WARP и начинала
+            // подбор заново — снаружи «кнопка не переключает, а перезапускает».
+            val activeTransport = clientData.getServiceTransport()
+            val activeBackend = clientData.getServiceBackend().uppercase(Locale.ROOT)
+            val nextChainStep = when {
+                activeTransport == NovaVpnService.TRANSPORT_MASQUE ->
+                    if (importedOnly) NovaVpnService.MANUAL_STEP_VLESS else NovaVpnService.MANUAL_STEP_OPERA_EU
+                activeTransport == NovaVpnService.TRANSPORT_OPERA ->
+                    if (activeBackend.endsWith("US")) null else NovaVpnService.MANUAL_STEP_OPERA_US
+                else -> null
+            }
+            if (nextChainStep != null) {
+                startManualTransportStep(nextChainStep)
+                return@setOnClickListener
+            }
             val configs = clientData.getWarpVerifiedMergedConfigs()
                 .filter { config ->
                     !config.manual &&
@@ -631,8 +655,28 @@ class MainActivity : AppCompatActivity() {
                 val visibleCursorOrdinal = displayedAttemptOrdinal
                     .coerceAtLeast(1)
                     .coerceAtMost(configs.size)
-                val currentIndex = visibleCursorOrdinal - 1
-                val currentIndexSource = "visible"
+                // После Opera US цепочка заходит на второй круг, и счётчик на экране
+                // считает попытки Opera, а не встроенные профили. Брать его как курсор
+                // по списку WARP нельзя — начинаем список с начала.
+                val restartListFromStart = activeTransport == NovaVpnService.TRANSPORT_OPERA
+                val currentIndex = if (restartListFromStart) -1 else visibleCursorOrdinal - 1
+                val currentIndexSource = if (restartListFromStart) "chain-wrap" else "visible"
+                val chainStepAfterList = when {
+                    currentIndex < configs.size - 1 -> null
+                    importedOnly ->
+                        NovaVpnService.MANUAL_STEP_VLESS.takeIf {
+                            clientData.getVlessProfileLinks().isNotEmpty()
+                        }
+                    else -> NovaVpnService.MANUAL_STEP_MASQUE
+                }
+                if (chainStepAfterList != null) {
+                    LogManager.log(
+                        "UI next-profile: список из ${configs.size} профилей пройден, " +
+                            "переходим к следующему транспорту ($chainStepAfterList)."
+                    )
+                    startManualTransportStep(chainStepAfterList)
+                    return@setOnClickListener
+                }
                 val nextIndex = (currentIndex + 1) % configs.size
                 LogManager.log(
                     "DIAG next-profile: displayedAttemptOrdinal=$displayedAttemptOrdinal " +
@@ -1319,6 +1363,14 @@ class MainActivity : AppCompatActivity() {
         intent.putExtra(
             NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_HOST,
             clientData.getTrafficMaskHost(),
+        )
+        intent.putExtra(
+            NovaVpnService.EXTRA_REAPPLY_SNI_MASK_MODE,
+            clientData.getSniMaskMode(),
+        )
+        intent.putExtra(
+            NovaVpnService.EXTRA_REAPPLY_SNI_MASK_LIST,
+            clientData.getSniCustomListRaw(),
         )
     }
 
@@ -2033,6 +2085,39 @@ class MainActivity : AppCompatActivity() {
      * выбирал экран, кнопка после успешного подключения возвращала перебор к уже
      * отвергнутым узлам и счётчик начинался заново с «1/151».
      */
+    /**
+     * Просит службу перейти к следующему транспорту цепочки: MASQUE, Opera EU/US или
+     * импортированные VLESS.
+     *
+     * Шаг живёт одно подключение и сохранённый режим не меняет: выбранное
+     * пользователем «Авто» после нажатия кнопки остаётся «Авто».
+     */
+    private fun startManualTransportStep(step: String) {
+        val caption = when (step) {
+            NovaVpnService.MANUAL_STEP_MASQUE -> "MASQUE"
+            NovaVpnService.MANUAL_STEP_OPERA_EU -> "Opera EU"
+            NovaVpnService.MANUAL_STEP_OPERA_US -> "Opera US"
+            NovaVpnService.MANUAL_STEP_VLESS -> "VLESS"
+            else -> step
+        }
+        LogManager.log("UI next-profile: ручной шаг цепочки — $caption.")
+        Toast.makeText(this, "Пробуем $caption", Toast.LENGTH_SHORT).show()
+        currentAttemptOrdinal = 0
+        currentAttemptTotal = 0
+        displayedAttemptOrdinal = 0
+        displayedAttemptTotal = 0
+        manualProfileSwitchProgressHoldUntilMs = SystemClock.elapsedRealtime() + 25_000L
+        updateUiByState(NovaVpnService.STATE_CONNECTING)
+        ContextCompat.startForegroundService(
+            this,
+            Intent(this, NovaVpnService::class.java).apply {
+                action = NovaVpnService.ACTION_REAPPLY_CURRENT_SESSION
+                applyCurrentPreferenceExtras(this)
+                putExtra(NovaVpnService.EXTRA_MANUAL_TRANSPORT_STEP, step)
+            }
+        )
+    }
+
     private fun switchToNextVlessProfile() {
         val profileCount = clientData.getVlessProfileLinks().size
         if (profileCount == 0) {
@@ -2550,6 +2635,12 @@ class MainActivity : AppCompatActivity() {
         val transport = clientData.getServiceTransport()
         if (transport == NovaVpnService.TRANSPORT_MASQUE) {
             return "${NovaVpnService.TRANSPORT_MASQUE}: $effectiveCountry"
+        }
+        // Импортированный профиль AmneziaWG подписывается своим именем: бэкенд у него
+        // тот же `WARP`, и раньше бейдж обещал Cloudflare там, где туннель шёл на
+        // сервер пользователя.
+        if (transport == NovaVpnService.TRANSPORT_AWG) {
+            return "${NovaVpnService.TRANSPORT_AWG}: $effectiveCountry"
         }
         if (backend.trim().uppercase().startsWith(NovaVpnService.BACKEND_VLESS)) {
             return "${NovaVpnService.BACKEND_VLESS}: $effectiveCountry"

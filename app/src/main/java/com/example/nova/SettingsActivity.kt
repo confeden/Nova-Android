@@ -409,6 +409,8 @@ class SettingsActivity : AppCompatActivity() {
 
         val rowDnsSettings = findViewById<LinearLayout>(R.id.row_dns_settings)
 
+        val rowSniMask = findViewById<LinearLayout>(R.id.row_sni_mask)
+
         val rowLocalProxy = findViewById<LinearLayout>(R.id.row_local_proxy)
 
         val tvLocalProxyNote = findViewById<TextView>(R.id.tv_local_proxy_note)
@@ -752,6 +754,84 @@ class SettingsActivity : AppCompatActivity() {
         rowDnsSettings.setOnClickListener {
 
             startActivity(Intent(this, DnsSettingsActivity::class.java))
+
+        }
+
+        rowSniMask.setOnClickListener {
+
+            startActivity(Intent(this, SniMaskSettingsActivity::class.java))
+
+        }
+
+        val rowOperaApiProxy = findViewById<LinearLayout>(R.id.row_opera_api_proxy)
+
+        val tvOperaApiProxyNote = findViewById<TextView>(R.id.tv_opera_api_proxy_note)
+
+        fun renderOperaApiProxyNote() {
+
+            val value = clientData.getCustomOperaApiProxy()
+
+            tvOperaApiProxyNote.text = if (value.isBlank()) {
+
+                "Не задан: вызовы API идут обычным порядком"
+
+            } else {
+
+                // Логин с паролем на экран не выводим: строка видна через плечо и
+                // уходит в скриншоты, а сам адрес и так всё объясняет.
+                val scheme = value.substringBefore("://", missingDelimiterValue = "")
+
+                val rest = value.substringAfter("://", missingDelimiterValue = value)
+
+                val hostPort = rest.substringAfterLast('@')
+
+                if (scheme.isEmpty()) hostPort else "$scheme://$hostPort"
+
+            }
+
+        }
+
+        renderOperaApiProxyNote()
+
+        rowOperaApiProxy.setOnClickListener {
+
+            val input = EditText(this).apply {
+
+                setText(clientData.getCustomOperaApiProxy())
+
+                hint = "1.2.3.4:1080"
+
+                setSingleLine()
+
+            }
+
+            android.app.AlertDialog.Builder(this)
+
+                .setTitle("Прокси для вызовов API Opera")
+
+                .setMessage(
+                    "Через него идут только вызовы API SurfEasy: сам туннель набирается " +
+                        "напрямую, страна выхода не меняется.\n\n" +
+                        "Форматы: 1.2.3.4:1080 (SOCKS5), socks5://1.2.3.4:1080, " +
+                        "http://логин:пароль@1.2.3.4:3128.\n\n" +
+                        "Лучше указывать IP-адрес: имя хоста opera-proxy резолвит сам, " +
+                        "а на Android его резолвер не работает.\n\n" +
+                        "Пустое поле — прежнее поведение."
+                )
+
+                .setView(input)
+
+                .setPositiveButton("Сохранить") { _, _ ->
+
+                    clientData.setCustomOperaApiProxy(input.text?.toString().orEmpty())
+
+                    renderOperaApiProxyNote()
+
+                }
+
+                .setNegativeButton("Отмена", null)
+
+                .show()
 
         }
 

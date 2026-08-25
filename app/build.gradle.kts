@@ -17,8 +17,11 @@ plugins {
  * манифесте, `BuildConfig.DIAGNOSTICS` равен `false`, zxing не подключается.
  *
  * Версию диагностической сборки задают правкой литералов ниже на время сборки
- * (так уехала `1.29.debug-2`, versionCode 144): менять их выражением нельзя —
- * `fdroid checkupdates` читает версию регулярным выражением.
+ * (так уехала отладочная `1.29.debug-2`): менять их выражением нельзя —
+ * `fdroid checkupdates` читает версию регулярным выражением. По той же
+ * причине в комментариях этого файла не должно быть слова versionCode
+ * рядом с числом: их checkupdates нашёл такую пару в тексте выше и решил,
+ * что вышла версия из комментария, а не настоящая.
  */
 val novaDiagnostics = providers.gradleProperty("novaDiagnostics").isPresent
 
@@ -126,8 +129,8 @@ android {
         // регулярным выражением (`fdroid checkupdates`, режим `Tags`) и переменную
         // не раскрывает — со `versionCode = appVersionCode` он не находит версию
         // вовсе и не видит новых релизов. Единственный источник версии — здесь.
-        versionCode = 149
-        versionName = "1.30"
+        versionCode = 150
+        versionName = "1.30.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

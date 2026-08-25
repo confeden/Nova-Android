@@ -91,7 +91,13 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 # те библиотеки, чьи скрипты собирали без -trimpath (libgojni и libtun2proxy),
 # а собранные с ним libnovaxray и liboperaproxy совпадали.
 echo "==> gomobile bind (androidapi 24)"
-(cd "$REPO_ROOT/nova-core" && gomobile bind -trimpath -androidapi 24 -target=android -o "$WORK_DIR/nova-core.aar" .)
+# -buildid= — по той же причине, что и -trimpath, только вход тут не путь к
+# исходникам, а путь к компилятору C: для cgo он входит в идентификатор
+# действия сборки, и Go пишет его в ноту BuildID. Сборка F-Droid ставит NDK
+# не туда, куда мы, и libgojni.so расходился ровно на этой ноте при
+# побайтово одинаковом коде. У nova-xray флаг стоял с самого начала —
+# та библиотека и совпадала.
+(cd "$REPO_ROOT/nova-core" && gomobile bind -trimpath -ldflags="-buildid=" -androidapi 24 -target=android -o "$WORK_DIR/nova-core.aar" .)
 
 echo "==> распаковка"
 unzip -q "$WORK_DIR/nova-core.aar" -d "$WORK_DIR/aar"

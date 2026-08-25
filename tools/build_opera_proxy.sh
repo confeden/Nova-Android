@@ -63,10 +63,10 @@ build_one() {
         cd "$work_dir"
         if [ -n "$cc" ]; then
             CGO_ENABLED=1 GOOS=android GOARCH="$goarch" GOARM=7 CC="$cc" \
-                go build -trimpath -buildvcs=false -ldflags="-s -w" -o "$out_dir/$abi/liboperaproxy.so" .
+                go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o "$out_dir/$abi/liboperaproxy.so" .
         else
             CGO_ENABLED=0 GOOS=android GOARCH="$goarch" \
-                go build -trimpath -buildvcs=false -ldflags="-s -w" -o "$out_dir/$abi/liboperaproxy.so" .
+                go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o "$out_dir/$abi/liboperaproxy.so" .
         fi
     )
     ls -l "$out_dir/$abi/liboperaproxy.so"

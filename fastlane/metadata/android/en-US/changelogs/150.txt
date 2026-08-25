@@ -1,0 +1,1 @@
+- Build fix only: the native libraries no longer carry a build ID that depended on where the toolchain was installed. The app itself is unchanged from 1.30.

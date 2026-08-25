@@ -37,18 +37,23 @@
 #   * `fdroid build -l` (без `-t -f`) — «1 build succeeded»: checkout тега,
 #     удаление семи бинарников по `rm`, `scandelete`, local.properties, чистка
 #     подписи, `prebuild`, все четыре шага `build` и `assembleFdroidRelease`;
-#   * на выходе неподписанный `com.brent.nova_142.apk`, 60,4 МБ: versionCode
-#     142, versionName 1.29, только arm64-v8a и armeabi-v7a, 12 нативных
+#   * на выходе неподписанный `com.brent.nova_149.apk`, 60,4 МБ: versionCode
+#     149, versionName 1.30, только arm64-v8a и armeabi-v7a, 12 нативных
 #     библиотек — все собраны в этом же прогоне, x86 в APK нет.
 #
 # БЛОК `sudo` ПРОВЕРЕН ОТДЕЛЬНО, в чистой Ubuntu 26.04 (fdroidserver выполняет
 # его только с `--on-server`): команды склеены через «; » и прогнаны одной
 # строкой через `bash -e -u -o pipefail -x -c`, как это делает fdroidserver,
-# код возврата 0. Результат: Go 1.26.3, gomobile и gobind в /usr/local/go/bin,
-# у пользователя `vagrant` — rustc 1.97.1 с целями aarch64-linux-android и
-# armv7-linux-androideabi и cargo-ndk 4.1.2, а `sdkmanager` от root положил
-# cmake 3.22.1 (с ninja), platform-35 и build-tools 35.0.1 в SDK, которым root
-# владеет — ровно как на их buildserver.
+# код возврата 0. Результат: gomobile и gobind поставлены, у пользователя
+# `vagrant` — rustc 1.97.1 с целями aarch64-linux-android и armv7-linux-androideabi
+# и cargo-ndk 4.1.2, а `sdkmanager` от root положил cmake 3.22.1 (с ninja),
+# platform-35 и build-tools 35.0.1 в SDK, которым root владеет — ровно как на их
+# buildserver.
+#
+# НЕ ПРОВЕРЕНА строка `apt-get install -y -t trixie-backports golang-go`: этого
+# выпуска нет ни в Ubuntu, где идут наши прогоны, ни где-либо ещё под рукой. Что
+# известно точно: в trixie-backports лежит golang-1.26-go 1.26.5, и эталонный APK
+# собран ровно этой версией (upstream go1.26.5) — компилятор входит в результат.
 #
 # ЧТО НЕ ПРОВЕРЕНО:
 #   * прогон целиком именно на их buildserver (`fdroid build --on-server`):
@@ -116,23 +121,26 @@ Binaries: https://github.com/confeden/Nova-Android/releases/download/v%v/Nova_%v
 AllowedAPKSigningKeys: 8440f6c63f26d461fefa6f7556303dac762768f9daeb31de01598ff55dc9336f
 
 Builds:
+  # Кавычки вокруг versionName обязательны. «1.30» — правильное число в YAML, и
+  # без кавычек оно читается как 1.3: сборка проходит целиком и падает в самом
+  # конце на сверке версий («Unexpected version/version code in output; APK:
+  # '1.30' / '149', Expected: '1.3' / '149'»). У «1.29.4» этой беды не было —
+  # три точки числом не разбираются, поэтому ловушка ждала именно этот выпуск.
   - versionName: '1.30'
     versionCode: 149
-    commit: v1.30
+    # Полный хеш, а не тег (замечание рецензента): тег можно переставить, хеш —
+    # нет, и вход сборки перестаёт зависеть от состояния ссылок в репозитории.
+    commit: 58097043391f1b970d527eb96314407c889f57b9
     subdir: app
     gradle:
       - fdroid
 
-    # Собранных бинарников в сборке быть не должно. Удаляем то, что лежит в
-    # репозитории, чтобы APK заведомо содержал только собранное здесь: если
-    # какой-то шаг ниже отвалится, сборка упадёт, а не подсунет готовый файл.
+    # Собранных бинарников в сборке быть не должно. Каталог сносится целиком
+    # (замечание рецензента): перечисление по одному оставляло в дереве те .so,
+    # которые в список забыли внести. Если какой-то шаг ниже отвалится, сборка
+    # упадёт, а не подсунет готовый файл.
     rm:
-      - app/src/main/jniLibs/arm64-v8a/libgojni.so
-      - app/src/main/jniLibs/armeabi-v7a/libgojni.so
-      - app/src/main/jniLibs/arm64-v8a/liboperaproxy.so
-      - app/src/main/jniLibs/armeabi-v7a/liboperaproxy.so
-      - app/src/main/jniLibs/arm64-v8a/libtun2proxy.so
-      - app/src/main/jniLibs/armeabi-v7a/libtun2proxy.so
+      - app/src/main/jniLibs
       - app/libs/nova-core-api24-stripped.aar
 
     # NDK закреплён: этой же версией собирается Go-ядро, расхождение даёт
@@ -150,26 +158,23 @@ Builds:
     sudo:
       - apt-get update
       - apt-get install -y curl build-essential pkg-config unzip
-      # Go нужен свежее того, что есть в Debian: nova-core требует go 1.26.3.
-      - curl -sSL -o /tmp/go.tgz https://go.dev/dl/go1.26.3.linux-amd64.tar.gz
-      - echo "2b2cfc7148493da5e73981bffbf3353af381d5f93e789c82c79aff64962eb556  /tmp/go.tgz" | sha256sum -c -
-      - rm -rf /usr/local/go
-      - tar -C /usr/local -xzf /tmp/go.tgz
-      # Ядро собирается `gomobile bind`, поэтому нужен сам gomobile. Версия та
-      # же, что у golang.org/x/mobile в nova-core/go.mod: bind-код и рантайм
-      # должны быть из одной ревизии. Ставим в /usr/local/go/bin — этот каталог
-      # шаги сборки и так добавляют в PATH.
-      - GOBIN=/usr/local/go/bin /usr/local/go/bin/go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20260120165949-40bd9ace6ce4
-      - GOBIN=/usr/local/go/bin /usr/local/go/bin/go install golang.org/x/mobile/cmd/gobind@v0.0.0-20260120165949-40bd9ace6ce4
-      # Rust нужен для tun2proxy. Ставим rustup, а не пакеты Debian: в них нет
-      # стандартной библиотеки под Android, без которой кросс-сборки не будет.
-      - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
-      # Версии закреплены: `stable` и «последний cargo-ndk» переезжают со временем,
-      # и та же сборка через месяц дала бы другой libtun2proxy.so — воспроизводимость
-      # сломалась бы молча.
-      - su vagrant -c 'RUSTUP_INIT_SKIP_PATH_CHECK=yes sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain 1.97.1 --no-modify-path'
-      - su vagrant -c '$HOME/.cargo/bin/rustup target add aarch64-linux-android armv7-linux-androideabi'
-      - su vagrant -c '$HOME/.cargo/bin/cargo install cargo-ndk --version 4.1.2 --locked'
+      # Go 1.26 из официального архива Debian (замечание рецензента: ставить из
+      # репозитория, а не скачивать tarball). В stable его нет — там 1.24, а
+      # закреплённые зависимости требуют стандартной библиотеки 1.26: gvisor
+      # использует WaitReasonSemacquire из рантайма, xray-core — постквантовые
+      # кривые tls.SecP256r1MLKEM768/SecP384r1MLKEM1024. В trixie-backports есть
+      # golang-1.26-go 1.26.5, этой версией собран и эталонный APK: компилятор
+      # входит в результат, и разойдись версии — сверка `Binaries` не сойдётся.
+      - apt-get install -y -t trixie-backports golang-go
+      # Rust нужен для tun2proxy, и ставится он тоже из Debian (замечание
+      # рецензента): пакет `rustup` есть в trixie, 1.27.1. Сам `rustc` из Debian
+      # не годится — в нём нет стандартной библиотеки под Android, а её ставит
+      # rustup. Toolchain и цели ставятся уже в prebuild, от сборщика.
+      - apt-get install -y rustup
+      # Единственное, что осталось в `sudo` кроме apt, и это спрошено в MR:
+      # выполнить от сборщика нельзя, каталог `cmake` внутри SDK создаёт только
+      # root — см. ниже.
+      #
       # CMake из SDK. В их образе его нет вообще: из apt ставятся только JDK,
       # apksigner, curl, git, unzip, patch, rsync и sdkmanager, а внутри SDK
       # запись для сборщика открыта намеренно только в `build-tools` и
@@ -179,13 +184,8 @@ Builds:
       # версия закреплена в app/build.gradle.kts. Ставим их же `sdkmanager` от
       # root. Platform и build-tools указаны явно, чтобы не зависеть от того,
       # что догрузит сам Gradle: собирается ровно то, на чём проверено.
-      # ANDROID_HOME берётся из /etc/profile.d/bsenv.sh, который создаёт их
-      # provisioning: `sudo` вычищает окружение, и переменной в шаге нет. Файл и
-      # `sdkmanager` — отдельными командами: список шагов не должен склеивать
-      # команды через «;» или «&&» (замечание рецензента), а окружение всё равно
-      # переносится — весь список исполняет одна оболочка. Нет файла — команда
-      # упадёт вслух, молчаливого пропуска не будет.
-      - . /etc/profile.d/bsenv.sh
+      # Подгружать /etc/profile.d/bsenv.sh ради ANDROID_HOME не нужно —
+      # замечание рецензента, в их образе переменная уже задана.
       - sdkmanager "cmake;3.22.1" "platforms;android-35" "build-tools;35.0.1"
 
     prebuild:
@@ -203,7 +203,22 @@ Builds:
       # неудачный `cd` внутри «&&»-списка `set -e` не считает и молча оставляет
       # остальные шаги работать не в том каталоге.
       - cd ..
-      - PATH=/usr/local/go/bin:$PATH bash tools/deps/fetch_go_deps.sh
+      - bash tools/deps/fetch_go_deps.sh
+      # Инструменты, которым root не нужен, ставит сам сборщик (замечание
+      # рецензента: в `sudo` остаётся только apt).
+      #
+      # Ядро собирается `gomobile bind`. Версия та же, что у golang.org/x/mobile
+      # в nova-core/go.mod: bind-код и рантайм должны быть из одной ревизии.
+      # `$HOME/go/bin` — каталог сборщика, шаг `build` добавляет его в PATH.
+      - GOBIN=$HOME/go/bin go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20260120165949-40bd9ace6ce4
+      - GOBIN=$HOME/go/bin go install golang.org/x/mobile/cmd/gobind@v0.0.0-20260120165949-40bd9ace6ce4
+      # Версии Rust закреплены: `stable` и «последний cargo-ndk» переезжают со
+      # временем, и та же сборка через месяц дала бы другой libtun2proxy.so —
+      # воспроизводимость сломалась бы молча.
+      - rustup toolchain install 1.97.1 --profile minimal
+      - rustup default 1.97.1
+      - rustup target add aarch64-linux-android armv7-linux-androideabi
+      - cargo install cargo-ndk --version 4.1.2 --locked
       # Иначе Gradle сам ищет JVM по системе и может взять для toolchain любую,
       # включая JRE без компилятора: локальный прогон падал на «Toolchain
       # installation … does not provide the required capabilities:
@@ -223,16 +238,18 @@ Builds:
     # каталог для `build` надо задавать заново.
     build:
       - cd ..
-      # 1. Ядро nova-core (libgojni.so + .aar).
-      - PATH=/usr/local/go/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ bash tools/build_nova_core_aar.sh
+      # 1. Ядро nova-core (libgojni.so + .aar). gomobile лежит в $HOME/go/bin,
+      # куда его положил prebuild. ANDROID_NDK_HOME не задаём: fdroidserver
+      # выставляет его сам по полю `ndk` (замечание рецензента).
+      - PATH=$HOME/go/bin:$PATH bash tools/build_nova_core_aar.sh
       # 2. Ядро Xray для VLESS+REALITY (libnovaxray.so, libnovaxrayjni.so).
       - cd nova-xray
-      - PATH=/usr/local/go/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ bash build.sh
+      - bash build.sh
       - cd ..
       # 3. opera-proxy: клонируется по закреплённому тегу и собирается на месте.
-      - PATH=/usr/local/go/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ bash tools/build_opera_proxy.sh
+      - bash tools/build_opera_proxy.sh
       # 4. tun2proxy: тег закреплён на последней версии с нужным нам C-API.
-      - PATH=$HOME/.cargo/bin:$PATH ANDROID_NDK_HOME=$$NDK$$ bash tools/build_tun2proxy.sh
+      - PATH=$HOME/.cargo/bin:$PATH bash tools/build_tun2proxy.sh
 
     # Секрет подписи WSS есть только у владельца; стороннему сборщику запрет не
     # нужен и снимается явным флагом. Работают при этом все транспорты, кроме

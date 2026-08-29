@@ -1,0 +1,7 @@
+- New "AWG Proton" transport: free Proton VPN nodes, with the key issued on the device itself.
+- VLESS profiles can now be imported from sing-box configurations.
+- The masquerade domain is matched to your network, in the background and by hand.
+- Editing an imported profile now applies the new server address, not just the text.
+- The "keep on subscription update" lock is stored against the edited profile, not its previous version.
+- An explicitly chosen protocol is no longer replaced by another one, nor disabled by unrelated failures.
+- The WARP+ key is no longer lost, and Cloudflare's refusal is shown in settings.

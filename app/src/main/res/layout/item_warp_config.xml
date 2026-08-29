@@ -194,6 +194,21 @@
                 android:minWidth="110dp"
                 android:text="Копировать"
                 android:textColor="#FFFFFF" />
+
+            <TextView
+                android:id="@+id/btn_edit_config"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:layout_marginTop="4dp"
+                android:layout_marginStart="6dp"
+                android:background="@drawable/bg_settings_action_dark"
+                android:clickable="true"
+                android:focusable="true"
+                android:fontFamily="sans-serif-medium"
+                android:gravity="center"
+                android:minWidth="100dp"
+                android:text="Изменить"
+                android:textColor="#FFFFFF" />
         </com.example.nova.FlowLayout>
     </LinearLayout>
 

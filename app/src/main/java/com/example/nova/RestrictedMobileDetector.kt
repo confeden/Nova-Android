@@ -12,10 +12,25 @@ object RestrictedMobileDetector {
         "8.8.8.8" to 443,
     )
 
-    fun detect(connectivityManager: ConnectivityManager, network: Network?): Boolean? {
+    fun detect(connectivityManager: ConnectivityManager, network: Network?): Boolean? =
+        detect(connectivityManager, network, requireCellular = true)
+
+    /**
+     * @param requireCellular исходное поведение: отвечать только про сотовую сеть.
+     *        Режим «белого списка» бывает и на Wi-Fi — в гостевых, корпоративных и
+     *        гостиничных сетях, — и для выбора SNI это ровно тот же случай, поэтому
+     *        оттуда вызывается с `false`. Прочие потребители ответа (маскировка
+     *        WARP, политика MASQUE) настроены на сотовую сеть, и расширять их
+     *        поведение заодно нельзя.
+     */
+    fun detect(
+        connectivityManager: ConnectivityManager,
+        network: Network?,
+        requireCellular: Boolean,
+    ): Boolean? {
         if (network == null) return null
         val caps = connectivityManager.getNetworkCapabilities(network) ?: return null
-        if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) return null
+        if (requireCellular && !caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) return null
         if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return null
         // 700 мс, а не 350: сотовое радио после простоя просыпается 100–500 мс (RRC),
         // и на этом времени первая проба не успевала соединиться на совершенно

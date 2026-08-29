@@ -212,6 +212,50 @@
             </LinearLayout>
 
             <LinearLayout
+                android:id="@+id/row_awg_adaptation"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@drawable/bg_settings_item"
+                android:backgroundTint="#20FFFFFF"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="16dp">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Адаптация к сети в фоновом режиме"
+                        android:textColor="#FFFFFF"
+                        android:textSize="16sp"
+                        android:textStyle="bold"/>
+
+                    <TextView
+                        android:id="@+id/tv_awg_adaptation_summary"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Подбирает отпечатки встроенных профилей"
+                        android:textColor="#AAAAAA"
+                        android:textSize="12sp"/>
+                </LinearLayout>
+
+                <Switch
+                    android:id="@+id/sw_awg_adaptation"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"/>
+            </LinearLayout>
+
+            <LinearLayout
                 android:id="@+id/row_manual_update_block"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -332,13 +376,18 @@
                     android:id="@+id/tv_connection_selector_title"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Выбор протокола"
+                    android:text="Выбор протокола/региона"
                     android:textColor="#F3C94A"
                     android:textSize="16sp"
                     android:textStyle="bold"
                     android:layout_marginBottom="2dp"/>
 
-                <RadioGroup
+                <!--
+                    Кнопок шесть, и на узком экране они в строку не помещаются.
+                    FlowRadioGroup переносит лишние на следующую строку, сохраняя
+                    логику единственного выбора обычного RadioGroup.
+                -->
+                <com.example.nova.FlowRadioGroup
                     android:id="@+id/rg_exit_region"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -354,6 +403,7 @@
                         android:textSize="11sp"
                         android:paddingStart="0dp"
                         android:paddingEnd="0dp"
+                        android:layout_marginEnd="10dp"
                         android:maxLines="1"
                         android:buttonTint="#F3C94A"/>
 
@@ -366,6 +416,7 @@
                         android:textSize="11sp"
                         android:paddingStart="0dp"
                         android:paddingEnd="0dp"
+                        android:layout_marginEnd="10dp"
                         android:maxLines="1"
                         android:buttonTint="#F3C94A"/>
 
@@ -378,6 +429,7 @@
                         android:textSize="11sp"
                         android:paddingStart="0dp"
                         android:paddingEnd="0dp"
+                        android:layout_marginEnd="10dp"
                         android:maxLines="1"
                         android:buttonTint="#F3C94A"/>
 
@@ -390,6 +442,7 @@
                         android:textSize="11sp"
                         android:paddingStart="0dp"
                         android:paddingEnd="0dp"
+                        android:layout_marginEnd="10dp"
                         android:maxLines="1"
                         android:buttonTint="#F3C94A"/>
 
@@ -402,9 +455,23 @@
                         android:textSize="11sp"
                         android:paddingStart="0dp"
                         android:paddingEnd="0dp"
+                        android:layout_marginEnd="10dp"
                         android:maxLines="1"
                         android:buttonTint="#F3C94A"/>
-                </RadioGroup>
+
+                    <RadioButton
+                        android:id="@+id/rb_exit_proton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="PROTON"
+                        android:textColor="#FFFFFF"
+                        android:textSize="11sp"
+                        android:paddingStart="0dp"
+                        android:paddingEnd="0dp"
+                        android:layout_marginEnd="10dp"
+                        android:maxLines="1"
+                        android:buttonTint="#F3C94A"/>
+                </com.example.nova.FlowRadioGroup>
 
                 <TextView
                     android:id="@+id/tv_exit_last"

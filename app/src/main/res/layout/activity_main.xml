@@ -82,9 +82,14 @@
 
     <TextView
         android:id="@+id/tvAttemptProgress"
-        android:layout_width="wrap_content"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
+        android:layout_marginStart="24dp"
+        android:layout_marginEnd="24dp"
         android:layout_marginBottom="8dp"
+        android:gravity="center"
+        android:maxLines="1"
+        android:ellipsize="end"
         android:text="1/1"
         android:textColor="#C8D4FF"
         android:textSize="13sp"

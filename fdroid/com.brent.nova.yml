@@ -64,8 +64,7 @@
 #     `17374SRC17374`.
 
 Categories:
-  - Internet
-  - Security
+  - VPN & Proxy
 
 License: GPL-3.0-only
 
@@ -126,11 +125,11 @@ Builds:
   # конце на сверке версий («Unexpected version/version code in output; APK:
   # '1.30' / '149', Expected: '1.3' / '149'»). У «1.29.4» этой беды не было —
   # три точки числом не разбираются, поэтому ловушка ждала именно этот выпуск.
-  - versionName: '1.30'
-    versionCode: 149
+  - versionName: '1.30.1'
+    versionCode: 150
     # Полный хеш, а не тег (замечание рецензента): тег можно переставить, хеш —
     # нет, и вход сборки перестаёт зависеть от состояния ссылок в репозитории.
-    commit: 58097043391f1b970d527eb96314407c889f57b9
+    commit: cb9e9c1e8608ef6bdab3d4edfc592668aed0871e
     subdir: app
     gradle:
       - fdroid
@@ -258,7 +257,7 @@ Builds:
     gradleprops:
       - novaAllowUnsignedRelease=true
 
-AutoUpdateMode: Version v%v
+AutoUpdateMode: Version
 UpdateCheckMode: Tags
-CurrentVersion: '1.30'
-CurrentVersionCode: 149
+CurrentVersion: '1.30.1'
+CurrentVersionCode: 150

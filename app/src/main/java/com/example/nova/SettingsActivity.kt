@@ -218,6 +218,41 @@ class SettingsActivity : AppCompatActivity() {
 
     private var initialExitRegionPreference: String = "auto"
 
+    /**
+     * Слушатель этапов генерации Proton-профилей.
+     *
+     * Держится полем и снимается в onDestroy: прогон переживает экран, и оставленный
+     * слушатель удерживал бы уничтоженный TextView до конца прогона.
+     */
+    private var protonStatusListener: ProtonProfileManager.StatusListener? = null
+
+    /** Ожидание туннеля перед выпуском: 30 проб по две секунды. */
+    private val PROTON_TUNNEL_WAIT_ATTEMPTS = 30
+
+    /**
+     * Идёт подготовка Proton, начатая с этого экрана.
+     *
+     * Нужен потому, что предпочтение «proton» записывается **только по успеху**, а
+     * до тех пор `configureRegionSelector` перечитывает старое и возвращает
+     * переключатель на прежний регион. Служба шлёт состояние подключения сразу же,
+     * экран на него перерисовывается — и кнопка отскакивала назад через секунду
+     * после нажатия, унося с собой все строки хода выпуска.
+     */
+    private var protonPreparationActive = false
+
+    /**
+     * Сообщение о ходе или неудаче Proton, которое обязано пережить перерисовку.
+     *
+     * `configureRegionSelector` в конце безусловно перекрашивает строку статуса, и
+     * без этого поля любая причина отказа («сначала подключитесь», «туннель не
+     * поднялся», текст ошибки прогона) стиралась в той же посылке главного потока —
+     * пользователь видел только откатившуюся кнопку и ничего больше (I4).
+     */
+    private var protonPendingMessage: String? = null
+
+    /** Опрос туннеля идёт на главном лупере, а не на вида: экран может закрыться. */
+    private val protonWaitHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
     private var initialImportedProtocolPreference: String = "auto"
 
     private var initialTrafficMaskEnabled: Boolean = false
@@ -372,7 +407,9 @@ class SettingsActivity : AppCompatActivity() {
 
         val rbExitMasque = findViewById<RadioButton>(R.id.rb_exit_masque)
 
-        val protocolButtons = listOf(rbExitAuto, rbExitRu, rbExitMasque, rbExitEu, rbExitUs)
+        val rbExitProton = findViewById<RadioButton>(R.id.rb_exit_proton)
+
+        val protocolButtons = listOf(rbExitAuto, rbExitRu, rbExitMasque, rbExitEu, rbExitUs, rbExitProton)
 
         val rowShareRelease = findViewById<TextView>(R.id.row_share_release)
 
@@ -643,6 +680,8 @@ class SettingsActivity : AppCompatActivity() {
         }
 
 
+
+        setupAwgAdaptationRow()
 
         swAutoUpdate.isChecked = initialAutoAppUpdate
 
@@ -1408,6 +1447,8 @@ class SettingsActivity : AppCompatActivity() {
 
                 findViewById(R.id.rb_exit_us),
 
+                findViewById(R.id.rb_exit_proton),
+
             ),
 
             findViewById(R.id.tv_exit_last),
@@ -1469,6 +1510,10 @@ class SettingsActivity : AppCompatActivity() {
         unregisterVpnStateReceiver()
 
         appLoadJob?.cancel()
+
+        protonStatusListener?.let(ProtonProfileManager::removeListener)
+
+        protonStatusListener = null
 
         scope.cancel()
 
@@ -2827,6 +2872,107 @@ class SettingsActivity : AppCompatActivity() {
 
 
 
+    /**
+     * Переключатель фоновой адаптации и показ того, что она уже подобрала.
+     *
+     * Список показывается **доменами**, а не значениями `I1`: шестнадцатеричная
+     * простыня на полторы тысячи знаков не говорит человеку ничего, а имя домена
+     * говорит всё, что ему нужно знать о подмене.
+     */
+    private fun setupAwgAdaptationRow() {
+
+        val row = findViewById<View>(R.id.row_awg_adaptation) ?: return
+
+        val switch = findViewById<Switch>(R.id.sw_awg_adaptation) ?: return
+
+        val summary = findViewById<TextView>(R.id.tv_awg_adaptation_summary) ?: return
+
+        fun renderSummary() {
+
+            val overrides = clientData.getAwgI1Overrides()
+
+            summary.text = when {
+
+                !clientData.isAwgI1AdaptationEnabled() -> "Выключено"
+
+                overrides.isEmpty() -> "Включено, подбор ещё не начинался"
+
+                else -> "Подобрано профилей: ${overrides.size} — нажмите, чтобы посмотреть"
+
+            }
+
+        }
+
+        switch.setOnCheckedChangeListener(null)
+
+        switch.isChecked = clientData.isAwgI1AdaptationEnabled()
+
+        setupSwitchColor(switch, switch.isChecked)
+
+        renderSummary()
+
+        switch.setOnCheckedChangeListener { _, isChecked ->
+
+            clientData.setAwgI1AdaptationEnabled(isChecked)
+
+            setupSwitchColor(switch, isChecked)
+
+            renderSummary()
+
+            LogManager.log("Фоновая адаптация I1: ${if (isChecked) "включена" else "выключена"}.")
+
+        }
+
+        row.setOnClickListener { showAwgAdaptationDetails(::renderSummary) }
+
+    }
+
+    private fun showAwgAdaptationDetails(onChanged: () -> Unit) {
+
+        val overrides = clientData.getAwgI1Overrides().values.sortedByDescending { it.updatedAt }
+
+        val body = if (overrides.isEmpty()) {
+
+            "Пока ничего не подобрано.\n\nПодбор идёт в фоне: один профиль раз в полчаса, " +
+                "не раньше чем через пять минут после того, как погас экран. " +
+                "Сеть при этом не используется — подобранное проверяет обычное подключение."
+
+        } else {
+
+            overrides.joinToString("\n") { "${it.sni} — ${it.profileId.substringAfterLast('|')}" }
+
+        }
+
+        android.app.AlertDialog.Builder(this)
+
+            .setTitle("Адаптация к сети")
+
+            .setMessage(body)
+
+            .setPositiveButton("Закрыть", null)
+
+            .apply {
+
+                if (overrides.isNotEmpty()) {
+
+                    setNegativeButton("Сбросить подбор") { _, _ ->
+
+                        clientData.clearAwgI1Overrides()
+
+                        onChanged()
+
+                        Toast.makeText(this@SettingsActivity, "Подбор сброшен", Toast.LENGTH_SHORT).show()
+
+                    }
+
+                }
+
+            }
+
+            .show()
+
+    }
+
     private fun updateExitSummary(textView: TextView) {
 
         val preference = formatRegionDisplayName(clientData.getExitRegionPreference())
@@ -2909,7 +3055,471 @@ class SettingsActivity : AppCompatActivity() {
 
             "ru" -> "WARP"
 
+            "masque" -> "MASQUE"
+
+            "proton" -> "AWG Proton"
+
             else -> "AUTO"
+
+        }
+
+    }
+
+    /**
+     * Готовит Proton-профили и подключается к самому быстрому.
+     *
+     * Кнопки «сгенерировать» нет намеренно: пусковым событием служит сам выбор
+     * региона. Прогон живёт в [ProtonProfileManager], а не в экране, поэтому уход из
+     * настроек и поворот его не прерывают; экран только показывает этапы.
+     *
+     * Строка статуса — та же, что обычно показывает предпочтение и последний выход.
+     * Отдельной строки не заводится: вторая строка под селектором наезжала бы на
+     * соседний блок, а сообщения здесь короткие и живут только на время прогона.
+     */
+    private fun startProtonProfilePreparation(
+        summaryView: TextView,
+        radioGroup: RadioGroup,
+        buttons: List<RadioButton>,
+    ) {
+
+        detachProtonStatusListener()
+
+        protonPreparationActive = true
+
+        // Признак дублируется в синглтон: он переживает поворот экрана и служит
+        // единственным местом, где выбор Proton можно отменить.
+        ProtonProfileManager.markPreparationRequested()
+
+        protonPendingMessage = null
+
+        summaryView.visibility = View.VISIBLE
+
+        val listener = ProtonProfileManager.StatusListener { text ->
+
+            protonPendingMessage = text
+
+            summaryView.post { summaryView.text = text }
+
+        }
+
+        protonStatusListener = listener
+
+        ProtonProfileManager.addListener(listener)
+
+        val previousRegion = clientData.getExitRegionPreference()
+
+        if (isNovaSessionLikelyActive()) {
+
+            runProtonGeneration(summaryView, radioGroup, buttons, previousRegion)
+
+            return
+
+        }
+
+        // Без туннеля до API Proton не достучаться, и это проверено на устройстве:
+        // прямой хост в России закрыт на транспортном уровне, а запасной узел
+        // Proton отдаёт первые ~16 КБ и глохнет — список серверов по нему не
+        // доходит. Изнутри поднятого туннеля тот же запрос выполняется за 0,5 с.
+        // Поэтому сначала поднимается обычный транспорт, и только потом выпуск.
+        if (android.net.VpnService.prepare(this) != null) {
+
+            LogManager.log(
+                "Proton: согласия на VPN ещё нет, выпуск профилей отложен — " +
+                    "туннель поднимается с главного экрана."
+            )
+
+            failProtonPreparation(
+                summaryView,
+                radioGroup,
+                buttons,
+                previousRegion,
+                "Proton: сначала подключитесь на главном экране",
+            )
+
+            return
+
+        }
+
+        summaryView.text = "Proton: поднимаю туннель"
+
+        runCatching {
+
+            ContextCompat.startForegroundService(
+
+                this,
+
+                Intent(this, NovaVpnService::class.java).apply {
+
+                    action = NovaVpnService.ACTION_CONNECT_SMART
+
+                    putExtra(NovaVpnService.EXTRA_EXIT_REGION, previousRegion)
+
+                }
+
+            )
+
+        }.onFailure { error ->
+
+            LogManager.log("Proton: не удалось поднять туннель для выпуска — ${error.message}")
+
+            failProtonPreparation(
+                summaryView,
+                radioGroup,
+                buttons,
+                previousRegion,
+                "Proton: туннель не поднялся",
+            )
+
+            return
+
+        }
+
+        waitForTunnelThenGenerate(summaryView, radioGroup, buttons, previousRegion, attempt = 0)
+
+    }
+
+    /**
+     * Ждёт CONNECTED и запускает выпуск.
+     *
+     * Опрос, а не подписка на широковещание: экран уже слушает состояние VPN для
+     * своих нужд, и вплетать сюда второй смысл в тот же приёмник значило бы
+     * связать два независимых сценария одним обработчиком.
+     *
+     * Опрос висит на главном лупере, а не на `summaryView`, и **не прекращается**,
+     * если экран закрыли. `SettingsActivity` не объявляет `configChanges`, поэтому
+     * поворот за эту минуту уничтожает вид гарантированно — а прежний выход по
+     * `isFinishing` отменял вместе с ним весь выпуск: профили не выдавались, регион
+     * не записывался, в журнале не было ни строки. Снаружи это ровно «выбрал
+     * Proton, а ничего не произошло» (I4). Рисуем только когда есть куда.
+     */
+    private fun waitForTunnelThenGenerate(
+        summaryView: TextView,
+        radioGroup: RadioGroup,
+        buttons: List<RadioButton>,
+        previousRegion: String,
+        attempt: Int,
+    ) {
+
+        val screenAlive = !isFinishing && !isDestroyed
+
+        // Пользователь мог за эту минуту выбрать другой транспорт — возможно, вообще
+        // на другом экземпляре экрана, до которого `removeCallbacksAndMessages` не
+        // дотянулся. Продолжать выпуск значило бы записать «proton» поверх сделанного
+        // после него явного выбора (I1).
+        if (!ProtonProfileManager.isPreparationRequested()) {
+
+            LogManager.log("Proton: выбран другой транспорт, ожидание туннеля прекращено.")
+
+            return
+
+        }
+
+        if (clientData.getServiceState() == NovaVpnService.STATE_CONNECTED) {
+
+            runProtonGeneration(summaryView, radioGroup, buttons, previousRegion)
+
+            return
+
+        }
+
+        if (attempt >= PROTON_TUNNEL_WAIT_ATTEMPTS) {
+
+            LogManager.log(
+                "Proton: туннель не поднялся за минуту, выпуск профилей отменён."
+            )
+
+            failProtonPreparation(
+                summaryView,
+                radioGroup,
+                buttons,
+                previousRegion,
+                "Proton: туннель не поднялся за минуту",
+            )
+
+            return
+
+        }
+
+        if (screenAlive) {
+
+            summaryView.text = "Proton: поднимаю туннель (${attempt * 2} с)"
+
+        }
+
+        protonWaitHandler.postDelayed(
+
+            { waitForTunnelThenGenerate(summaryView, radioGroup, buttons, previousRegion, attempt + 1) },
+
+            2_000L,
+
+        )
+
+    }
+
+    /** Снимает слушатель этапов Proton: его строки перестают принадлежать экрану. */
+    private fun detachProtonStatusListener() {
+
+        protonStatusListener?.let(ProtonProfileManager::removeListener)
+
+        protonStatusListener = null
+
+    }
+
+    /**
+     * Заканчивает подготовку Proton отказом: причина остаётся на экране и в журнале.
+     *
+     * Одно место на все четыре пути отказа именно потому, что раньше их было четыре
+     * и каждый терял сообщение по-своему: текст ставился в строку, которую
+     * `configureRegionSelector` следом безусловно прятал и перезаписывал.
+     */
+    private fun failProtonPreparation(
+        summaryView: TextView,
+        radioGroup: RadioGroup,
+        buttons: List<RadioButton>,
+        previousRegion: String,
+        message: String,
+    ) {
+
+        protonPreparationActive = false
+
+        ProtonProfileManager.cancelPreparation()
+
+        detachProtonStatusListener()
+
+        protonPendingMessage = message
+
+        if (isFinishing || isDestroyed) return
+
+        summaryView.visibility = View.VISIBLE
+
+        summaryView.text = message
+
+        restoreRegionSelection(radioGroup, buttons, previousRegion)
+
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+
+    }
+
+    private fun runProtonGeneration(
+        summaryView: TextView,
+        radioGroup: RadioGroup,
+        buttons: List<RadioButton>,
+        previousRegion: String,
+    ) {
+
+        val started = ProtonProfileManager.ensureProfiles(this) { outcome ->
+
+            // Итог применяется **вне** вида. Выпуск занимает до минуты, и к его
+            // концу пользователь обычно уже ушёл с экрана настроек — а пока запись
+            // региона и подключение жили внутри `summaryView.post { }`, уход
+            // отменял и то, и другое: профили выпускались, регион оставался
+            // прежним, туннель оставался прежним. Снаружи это и есть «выбрал
+            // Proton, а он не подключается».
+            protonPendingMessage = outcome.message
+
+            // Признак снимается здесь, в рабочем потоке, а не в посылке на вид:
+            // экрана к этому моменту может уже не быть, посылка тогда не выполнится
+            // вовсе — и следующий заход в настройки показал бы Proton выбранным при
+            // невыбранном регионе.
+            protonPreparationActive = false
+
+            // Пользователь мог передумать, пока шёл прогон. Итог тогда не применяется:
+            // профили остаются выпущенными и пригодятся при следующем выборе Proton, но
+            // регион и подключение принадлежат последнему явному выбору (I1). Молчать
+            // об этом нельзя — «выпустили и никуда не подключились» без объяснения
+            // читается как поломка (I4).
+            val stillWanted = ProtonProfileManager.isPreparationRequested()
+
+            if (!stillWanted) {
+
+                // Ни региона, ни переключателя не трогаем: и то и другое уже
+                // принадлежит выбору, сделанному после отказа от Proton, и «вернуть
+                // как было» здесь означало бы вернуть к состоянию до него.
+                LogManager.log(
+                    if (outcome.ready) {
+                        "Proton: профили выпущены (${outcome.profiles.size} шт.), но за это время " +
+                            "выбран другой транспорт — регион не меняем и не переподключаемся."
+                    } else {
+                        "Proton: выпуск не удался (${outcome.message}), но транспорт за это время " +
+                            "выбран другой — экран не трогаем."
+                    }
+                )
+
+                protonPendingMessage = null
+
+                return@ensureProfiles
+
+            }
+
+            if (outcome.ready) {
+
+                // Предпочтение записывается только теперь: до этого момента
+                // «proton» означал бы пустой список.
+                clientData.setExitRegionPreference("proton")
+
+                initialExitRegionPreference = "proton"
+
+                ProtonProfileManager.cancelPreparation()
+
+                connectToFastestProtonProfile()
+
+                summaryView.post {
+
+                    if (!isFinishing && !isDestroyed) {
+
+                        summaryView.visibility = View.VISIBLE
+
+                        summaryView.text = outcome.message
+
+                    }
+
+                }
+
+            } else {
+
+                LogManager.log("Proton: выпуск профилей не удался — ${outcome.message}")
+
+                // Признак снимается сразу, в рабочем потоке: посылка на вид может не
+                // выполниться вовсе, и тогда переключатель остался бы на Proton
+                // навсегда.
+                ProtonProfileManager.cancelPreparation()
+
+                summaryView.post {
+
+                    failProtonPreparation(
+                        summaryView,
+                        radioGroup,
+                        buttons,
+                        previousRegion,
+                        outcome.message,
+                    )
+
+                }
+
+            }
+
+        }
+
+        if (!started) {
+
+            LogManager.log("Proton: прогон уже идёт, повторно не запускаем.")
+
+        }
+
+    }
+
+    /** Возвращает переключатель на прежний регион, не трогая хранилище. */
+    private fun restoreRegionSelection(
+        radioGroup: RadioGroup,
+        buttons: List<RadioButton>,
+        region: String,
+    ) {
+
+        // Порядок — тот же, что у `protocolButtons`. «proton» назван явно: без него
+        // возврат к уже выбранному Proton уводил переключатель в «Авто», то есть
+        // отказ выпуска молча менял бы транспорт (I1) — тот же случай, что G49.
+        val index = when (region) {
+
+            "ru" -> 1
+
+            "masque" -> 2
+
+            "eu" -> 3
+
+            "us" -> 4
+
+            "proton" -> 5
+
+            else -> 0
+
+        }
+
+        buttons.getOrNull(index)?.let { button ->
+
+            radioGroup.setOnCheckedChangeListener(null)
+
+            radioGroup.check(button.id)
+
+            refreshConnectionSelector()
+
+        }
+
+    }
+
+    /**
+     * Подключение сразу после проверки.
+     *
+     * Живой сеанс переключается мягко, иначе поднимается новый. Согласие на VPN
+     * здесь не запрашивается: диалог принадлежит главному экрану, а из настроек
+     * `startActivityForResult` за ним вернулся бы в чужой поток запуска.
+     */
+    /**
+     * Зовётся из рабочего потока по итогу выпуска, поэтому всё, что требует главного
+     * потока или живого экрана, идёт через `runOnUiThread`, а служба стартует от
+     * контекста приложения: к этому моменту настройки могут быть уже закрыты.
+     */
+    private fun connectToFastestProtonProfile() {
+
+        val appContext = applicationContext
+
+        if (isNovaSessionLikelyActive()) {
+
+            runOnUiThread { maybeApplyRegionChangeImmediately("proton") }
+
+            return
+
+        }
+
+        if (android.net.VpnService.prepare(appContext) != null) {
+
+            // Согласие на VPN спрашивает главный экран: диалог принадлежит ему.
+            LogManager.log("Proton: профили готовы, но согласие на VPN не выдано — ждём кнопку на главном экране.")
+
+            runOnUiThread {
+
+                runCatching {
+
+                    Toast.makeText(this, "Профили готовы. Нажмите подключение на главном экране.", Toast.LENGTH_LONG).show()
+
+                }
+
+            }
+
+            return
+
+        }
+
+        runCatching {
+
+            ContextCompat.startForegroundService(
+
+                appContext,
+
+                Intent(appContext, NovaVpnService::class.java).apply {
+
+                    action = NovaVpnService.ACTION_CONNECT_SMART
+
+                    putExtra(NovaVpnService.EXTRA_EXIT_REGION, "proton")
+
+                }
+
+            )
+
+            LogManager.log("Proton: профили готовы, запускаем подключение к самому быстрому.")
+
+            runOnUiThread {
+
+                runCatching {
+
+                    Toast.makeText(this, "Подключаемся к самому быстрому профилю Proton...", Toast.LENGTH_SHORT).show()
+
+                }
+
+            }
+
+        }.onFailure { error ->
+
+            LogManager.log("Proton: не удалось начать подключение — ${error.message}")
 
         }
 
@@ -2922,14 +3532,27 @@ class SettingsActivity : AppCompatActivity() {
         val title = findViewById<TextView>(R.id.tv_connection_selector_title) ?: return
         val group = findViewById<RadioGroup>(R.id.rg_exit_region) ?: return
         val summary = findViewById<TextView>(R.id.tv_exit_last) ?: return
+        // Список обязан совпадать с `protocolButtons` из onCreate — включая PROTON.
+        //
+        // Пока здесь было пять кнопок, шестая не доставалась ни одному из двух
+        // режимов: в режиме регионов `configureRegionSelector` выходил на
+        // `getOrNull(5)` и переставал перенастраивать селектор вовсе, а в режиме
+        // протоколов PROTON оставался видимым с чужим оформлением — на устройстве
+        // это выглядело как зелёная кнопка «PROTON» в списке протоколов.
         val buttons = listOfNotNull(
             findViewById<RadioButton>(R.id.rb_exit_auto),
             findViewById<RadioButton>(R.id.rb_exit_ru),
             findViewById<RadioButton>(R.id.rb_exit_masque),
             findViewById<RadioButton>(R.id.rb_exit_eu),
             findViewById<RadioButton>(R.id.rb_exit_us),
+            findViewById<RadioButton>(R.id.rb_exit_proton),
         )
-        if (buttons.size < 5) return
+        if (buttons.size < 6) {
+            LogManager.log(
+                "Селектор протокола/региона не перенастроен: найдено ${buttons.size} кнопок из 6."
+            )
+            return
+        }
         configureConnectionSelector(title, group, buttons, summary)
     }
 
@@ -2981,7 +3604,12 @@ class SettingsActivity : AppCompatActivity() {
 
         val rbExitUs = buttons.getOrNull(4) ?: return
 
-        titleView.text = "Выбор региона"
+        val rbExitProton = buttons.getOrNull(5) ?: return
+
+        // Название общее для обеих половин списка: WARP, MASQUE и AWG Proton — это
+        // протоколы, EU и US — регионы, и «Выбор региона» половину из них не
+        // описывал.
+        titleView.text = "Выбор протокола/региона"
 
         titleView.setTextColor(Color.WHITE)
 
@@ -3012,6 +3640,8 @@ class SettingsActivity : AppCompatActivity() {
         rbExitEu.text = "EU"
 
         rbExitUs.text = "US"
+
+        rbExitProton.text = "PROTON"
 
 
 
@@ -3072,29 +3702,56 @@ class SettingsActivity : AppCompatActivity() {
             summaryView.text =
                 "Идёт регистрация устройства — выбор протокола станет доступен, когда она закончится."
             radioGroup.setOnCheckedChangeListener(null)
-            when (clientData.getExitRegionPreference()) {
-                "eu" -> radioGroup.check(rbExitEu.id)
-                "us" -> radioGroup.check(rbExitUs.id)
-                "ru" -> radioGroup.check(rbExitRu.id)
-                "masque" -> radioGroup.check(rbExitMasque.id)
-                else -> radioGroup.check(rbExitAuto.id)
+            // Идущая подготовка Proton сильнее записанного региона и здесь тоже:
+            // предпочтение до успеха хранит прежний транспорт, и регистрация
+            // устройства, начавшаяся посреди выпуска, отбрасывала кнопку назад ровно
+            // так же, как это делала перерисовка по broadcast.
+            if (ProtonProfileManager.isPreparationRequested()) {
+                radioGroup.check(rbExitProton.id)
+            } else {
+                when (clientData.getExitRegionPreference()) {
+                    "eu" -> radioGroup.check(rbExitEu.id)
+                    "us" -> radioGroup.check(rbExitUs.id)
+                    "ru" -> radioGroup.check(rbExitRu.id)
+                    "masque" -> radioGroup.check(rbExitMasque.id)
+                    "proton" -> radioGroup.check(rbExitProton.id)
+                    else -> radioGroup.check(rbExitAuto.id)
+                }
             }
             return
         }
 
         radioGroup.setOnCheckedChangeListener(null)
 
-        when (clientData.getExitRegionPreference()) {
+        // Пока идёт подготовка Proton, кнопка держится нажатой.
+        //
+        // Предпочтение «proton» записывается только по успеху, а перерисовка
+        // случается раньше: служба шлёт состояние подключения через долю секунды
+        // после старта, приёмник зовёт `refreshConnectionSelector`, и выбор,
+        // прочитанный из ещё старого предпочтения, отбрасывал кнопку назад.
+        val protonPreparationVisible = ProtonProfileManager.isPreparationRequested()
 
-            "eu" -> radioGroup.check(rbExitEu.id)
+        if (protonPreparationVisible) {
 
-            "us" -> radioGroup.check(rbExitUs.id)
+            radioGroup.check(rbExitProton.id)
 
-            "ru" -> radioGroup.check(rbExitRu.id)
+        } else {
 
-            "masque" -> radioGroup.check(rbExitMasque.id)
+            when (clientData.getExitRegionPreference()) {
 
-            else -> radioGroup.check(rbExitAuto.id)
+                "eu" -> radioGroup.check(rbExitEu.id)
+
+                "us" -> radioGroup.check(rbExitUs.id)
+
+                "ru" -> radioGroup.check(rbExitRu.id)
+
+                "masque" -> radioGroup.check(rbExitMasque.id)
+
+                "proton" -> radioGroup.check(rbExitProton.id)
+
+                else -> radioGroup.check(rbExitAuto.id)
+
+            }
 
         }
 
@@ -3110,23 +3767,89 @@ class SettingsActivity : AppCompatActivity() {
 
                 rbExitMasque.id -> "masque"
 
+                rbExitProton.id -> "proton"
+
                 else -> "auto"
 
             }
 
-            clientData.setExitRegionPreference(value)
+            if (value == "proton") {
 
-            updateExitSummary(summaryView)
+                // Кнопки «сгенерировать» нет: сам выбор региона и есть запуск.
+                //
+                // Предпочтение здесь ещё не записывается: до появления профилей
+                // регион «proton» означал бы «перебирать пустой список», а служба
+                // в таком режиме честно доходит до «shortlist пуст» и гаснет —
+                // ровно в тот момент, когда туннель нужен, чтобы профили выпустить.
+                startProtonProfilePreparation(summaryView, radioGroup, buttons)
 
-            if (value != initialExitRegionPreference) {
+            } else {
 
-                maybeApplyRegionChangeImmediately(value)
+                // Выбран другой транспорт — прежняя причина отказа Proton больше не
+                // про то, что на экране, и висеть над чужим выбором ей незачем.
+                protonPreparationActive = false
+
+                // Отмена в синглтоне, а не только здесь: опрос мог быть заведён другим
+                // экземпляром экрана, а итог прогона применяется в рабочем потоке —
+                // ни того, ни другого этот обработчик не достанет.
+                ProtonProfileManager.cancelPreparation()
+
+                // Слушатель снимается вместе с выбором. Прогон продолжается — обрывать
+                // его посреди регистрации ключа незачем, — но его строки больше не
+                // относятся к тому, что на экране: без этого «Proton: проверка 53/53»
+                // писалось поверх строки региона уже выбранного WARP.
+                detachProtonStatusListener()
+
+                protonPendingMessage = null
+
+                summaryView.visibility = View.GONE
+
+                protonWaitHandler.removeCallbacksAndMessages(null)
+
+                clientData.setExitRegionPreference(value)
+
+                updateExitSummary(summaryView)
+
+                if (value != initialExitRegionPreference) {
+
+                    maybeApplyRegionChangeImmediately(value)
+
+                }
 
             }
 
         }
 
-        updateExitSummary(summaryView)
+        // Строка статуса показывается только в режиме Proton. В остальных режимах
+        // она скрыта в разметке — блок «Выбор региона» рассчитан на две строки, и
+        // третья наезжала бы на соседнюю карточку.
+        //
+        // Отложенное сообщение переживает перерисовку намеренно: причина отказа
+        // ставится в эту же строку, а хвост функции её безусловно прятал и
+        // перезаписывал в той же посылке главного потока — до кадра дело не
+        // доходило, и пользователь видел откатившуюся кнопку без единого слова.
+        val pendingProtonMessage = protonPendingMessage
+
+        if (protonPreparationVisible || clientData.getExitRegionPreference() == "proton") {
+
+            summaryView.visibility = View.VISIBLE
+
+            summaryView.text = pendingProtonMessage
+                ?: ProtonProfileManager.currentStatus().ifBlank { "Proton: профили не создавались" }
+
+        } else if (pendingProtonMessage != null) {
+
+            summaryView.visibility = View.VISIBLE
+
+            summaryView.text = pendingProtonMessage
+
+        } else {
+
+            summaryView.visibility = View.GONE
+
+            updateExitSummary(summaryView)
+
+        }
 
     }
 
@@ -3799,8 +4522,12 @@ class SettingsActivity : AppCompatActivity() {
     private fun updateWarpLicenseNote() {
         val license = clientData.getWarpPlusLicense()
         val accountType = clientData.getWarpAccountType()
+        val lastError = clientData.getWarpLicenseLastError()
         tvWarpLicenseNote.text = when {
             license.isBlank() -> "Не задана — аккаунт бесплатный"
+            // Отказ показываем на экране, а не только всплывающим сообщением: три
+            // секунды жизни и никакого следа — это неотличимо от «ещё не проверен».
+            lastError.isNotBlank() -> "Ключ не принят: $lastError"
             accountType.isBlank() -> "Ключ сохранён, аккаунт ещё не проверен"
             accountType.equals("free", ignoreCase = true) ->
                 "Ключ сохранён, но аккаунт остался бесплатным"
@@ -3811,12 +4538,15 @@ class SettingsActivity : AppCompatActivity() {
     /**
      * Ввод лицензии WARP+.
      *
-     * Зачем она нужна: бесплатная анонимная регистрация выходит с `account_type: "free"`,
-     * и служба MASQUE её не обслуживает — соединение принимается, а туннель не
-     * открывается. Лицензия меняет тип аккаунта.
+     * Для подключения ключ **не нужен**: бесплатный анонимный аккаунт
+     * (`account_type: "free"`) Cloudflare обслуживает, MASQUE на нём поднимается
+     * (N9, замер 2026-08-12 в `register.go`). Прежний текст диалога утверждал
+     * обратное — «без ключа MASQUE не подключается» — и это давно неправда.
+     * Ключ меняет тип аккаунта и добавляет ускоренные маршруты Cloudflare.
      *
-     * Ключ хранится отдельно от личности: личность приложение перевыпускает само при
-     * отказе Cloudflare, а ключ вводят руками, и терять его при каждом перевыпуске нельзя.
+     * Хранится отдельно от личности: личность приложение перевыпускает само при
+     * отказе Cloudflare, а ключ вводят руками, и терять его при каждом перевыпуске
+     * нельзя — `WarpIdentityBackfill` переносит его на каждое новое устройство.
      */
     private fun showWarpLicenseDialog() {
         val input = EditText(this).apply {
@@ -3832,8 +4562,8 @@ class SettingsActivity : AppCompatActivity() {
             .setTitle("Лицензия WARP+")
             .setMessage(
                 "Ключ из приложения Cloudflare 1.1.1.1 (Настройки → Аккаунт → Ключ).\n\n" +
-                    "Без него аккаунт бесплатный, и MASQUE не подключается: Cloudflare " +
-                    "принимает соединение, но туннель не открывает."
+                    "Для подключения он не нужен — Nova работает и на бесплатном аккаунте. " +
+                    "Ключ даёт ускоренные маршруты Cloudflare."
             )
             .setView(input)
             .setPositiveButton("Сохранить") { _, _ ->
@@ -3849,17 +4579,51 @@ class SettingsActivity : AppCompatActivity() {
             .show()
     }
 
+    /**
+     * Сжимает ответ Cloudflare до того, что помещается в подпись под строкой.
+     *
+     * Целиком это `400 Bad Request: {"result":null,...,"message":"Too many connected
+     * devices."}` — в две строки по 12sp не влезает и читается как мусор. Из тела
+     * достаём `message`, потому что именно он объясняет отказ: у ключей из публичных
+     * каналов лимит устройств исчерпан, и это ответ про ключ, а не про Nova.
+     */
+    private fun shortenLicenseError(raw: String?): String {
+        val text = raw?.trim().orEmpty()
+        if (text.isEmpty()) return "Cloudflare отклонил запрос"
+        Regex(""""message"\s*:\s*"([^"]+)"""").find(text)?.groupValues?.getOrNull(1)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { return it }
+        return text.substringBefore('{').trim().ifEmpty { text }.take(80)
+    }
+
     private fun applyWarpLicense(rawLicense: String) {
         val license = rawLicense.trim()
         clientData.setWarpPlusLicense(license)
         clientData.setWarpAccountType("")
+        clientData.setWarpLicenseLastError("")
         updateWarpLicenseNote()
         if (license.isEmpty()) return
 
-        val token = clientData.getAccessToken().orEmpty()
-        val deviceId = clientData.getDeviceId().orEmpty()
-        if (token.isBlank() || deviceId.isBlank()) {
+        // Личность MASQUE — полноценный запасной адресат.
+        //
+        // Обычной регистрации WARP на устройстве может не быть вовсе: встроенные семена
+        // идут со своими ключами, а фоновая регистрация выключена, как только личность
+        // MASQUE готова. В такой связке ключу было некуда привязаться никогда, а экран
+        // обещал «применится при регистрации» — обещание, которое некому исполнить.
+        val plainToken = clientData.getAccessToken().orEmpty()
+        val plainDeviceId = clientData.getDeviceId().orEmpty()
+        val credentials = if (plainToken.isNotBlank() && plainDeviceId.isNotBlank()) {
+            plainToken to plainDeviceId
+        } else {
+            clientData.getMasqueIdentityCredentials()
+        }
+        if (credentials == null) {
             // Устройства ещё нет — ключ применится при первой регистрации.
+            LogManager.log(
+                "Лицензия WARP+: ключ сохранён, но привязать не к чему — нет ни регистрации " +
+                    "WARP, ни личности MASQUE. Применится, когда появится первая."
+            )
             Toast.makeText(
                 this,
                 "Ключ сохранён. Он применится, когда Nova зарегистрирует устройство.",
@@ -3867,7 +4631,13 @@ class SettingsActivity : AppCompatActivity() {
             ).show()
             return
         }
+        val (token, deviceId) = credentials
 
+        // Итог привязки идёт и в журнал, а не только всплывающим сообщением.
+        // Всплывающее живёт три секунды и в диагностику не попадает, поэтому
+        // «ключ сохранён, аккаунт ещё не проверен» на экране было неотличимо от
+        // отказа Cloudflare, отказа сети и неверного ключа (I4).
+        LogManager.log("Лицензия WARP+: привязываем ключ к устройству $deviceId.")
         Toast.makeText(this, "Привязываем лицензию…", Toast.LENGTH_SHORT).show()
         Thread {
             val result = runCatching { nova.Nova.setWarpLicense(token, deviceId, license) }
@@ -3875,16 +4645,30 @@ class SettingsActivity : AppCompatActivity() {
                 result.onSuccess { accountType ->
                     clientData.setWarpAccountType(accountType)
                     updateWarpLicenseNote()
+                    LogManager.log(
+                        if (accountType.isBlank()) {
+                            "Лицензия WARP+: Cloudflare принял запрос, но тип аккаунта не вернул."
+                        } else {
+                            "Лицензия WARP+: аккаунт стал «$accountType»."
+                        }
+                    )
                     Toast.makeText(
                         this,
-                        if (accountType.equals("free", ignoreCase = true)) {
-                            "Cloudflare оставил аккаунт бесплатным — ключ не принят"
-                        } else {
-                            "Лицензия принята, аккаунт: $accountType"
+                        when {
+                            accountType.equals("free", ignoreCase = true) ->
+                                "Cloudflare оставил аккаунт бесплатным — ключ не принят"
+                            // Пустой тип — не успех: «Лицензия принята, аккаунт: »
+                            // сообщало бы о победе пустым местом.
+                            accountType.isBlank() ->
+                                "Cloudflare не назвал тип аккаунта — считаем ключ непринятым"
+                            else -> "Лицензия принята, аккаунт: $accountType"
                         },
                         Toast.LENGTH_LONG,
                     ).show()
                 }.onFailure { error ->
+                    LogManager.log("Лицензия WARP+: привязать не удалось — ${error.message}")
+                    clientData.setWarpLicenseLastError(shortenLicenseError(error.message))
+                    updateWarpLicenseNote()
                     Toast.makeText(
                         this,
                         "Привязать лицензию не удалось: ${error.message}",

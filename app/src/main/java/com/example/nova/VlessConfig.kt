@@ -1,5 +1,7 @@
 package com.example.nova
 
+import org.json.JSONArray
+import org.json.JSONObject
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.Locale
@@ -139,6 +141,101 @@ data class VlessConfig(
             "pbk", "sid", "spx", "path", "host", "servicename", "mode", "headertype", "flow",
             "seed", "quicsecurity", "key",
         )
+
+        /**
+         * Разбирает outbound в формате sing-box.
+         *
+         * Такие объекты раздают вместо ссылок и просто копируют в буфер целиком —
+         * а Nova до сих пор понимала только `vless://…`, и вставка выглядела как
+         * «ничего не импортировалось». Разбор сводит объект к той же модели, что
+         * и ссылка, поэтому дальше по коду разницы нет вовсе.
+         *
+         * Принимается и одиночный объект, и массив, и целый конфиг с
+         * `"outbounds": [...]` — в живых раздачах встречаются все три вида.
+         */
+        fun fromSingBoxOutbound(json: JSONObject): VlessConfig? {
+            if (!json.optString("type").equals("vless", ignoreCase = true)) return null
+            val uuid = json.optString("uuid").trim()
+            val host = json.optString("server").trim()
+            val port = json.optInt("server_port", -1)
+            if (uuid.isBlank() || host.isBlank() || port !in 1..65535) return null
+
+            val tls = json.optJSONObject("tls")
+            val reality = tls?.optJSONObject("reality")
+            val realityOn = reality?.optBoolean("enabled", false) == true
+            val tlsOn = tls?.optBoolean("enabled", false) == true
+            val security = when {
+                realityOn -> "reality"
+                tlsOn -> "tls"
+                else -> "none"
+            }
+            val utls = tls?.optJSONObject("utls")
+            val alpn = tls?.optJSONArray("alpn")?.let { array ->
+                (0 until array.length()).mapNotNull { array.optString(it).trim().takeIf(String::isNotEmpty) }
+            }.orEmpty()
+
+            val transport = json.optJSONObject("transport")
+            val transportType = transport?.optString("type").orEmpty()
+            val headers = transport?.optJSONObject("headers")
+            // Host в заголовках бывает и строкой, и массивом из одной строки.
+            val hostHeader = headers?.let { it.optString("Host").ifBlank { it.optString("host") } }
+                ?.trim()
+                ?.ifBlank {
+                    headers.optJSONArray("Host")?.optString(0).orEmpty()
+                }
+                .orEmpty()
+
+            return VlessConfig(
+                uuid = uuid,
+                host = host,
+                port = port,
+                remark = json.optString("tag").trim(),
+                security = security,
+                sni = tls?.optString("server_name").orEmpty().trim(),
+                alpn = alpn,
+                fingerprint = utls?.takeIf { it.optBoolean("enabled", false) }
+                    ?.optString("fingerprint").orEmpty().trim(),
+                allowInsecure = tls?.optBoolean("insecure", false) == true,
+                realityPublicKey = reality?.optString("public_key").orEmpty().trim(),
+                realityShortId = reality?.optString("short_id").orEmpty().trim(),
+                network = normalizeNetwork(transportType),
+                path = transport?.optString("path").orEmpty().trim(),
+                hostHeader = hostHeader,
+                serviceName = transport?.optString("service_name").orEmpty().trim(),
+                flow = json.optString("flow").trim(),
+            )
+        }
+
+        /**
+         * Достаёт все VLESS-outbound-ы из вставленного текста.
+         *
+         * @return пустой список, если JSON в тексте нет или в нём нет vless —
+         *         вызывающий на это опирается, чтобы не мешать разбору ссылок.
+         */
+        fun parseSingBoxText(raw: String): List<VlessConfig> {
+            val text = raw.trim()
+            if (text.isEmpty()) return emptyList()
+            val start = text.indexOfFirst { it == '{' || it == '[' }
+            if (start < 0) return emptyList()
+            val body = text.substring(start)
+            return try {
+                when (body.first()) {
+                    '[' -> fromArray(JSONArray(body))
+                    else -> {
+                        val json = JSONObject(body)
+                        val outbounds = json.optJSONArray("outbounds")
+                        if (outbounds != null) fromArray(outbounds) else listOfNotNull(fromSingBoxOutbound(json))
+                    }
+                }
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
+
+        private fun fromArray(array: JSONArray): List<VlessConfig> =
+            (0 until array.length()).mapNotNull { index ->
+                array.optJSONObject(index)?.let(::fromSingBoxOutbound)
+            }
 
         /**
          * Разбирает одну ссылку. Возвращает null, если это не рабочая

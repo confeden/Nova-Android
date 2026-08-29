@@ -170,6 +170,16 @@ class MainActivity : AppCompatActivity() {
     private var isIpVisible = false
     private var currentIpv4 = "..."
     private var currentIpv6 = "..."
+    /** Транспорт, на котором сняты показанные сейчас адреса. См. `checkCurrentIp`. */
+    private var lastObservedIpTransport = ""
+    /** Последний шаг выпуска профилей Proton — он показывается под статусом. */
+    private var protonProgressText = ""
+    private val protonProgressListener = ProtonProfileManager.StatusListener { text ->
+        runOnUiThread {
+            protonProgressText = text
+            updateAttemptProgressDisplay()
+        }
+    }
     private var currentCountry = "--"
     private var currentTunnelBackend = NovaVpnService.BACKEND_WARP
     private var currentAttemptOrdinal = 0
@@ -526,9 +536,9 @@ class MainActivity : AppCompatActivity() {
             val activeTransport = clientData.getServiceTransport()
             val activeBackend = clientData.getServiceBackend().uppercase(Locale.ROOT)
             val nextChainStep = when {
-                activeTransport == NovaVpnService.TRANSPORT_MASQUE ->
+                NovaVpnService.isPublishedTransport(activeTransport, NovaVpnService.TRANSPORT_MASQUE) ->
                     if (importedOnly) NovaVpnService.MANUAL_STEP_VLESS else NovaVpnService.MANUAL_STEP_OPERA_EU
-                activeTransport == NovaVpnService.TRANSPORT_OPERA ->
+                NovaVpnService.isPublishedTransport(activeTransport, NovaVpnService.TRANSPORT_OPERA) ->
                     if (activeBackend.endsWith("US")) null else NovaVpnService.MANUAL_STEP_OPERA_US
                 else -> null
             }
@@ -1034,6 +1044,10 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         isActivityResumed = true
+        // Слушатель добавляется здесь, а не в onCreate: добавление сразу отдаёт
+        // текущий шаг, и вернувшийся на экран пользователь видит происходящее, а не
+        // ждёт следующего.
+        ProtonProfileManager.addListener(protonProgressListener)
         refreshWarpDiscoverySnapshotFromStorage()
         statusHandler.post(statusRunnable)
         refreshInstallUpdateButton()
@@ -1073,6 +1087,7 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         isActivityResumed = false
+        ProtonProfileManager.removeListener(protonProgressListener)
         refreshKeepScreenAwake()
         statusHandler.removeCallbacks(statusRunnable)
         statusHandler.removeCallbacks(deferredNotificationPermissionRunnable)
@@ -1535,26 +1550,58 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun isLikelyNovaVpnNetwork(network: Network): Boolean {
+    /**
+     * Владелец VPN-сети: наш, чужой или **неизвестен**. Третье состояние отдельное,
+     * потому что Android 9 вычищает `EstablishingAppUid` из копии
+     * `NetworkCapabilities`, которую отдаёт приложению, а метка сессии есть только
+     * с Android 10. Там «владелец не прочитался» — это всегда, и считать такую сеть
+     * чужой значит показывать бейдж не того транспорта (P16).
+     */
+    private enum class VpnOwnership { OURS, FOREIGN, UNKNOWN }
+
+    private fun classifyVpnOwnership(caps: NetworkCapabilities?): VpnOwnership {
+        if (caps == null) return VpnOwnership.UNKNOWN
+        val ownerUid = extractVpnOwnerUid(caps)
+        if (ownerUid != null) {
+            return if (ownerUid == applicationInfo.uid) VpnOwnership.OURS else VpnOwnership.FOREIGN
+        }
+        val transportInfo = extractVpnTransportLabel(caps)
+        if (transportInfo.isBlank()) return VpnOwnership.UNKNOWN
+        return if (
+            transportInfo.contains("NovaVPN", ignoreCase = true) ||
+            transportInfo.contains("NovaOperaVPN", ignoreCase = true)
+        ) {
+            VpnOwnership.OURS
+        } else {
+            VpnOwnership.FOREIGN
+        }
+    }
+
+    /** «Сеть не чужая»: наша по владельцу либо владельца не прочитать, а сеанс наш. */
+    private fun isVpnNetworkNotForeign(network: Network?): Boolean {
+        if (network == null) return false
         val cm = getSystemService(ConnectivityManager::class.java) ?: return false
         val caps = cm.getNetworkCapabilities(network) ?: return false
         if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return false
-        if (isNovaVpnOwner(caps)) return true
-        val transportInfo = extractVpnTransportLabel(caps)
-        return transportInfo.contains("NovaVPN", ignoreCase = true) ||
-            transportInfo.contains("NovaOperaVPN", ignoreCase = true)
+        return when (classifyVpnOwnership(caps)) {
+            VpnOwnership.OURS -> true
+            VpnOwnership.FOREIGN -> false
+            VpnOwnership.UNKNOWN -> hasStrongLocalNovaSessionEvidence()
+        }
     }
 
     private fun isSystemVpnLikelyNova(network: Network): Boolean {
-        if (isLikelyNovaVpnNetwork(network)) return true
-        return hasStrongLocalNovaSessionEvidence()
+        return isVpnNetworkNotForeign(network)
     }
 
     private fun inferBackendFromActiveVpn(network: Network?): String {
         if (network != null) {
             val cm = getSystemService(ConnectivityManager::class.java)
             val caps = cm?.getNetworkCapabilities(network)
-            if (isNovaVpnOwner(caps)) {
+            // Не `isNovaVpnOwner`: на Android 9 владелец приложению не виден, и самая
+            // достоверная ветка подписи бейджа не выполнялась никогда — метка уезжала
+            // в запасные догадки ниже.
+            if (isVpnNetworkNotForeign(network)) {
                 resolveImportedUiBackendLabel()?.let { importedBackend ->
                     return importedBackend
                 }
@@ -1595,10 +1642,6 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Throwable) {
         }
         return transportInfo.toString().orEmpty()
-    }
-
-    private fun isNovaVpnOwner(caps: NetworkCapabilities?): Boolean {
-        return extractVpnOwnerUid(caps) == applicationInfo.uid
     }
 
     private fun extractVpnOwnerUid(caps: NetworkCapabilities?): Int? {
@@ -1845,6 +1888,29 @@ class MainActivity : AppCompatActivity() {
                     tunnelIpResolved =
                         tunnelNetwork != null &&
                             (effectiveSnapshot.ipv4.isNotBlank() || effectiveSnapshot.ipv6.isNotBlank())
+                    // Показанные адреса привязаны к транспорту, на котором их сняли.
+                    //
+                    // `stabilizeObservedIp` при пустом наблюдении оставляет прежнее
+                    // значение — это защита от мигания внутри сеанса. Через смену
+                    // транспорта она превращалась в ложь: у MASQUE MTU 1179 < 1280,
+                    // IPv6 внутри туннеля не поднимается вовсе, и экран продолжал
+                    // показывать IPv6 предыдущего выхода Opera US как свой текущий.
+                    val observedTransport = clientData.getServiceTransport().ifBlank { resolvedBackend }
+                    if (observedTransport != lastObservedIpTransport) {
+                        lastObservedIpTransport = observedTransport
+                        currentIpv4 = "..."
+                        currentIpv6 = "..."
+                        ipv4Candidate.value = ""
+                        ipv4Candidate.seenCount = 0
+                        ipv6Candidate.value = ""
+                        ipv6Candidate.seenCount = 0
+                        // Страну сбрасываем вместе с адресами. Она держится за прежнее
+                        // значение по той же причине и врёт так же: на импортированном
+                        // AWG с выходом NL бейдж показывал «AWG: RU», потому что
+                        // трасса не дошла, а `RU` осталась от прошлого сеанса WARP.
+                        // «--» честнее любого прошлого ответа (I10).
+                        currentCountry = "--"
+                    }
                     val operaTunnelSnapshot = tunnelNetwork != null && isOperaBackend(resolvedBackend)
                     currentIpv4 = if (operaTunnelSnapshot) {
                         effectiveSnapshot.ipv4.ifBlank { "..." }
@@ -2633,13 +2699,18 @@ class MainActivity : AppCompatActivity() {
         // остальных веток — иначе «MASQUE: RU» проигрывал общему «WARP: RU», и по
         // экрану нельзя было понять, работает ли выбранный протокол.
         val transport = clientData.getServiceTransport()
-        if (transport == NovaVpnService.TRANSPORT_MASQUE) {
+        if (NovaVpnService.isPublishedTransport(transport, NovaVpnService.TRANSPORT_MASQUE)) {
             return "${NovaVpnService.TRANSPORT_MASQUE}: $effectiveCountry"
         }
         // Импортированный профиль AmneziaWG подписывается своим именем: бэкенд у него
         // тот же `WARP`, и раньше бейдж обещал Cloudflare там, где туннель шёл на
         // сервер пользователя.
-        if (transport == NovaVpnService.TRANSPORT_AWG) {
+        // Сгенерированный Nova профиль Proton подписывается отдельно от чужого
+        // импорта: обе метки означают AmneziaWG, но происхождение узла у них разное.
+        if (NovaVpnService.isPublishedTransport(transport, NovaVpnService.TRANSPORT_AWG_PROTON)) {
+            return "${NovaVpnService.TRANSPORT_AWG_PROTON}: $effectiveCountry"
+        }
+        if (NovaVpnService.isPublishedTransport(transport, NovaVpnService.TRANSPORT_AWG)) {
             return "${NovaVpnService.TRANSPORT_AWG}: $effectiveCountry"
         }
         if (backend.trim().uppercase().startsWith(NovaVpnService.BACKEND_VLESS)) {
@@ -3084,6 +3155,7 @@ class MainActivity : AppCompatActivity() {
             preference == "us" -> "ПОДКЛЮЧЕНИЕ... US"
             preference == "masque" -> "ПОДКЛЮЧЕНИЕ... MASQUE"
             preference == "vless" -> "ПОДКЛЮЧЕНИЕ... VLESS"
+            preference == "proton" -> "ПОДКЛЮЧЕНИЕ... AWG Proton"
             isOperaBackend(currentTunnelBackend) -> {
                 val normalized = currentTunnelBackend.trim().uppercase()
                 val region = when {
@@ -3891,6 +3963,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateAttemptProgressDisplay() {
+        // Пока идёт выпуск профилей Proton, под статусом показываем его шаги.
+        //
+        // Раньше это было видно только на экране настроек: пользователь выбирал
+        // PROTON, возвращался на главный и видел «...» без единого слова о том, что
+        // происходит, — а выпуск занимает до минуты (сессия, список серверов,
+        // регистрация ключа, замер 50-60 кандидатов). Место под статусом уже
+        // занято счётчиком перебора, и это тот же самый вопрос «что сейчас идёт».
+        if (ProtonProfileManager.isRunning()) {
+            val step = protonProgressText.ifBlank { ProtonProfileManager.currentStatus() }
+            if (step.isNotBlank()) {
+                tvAttemptProgress.text = step
+                tvAttemptProgress.visibility = View.VISIBLE
+                refreshTransportNotice()
+                refreshRestrictedMobileIndicator()
+                return
+            }
+        }
         // Метка транспорта — единственное, чем фаза называет себя интерфейсу:
         // по ней счётчик и решает, чей перебор он сейчас показывает.
         val serviceTransport = clientData.getServiceTransport()
@@ -4987,7 +5076,7 @@ class MainActivity : AppCompatActivity() {
                 val caps = cm.getNetworkCapabilities(network) ?: return Int.MIN_VALUE
                 if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return Int.MIN_VALUE
                 var score = 0
-                if (isLikelyNovaVpnNetwork(network)) score += 1_000
+                if (isVpnNetworkNotForeign(network)) score += 1_000
                 if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) score += 200
                 if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) score += 50
                 return score
@@ -5007,17 +5096,15 @@ class MainActivity : AppCompatActivity() {
         if (
             active != null &&
             cm.getNetworkCapabilities(active)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true &&
-            isLikelyNovaVpnNetwork(active)
+            isVpnNetworkNotForeign(active)
         ) {
             return active
         }
 
+        // Обе прежние ветки — строгая и «по локальным признакам» — теперь внутри
+        // isVpnNetworkNotForeign, а чужой VPN по локальным признакам больше не проходит.
         val bestVpn = bestVpnNetwork()
-        if (bestVpn != null && isLikelyNovaVpnNetwork(bestVpn)) {
-            return bestVpn
-        }
-
-        return if (bestVpn != null && hasStrongLocalNovaSessionEvidence()) bestVpn else null
+        return if (bestVpn != null && isVpnNetworkNotForeign(bestVpn)) bestVpn else null
     }
 
     private fun hasStrongLocalNovaSessionEvidence(): Boolean {

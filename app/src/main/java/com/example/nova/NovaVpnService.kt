@@ -72,8 +72,33 @@ class NovaVpnService : OperaNativeVpnService() {
      */
     private var masqueDataPlaneBlockedObserved = false
 
+    /**
+     * Фаза MASQUE вышла, не сделав ни одной попытки.
+     *
+     * «Не пробовали» и «пробовали и не вышло» — разные вещи, а вызывающий видел
+     * от фазы одно число прогресса и записывал отказ в обоих случаях. Каждое
+     * подключение с явно выбранным другим транспортом при живой личности MASQUE
+     * приписывало ему провал; три таких за десять минут — и уже сам выбор MASQUE
+     * встречался отказом «не поднимается (3 попытки подряд)» без единой попытки.
+     */
+    private var masquePhaseSkipped = false
+
     /** Сколько раз имя рукопожатия подводило на конкретном узле MASQUE. */
     private val masqueSniFailures = mutableMapOf<String, Int>()
+
+    /**
+     * Какое имя реально ушло в рукопожатие на этом узле.
+     *
+     * Без него ни успех, ни неудачу не к чему привязать: выбор считается из
+     * счётчика попыток, и к моменту разбора итога он уже другой.
+     */
+    private val lastChosenMasqueSni = mutableMapOf<String, String>()
+
+    /** Ответ пробы «белый список?» и сеть, для которой он получен. */
+    @Volatile
+    private var cachedWhitelistRegime: Pair<String, Boolean?>? = null
+    @Volatile
+    private var cachedWhitelistRegimeAt = 0L
     @Volatile
     private var masqueLastAuthError: String? = null
     private val cleanupInProgress = AtomicBoolean(false)
@@ -124,6 +149,15 @@ class NovaVpnService : OperaNativeVpnService() {
     /** Пояснение относится к причине остановки и не стирается переходом в STOPPED. */
     @Volatile
     private var preserveTransportNoticeOnStop = false
+
+    /**
+     * Короткий кэш Proton-профилей. TTL заведомо меньше цикла подключения: кэш,
+     * переживший состояние, которое он отражает, уже стоил проекту одного бага (G25).
+     */
+    @Volatile
+    private var cachedProtonConfigs: List<WarpVerifiedConfig>? = null
+    @Volatile
+    private var cachedProtonConfigsAt = 0L
 
     /**
      * Поколение цикла, который поднял WARP только ради выпуска ключа MASQUE.
@@ -256,6 +290,8 @@ class NovaVpnService : OperaNativeVpnService() {
     private var ignoreUnderlyingWakeEventsUntilMs = 0L
     @Volatile
     private var lastAcceleratedRecoveryAtMs = 0L
+    @Volatile
+    private var lastVpnOwnershipRescueLogAtMs = 0L
     @Volatile
     private var lastAcceleratedRecoveryReason: String? = null
     @Volatile
@@ -643,6 +679,16 @@ class NovaVpnService : OperaNativeVpnService() {
          * наш собственный процесс — защита сокета, поднятый TUN, идущий цикл.
          */
         const val ACTION_PROBE_MASQUE = "PROBE_MASQUE"
+
+        /**
+         * Замер Proton-профилей рукопожатием.
+         *
+         * Живёт в службе, а не в интерфейсе, по одной причине: `protect()` есть
+         * только у `VpnService`. Без него замер уходил бы внутрь поднятого туннеля
+         * и описывал бы его канал, а не прямой путь до узла Proton — то есть
+         * ранжировал бы профили по чужой задержке.
+         */
+        const val ACTION_PROBE_PROTON_PROFILES = "PROBE_PROTON_PROFILES"
         const val ACTION_START_WARP_CONFIG_DISCOVERY = "START_WARP_CONFIG_DISCOVERY"
         const val ACTION_START_WARP_NETWORK_ADAPTATION = "START_WARP_NETWORK_ADAPTATION"
         const val ACTION_START_WARP_QUALITY_DIAGNOSTICS = "START_WARP_QUALITY_DIAGNOSTICS"
@@ -848,7 +894,47 @@ class NovaVpnService : OperaNativeVpnService() {
          * пользователя, а не в Cloudflare.
          */
         const val TRANSPORT_AWG = "AWG"
+
+        /**
+         * Профиль, выпущенный самой Nova через API Proton.
+         *
+         * Отдельно от [TRANSPORT_AWG] намеренно: тот означает профиль, который
+         * принёс пользователь, а этот — сгенерированный, и путать их на бейдже
+         * значит врать про происхождение узла.
+         */
+        const val TRANSPORT_AWG_PROTON = "AWG Proton"
         const val TRANSPORT_OPERA = "OPERA"
+
+        /**
+         * Совпадает ли опубликованная метка транспорта с константой.
+         *
+         * Сравнивать их напрямую нельзя. `ClientData.getServiceTransport()` приводит
+         * прочитанное к верхнему регистру, а [TRANSPORT_AWG_PROTON] — единственная
+         * константа со строчными буквами: `"AWG PROTON" == "AWG Proton"` ложно, и
+         * ветка Proton на бейдже не срабатывала **никогда**. Снаружи это выглядело
+         * так: туннель идёт через Proton (`tun0 = 10.2.0.2`, выход NL), служба
+         * публикует `transport=AWG PROTON`, а экран показывает «WARP: NL».
+         * У `MASQUE`, `AWG`, `WARP` и `OPERA` буквы и так заглавные, поэтому мимо
+         * проходил ровно Proton.
+         */
+        fun isPublishedTransport(published: String?, transport: String): Boolean =
+            published?.trim().equals(transport.trim(), ignoreCase = true)
+
+        /** См. [cachedProtonConfigs]: заведомо короче одного цикла подключения. */
+        private const val PROTON_CONFIG_CACHE_MS = 3_000L
+
+        /**
+         * Сколько проб идёт одновременно и сколько ждать ответа.
+         *
+         * Дюжина параллельных UDP-отправок — потолок, за которым на мобильной сети
+         * начинаются потери, и медленным выглядит канал, а не узел.
+         */
+        private const val PROTON_PROBE_PARALLELISM = 12
+        /** Хватает на первый выстрел и три повтора по 700 мс. */
+        private const val PROTON_PROBE_TIMEOUT_MS = 3_500
+
+        /** Режим сети меняется вместе с сетью, а не по часам; таймер тут — страховка. */
+        private const val WHITELIST_REGIME_CACHE_MS = 5L * 60L * 1000L
         private const val BACKGROUND_HEARTBEAT_REQUEST_CODE = 4515
         private const val STOP_CLEANUP_CONFIRM_REQUEST_CODE = 4516
         private const val BACKGROUND_HEARTBEAT_INTERVAL_MS = 120_000L
@@ -900,14 +986,23 @@ class NovaVpnService : OperaNativeVpnService() {
         }
     }
 
+    /** Когда погас экран, по часам бодрствования. `null` — экран включён. */
+    @Volatile
+    private var screenOffSinceUptimeMs: Long? = null
+
     private val deviceWakeReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: Intent?) {
             when (intent?.action) {
                 Intent.ACTION_SCREEN_OFF -> {
+                    // Отметка нужна фоновому подбору I1: «пять минут бездействия»
+                    // считается отсюда. `uptimeMillis`, а не `elapsedRealtime` —
+                    // сон устройства бездействием пользователя не является (G14).
+                    screenOffSinceUptimeMs = SystemClock.uptimeMillis()
                     refreshBackgroundHeartbeatForDeviceState()
                     refreshConnectedScreenOffWakeLock()
                 }
                 Intent.ACTION_SCREEN_ON -> {
+                    screenOffSinceUptimeMs = null
                     requestFreshProbeAfterWake("screen-on")
                     refreshBackgroundHeartbeatForDeviceState()
                     refreshConnectedScreenOffWakeLock()
@@ -999,7 +1094,7 @@ class NovaVpnService : OperaNativeVpnService() {
             val currentVpn = findCurrentVpnNetwork(connectivityManager)
             val liveNovaVpn =
                 currentVpn != null &&
-                    isLikelyNovaVpnNetwork(connectivityManager, currentVpn)
+                    isVpnNetworkNotForeign(connectivityManager, currentVpn)
             if (persistedState == STATE_STOPPED && clientData.getRestartSession() == null) {
                 if (liveNovaVpn) {
                     LogManager.log(
@@ -1108,11 +1203,20 @@ class NovaVpnService : OperaNativeVpnService() {
         }
 
         if (intent?.action == ACTION_BACKGROUND_HEARTBEAT) {
+            // Подбор `I1` едет на уже существующем сердцебиении, а не заводит свой
+            // будильник: собственный таймер — это ещё одно пробуждение устройства
+            // ради работы, которая сети не касается вовсе.
+            runAwgI1AdaptationStep(clientData)
             return handleBackgroundHeartbeat(clientData, startId)
         }
 
         if (intent?.action == ACTION_PROBE_MASQUE) {
             probeMasqueFromServiceProcess(clientData)
+            return START_NOT_STICKY
+        }
+
+        if (intent?.action == ACTION_PROBE_PROTON_PROFILES) {
+            probeProtonProfilesFromServiceProcess()
             return START_NOT_STICKY
         }
 
@@ -1558,10 +1662,15 @@ class NovaVpnService : OperaNativeVpnService() {
         if (isRunning || currentState == STATE_CONNECTED || currentState == STATE_CONNECTING) {
             val currentVpn = findCurrentVpnNetwork(connectivityManager)
             if (!isDeviceInteractiveNow()) {
-                if (currentVpn != null && isLikelyNovaVpnNetwork(connectivityManager, currentVpn)) {
+                if (currentVpn != null && isVpnNetworkNotForeign(connectivityManager, currentVpn)) {
+                    logVpnOwnershipRescueIfNeeded(connectivityManager, currentVpn)
                     connectedHealthProbeFailures = 0
                     return START_STICKY
                 }
+                LogManager.log(
+                    "Обзор VPN-сетей перед восстановлением во сне: " +
+                        describeVpnNetworksForDiagnostics(connectivityManager)
+                )
                 LogManager.log("Фоновый heartbeat: системный VPN исчез во сне. Запускаем восстановление сеанса.")
                 if (currentState != STATE_CONNECTING) {
                     broadcastState(STATE_CONNECTING)
@@ -1712,7 +1821,7 @@ class NovaVpnService : OperaNativeVpnService() {
         }
         val connectivityManager = getSystemService(android.net.ConnectivityManager::class.java)
         val currentVpn = findCurrentVpnNetwork(connectivityManager)
-        if (currentVpn != null && isLikelyNovaVpnNetwork(connectivityManager, currentVpn)) {
+        if (currentVpn != null && isVpnNetworkNotForeign(connectivityManager, currentVpn)) {
             LogManager.log(
                 "После ручного stop stale VPN Nova всё ещё виден в системе. " +
                     "Выполняем delayed synthetic detach ($source), чтобы убрать ключ и системный VPN."
@@ -1936,12 +2045,23 @@ class NovaVpnService : OperaNativeVpnService() {
      * у импортированных заполнен `importedConfigHost`.
      */
     private fun setCurrentTransportForAttempt(attempt: ConnectionAttempt) {
+        val clientData = ClientData(this)
+        val protonAttempt = attempt.endpointSource
+            .equals(ProtonProfileStore.ENDPOINT_SOURCE, ignoreCase = true)
         val label = when {
             attempt.mode.engine.equals("masque", ignoreCase = true) -> TRANSPORT_MASQUE
+            // Proton проверяется первым: его профили тоже помечены как
+            // импортированные (иначе не включился бы строгий путь применения), и
+            // при обратном порядке они подписывались бы просто «AWG».
+            //
+            // Решает при этом **узел попытки**, а не один выбранный регион: пока
+            // хватало региона, любой другой профиль, победивший в режиме Proton,
+            // подписывался «AWG Proton» — бейдж врал о том, чей это сервер (G54).
+            protonAttempt -> TRANSPORT_AWG_PROTON
             // Признак — источник профилей, а не поле попытки: `importedConfigHost`
             // заполняется и у встроенных семян (там это просто хост verified-конфига),
             // и по нему встроенный WARP подписывался бы как AWG.
-            ClientData(this).isImportedConfigSourceActive() -> TRANSPORT_AWG
+            clientData.isImportedConfigSourceActive() -> TRANSPORT_AWG
             else -> TRANSPORT_WARP
         }
         if (currentTransportLabel != label) {
@@ -2896,7 +3016,7 @@ class NovaVpnService : OperaNativeVpnService() {
         if (currentState != STATE_CONNECTING) return false
         val connectivityManager = getSystemService(android.net.ConnectivityManager::class.java) ?: return false
         val currentVpn = findCurrentVpnNetwork(connectivityManager) ?: return false
-        if (!isLikelyNovaVpnNetwork(connectivityManager, currentVpn)) return false
+        if (!isVpnNetworkNotForeign(connectivityManager, currentVpn)) return false
 
         val clientData = ClientData(this)
         val expectedBackendHint = currentBackendLabel.ifBlank { clientData.getServiceBackend() }.takeIf { it.isNotBlank() }
@@ -4018,6 +4138,26 @@ class NovaVpnService : OperaNativeVpnService() {
             val failedAdaptationAttempts = mutableListOf<ConnectionAttempt>()
             val deferredMasqueAttempts = mutableListOf<ConnectionAttempt>()
             val successfulAdaptationKeys = linkedSetOf<String>()
+            // Кандидатные `I1` выдаются до прогона, а решает их судьбу сам прогон:
+            // профиль либо даёт на новом имени data-plane, либо возвращается к
+            // прежнему. Прогон при этом остаётся один — второго захода по тем же
+            // пятидесяти профилям не появляется.
+            val adaptationI1Candidates = if (adaptToNetwork && !qualityDiagnostics) {
+                // Подбор — надстройка над замером, а не его условие. Если он не
+                // соберётся, адаптация обязана пройти без него, а не упасть целиком:
+                // замеры пятидесяти профилей стоят двадцати минут, и терять их
+                // из-за необязательной части нельзя. Молча не глотаем (I4).
+                runCatching { assignAdaptationI1Candidates(selectedAttempts, clientData) }
+                    .onFailure { error ->
+                        LogManager.log(
+                            "Адаптация I1: подготовка кандидатов не удалась (${error.javaClass.simpleName}: " +
+                                "${error.message}). Прогон продолжаем без подбора."
+                        )
+                    }
+                    .getOrDefault(emptyList())
+            } else {
+                emptyList()
+            }
             var latestMasqueIdentityJsonForAdaptation = masqueIdentityJsonForDiscovery
             var masqueIdentityAvailableForAdaptation =
                 preparedMasqueIdentityForDiscovery != null &&
@@ -4467,6 +4607,24 @@ class NovaVpnService : OperaNativeVpnService() {
                 }
             }
             closeActiveInterface()
+            // Судьба кандидатных `I1` решается после всех заходов: профиль мог не
+            // подняться в основном проходе и подняться во втором, по SNI или по
+            // портам, — тогда подобранное имя честно заработало.
+            runCatching {
+                resolveAdaptationI1Candidates(
+                    candidates = adaptationI1Candidates,
+                    successfulKeys = successfulAdaptationKeys,
+                    clientData = clientData,
+                )
+            }.onFailure { error ->
+                // Здесь потеря дороже: неснятый кандидат остался бы в файле подбора
+                // непроверенным. Поэтому — громко, чтобы это увидели.
+                LogManager.log(
+                    "Адаптация I1: не удалось подвести итог по кандидатам " +
+                        "(${error.javaClass.simpleName}: ${error.message}). " +
+                        "Непроверенные подборы могли остаться — следующий прогон их пересмотрит."
+                )
+            }
             val finalSnapshot = clientData.getWarpDiscoverySnapshot()
             val diagnosticsSummary = if (qualityDiagnostics && !warpConfigDiscoveryStopRequested.get()) {
                 summarizeWarpQualityDiagnostics(diagnosticEntries)
@@ -5385,10 +5543,15 @@ class NovaVpnService : OperaNativeVpnService() {
                         if (shouldPauseConnectForMissingUnderlying(clientData, "перехода из MASQUE в WireGuard fallback")) {
                             return
                         }
-                        clientData.markMasqueTransportFailure()
+                        // Отказ засчитывается только за настоящую попытку. Фаза,
+                        // вышедшая на пороге (выбран другой транспорт), к MASQUE
+                        // отношения не имеет, а её «провалы» копились в счётчике и
+                        // потом отменяли явный выбор MASQUE без единой попытки.
+                        if (!masquePhaseSkipped) clientData.markMasqueTransportFailure()
                         if (
                             masqueIdentityRejected ||
                             !masqueChosenExplicitly ||
+                            masquePhaseSkipped ||
                             masqueCycle >= MASQUE_EXPLICIT_CYCLE_LIMIT
                         ) {
                             break
@@ -5433,7 +5596,16 @@ class NovaVpnService : OperaNativeVpnService() {
                         stopSelf()
                         return
                     }
-                    LogManager.log("MASQUE не дал стабильного трафика. Переходим к WireGuard fallback.")
+                    // Пропущенная фаза — не сорвавшаяся. «Не дал стабильного трафика»
+                    // над строкой «MASQUE пропущен: выбран RU» читается как отказ
+                    // транспорта, которого не было: попыток не делали ни одной.
+                    LogManager.log(
+                        if (masquePhaseSkipped) {
+                            "MASQUE не пробовали — выбран другой транспорт. Идём сразу на WireGuard/AWG."
+                        } else {
+                            "MASQUE не дал стабильного трафика. Переходим к WireGuard fallback."
+                        }
+                    )
                 } else if (skipMasqueForCooldown && masqueIdentity != null) {
                     LogManager.log(
                         "MASQUE временно пропускаем: на этой сети он недавно дал $masqueFailureCount " +
@@ -5508,7 +5680,7 @@ class NovaVpnService : OperaNativeVpnService() {
             } else {
                 emptyList()
             }
-            val primaryWarpAttempts = if (importedProtocolModeActive) {
+            val primaryWarpAttempts = if (importedProtocolModeActive || clientData.isProtonSourceActive()) {
                 buildUserImportedWarpAttemptSet(primaryRankedAttempts, clientData)
             } else {
                 buildBuiltInWarpAttemptSet(
@@ -5616,22 +5788,37 @@ class NovaVpnService : OperaNativeVpnService() {
                     "before primary attempt cycle."
             )
 
-            if (importedProtocolModeActive && primaryWarpAttempts.isEmpty()) {
+            // Условие то же, что и у входа в собственный список (`ownListModeActive`).
+            // Пока здесь стоял один только режим импортированных, пустая очередь Proton
+            // проходила мимо: туннель поднимался, попыток в нём не было, MASQUE и Opera
+            // отказывались по своим правилам — и цикл уходил в вечное
+            // автопереподключение с «ПОДКЛЮЧЕНИЕ… AWG Proton» на экране и без единого
+            // объяснения (I4).
+            val protonModeActive = clientData.isProtonSourceActive()
+            if ((importedProtocolModeActive || protonModeActive) && primaryWarpAttempts.isEmpty()) {
                 val selectedProtocol = forcedImportedProtocol?.uppercase(Locale.US) ?: "AUTO"
                 LogManager.log(
-                    "USER WARP: режим импортированных конфигураций ($selectedProtocol), " +
-                        "но shortlist пуст. Прерываем цикл без fallback на обычный WARP."
+                    if (protonModeActive && !importedProtocolModeActive) {
+                        "USER WARP: выбран AWG Proton, но shortlist пуст. Прерываем цикл " +
+                            "без fallback на обычный WARP."
+                    } else {
+                        "USER WARP: режим импортированных конфигураций ($selectedProtocol), " +
+                            "но shortlist пуст. Прерываем цикл без fallback на обычный WARP."
+                    }
                 )
                 // Остановка без объяснения читается как «подключение само выключилось»:
                 // на экране пара секунд «ПОДКЛЮЧЕНИЕ…» и сразу «НЕ ПОДКЛЮЧЕНО». Причина
                 // была только в журнале, куда пользователь не смотрит.
                 publishTransportNotice(
                     clientData,
-                    if (forcedImportedProtocol != null) {
-                        "Среди импортированных профилей нет протокола $selectedProtocol. " +
-                            "Выберите другой протокол или импортируйте профили."
-                    } else {
-                        "Импортированных профилей для подключения не осталось."
+                    when {
+                        protonModeActive && !importedProtocolModeActive ->
+                            "Профилей Proton для подключения не осталось. Выберите регион " +
+                                "AWG Proton заново, чтобы выпустить их."
+                        forcedImportedProtocol != null ->
+                            "Среди импортированных профилей нет протокола $selectedProtocol. " +
+                                "Выберите другой протокол или импортируйте профили."
+                        else -> "Импортированных профилей для подключения не осталось."
                     },
                     keepOnStop = true,
                 )
@@ -9309,9 +9496,13 @@ class NovaVpnService : OperaNativeVpnService() {
         val matchingConfig = findMatchingWarpVerifiedConfigForAttempt(attempt, clientData)
             ?: return emptyList()
 
-        val allExtras = extractSupportedAwgInterfaceLines(
-            rawConfig = matchingConfig.rawConfig,
-            includeHandshakePayloads = true,
+        val allExtras = applyAdaptedI1(
+            extras = extractSupportedAwgInterfaceLines(
+                rawConfig = matchingConfig.rawConfig,
+                includeHandshakePayloads = true,
+            ),
+            config = matchingConfig,
+            clientData = clientData,
         )
         val extras = if (clientData.isAwgJunkDisabled()) {
             // Опыт по проблеме 5: мы шлём по Jc мусорных пакетов перед каждым
@@ -9335,6 +9526,135 @@ class NovaVpnService : OperaNativeVpnService() {
             )
         }
         return extras
+    }
+
+    /**
+     * Один шаг фонового подбора `I1`.
+     *
+     * Шаг не ходит в сеть: он строит поддельный QUIC Initial с новым именем и
+     * кладёт его в файл. Проверит подобранное обычное подключение — то самое, что
+     * и так случится. Поэтому обещание «не нагружая батарею» здесь не намерение,
+     * а свойство: тратить нечего.
+     *
+     * Когда именно шагать, решает [AwgI1Adaptation] — чистый объект без
+     * `Context`, времени и ввода-вывода, поэтому правила проверяются тестами, а
+     * не наблюдением за телефоном по полчаса.
+     */
+    private fun runAwgI1AdaptationStep(clientData: ClientData) {
+        if (!clientData.isAwgI1AdaptationEnabled()) return
+        val nowMs = System.currentTimeMillis()
+        val screenOffMs = screenOffSinceUptimeMs
+            ?.let { SystemClock.uptimeMillis() - it }
+            ?: 0L
+        // Сроки проверяем до сборки списка: сюда приходят раз в минуту вместе с
+        // сердцебиением, а список стоит разбора пятидесяти конфигураций.
+        if (
+            !AwgI1Adaptation.isStepDue(
+                enabled = true,
+                connected = currentState == STATE_CONNECTED,
+                screenOffMs = screenOffMs,
+                sinceLastStepMs = nowMs - clientData.getAwgI1LastStepAt(),
+            )
+        ) {
+            return
+        }
+        val overrides = clientData.getAwgI1Overrides()
+        // Счётчик берётся из отдельной карты, а не из записи: снятый подбор запись
+        // удаляет, а число уже опробованных имён обязано пережить это.
+        val triedCounts = clientData.getAwgI1AttemptCounts()
+        val profiles = clientData.getWarpVerifiedConfigs()
+            .filter { clientData.isBundledSeed(it) && !it.engine.equals("masque", ignoreCase = true) }
+            .map { config ->
+                val override = overrides[config.id]
+                val firmwareI1 = extractSupportedAwgInterfaceLines(
+                    rawConfig = config.rawConfig,
+                    includeHandshakePayloads = true,
+                ).firstOrNull { it.substringBefore('=').trim().equals("I1", ignoreCase = true) }
+                AwgI1Adaptation.Profile(
+                    id = config.id,
+                    score = clientData.getWarpVerifiedQualityTier(config),
+                    adaptedSni = override?.sni.orEmpty(),
+                    attempts = triedCounts[config.id] ?: override?.attempts ?: 0,
+                    quicI1 = firmwareI1 != null && AwgI1Adaptation.isQuicInitial(firmwareI1),
+                )
+            }
+        val step = AwgI1Adaptation.decide(
+            AwgI1Adaptation.Inputs(
+                enabled = true,
+                connected = currentState == STATE_CONNECTED,
+                screenOffMs = screenOffMs,
+                sinceLastStepMs = nowMs - clientData.getAwgI1LastStepAt(),
+                profiles = profiles,
+                // Сверху проверенные имена, дальше большой российский список —
+                // тот же порядок, что у маскировки SNI.
+                sniPool = clientData.getSniMaskPools().let { it.white + it.russia },
+            )
+        ) ?: return
+
+        val i1 = ProtonQuicInitial.buildI1(step.sni)
+        if (i1.isBlank()) {
+            LogManager.log("Фоновый подбор I1: пакет для ${step.sni} не собрался, шаг пропущен.")
+            return
+        }
+        clientData.saveAwgI1Override(step.profileId, step.sni, i1, nowMs)
+        LogManager.log(
+            "Фоновый подбор I1: профилю ${step.profileId} назначен домен ${step.sni}. " +
+                "Проверит следующее подключение."
+        )
+    }
+
+    /**
+     * Подставляет подобранный в фоне `I1` вместо зашитого в профиль.
+     *
+     * Только для встроенных семян: у профиля пользователя `I1` — его собственный
+     * выбор, и подменять его нельзя (I1 в смысле инварианта — тоже). Текст самого
+     * профиля при этом не трогается (I6): подмена живёт в отдельном файле, и
+     * всегда видно, что пришло из прошивки, а что подобрано.
+     */
+    private fun applyAdaptedI1(
+        extras: List<String>,
+        config: WarpVerifiedConfig,
+        clientData: ClientData,
+    ): List<String> {
+        if (!clientData.isBundledSeed(config)) return extras
+        val override = clientData.getAwgI1Overrides()[config.id] ?: return extras
+        val firmwareI1 = extras.firstOrNull {
+            it.substringBefore('=').trim().equals("I1", ignoreCase = true)
+        }
+        // Второй заслон к отбору в AwgI1Adaptation.decide. Файл подбора намеренно
+        // переживает обновление приложения, поэтому запись, сделанная версией без
+        // этой проверки, иначе применялась бы к SIP-семени вечно.
+        if (firmwareI1 != null && !AwgI1Adaptation.isQuicInitial(firmwareI1)) {
+            LogManager.log(
+                "AWG I1 для ${config.host}:${config.port} подобран (${override.sni}), но прикрытие " +
+                    "профиля не QUIC (${describeI1Value(firmwareI1)}). Подмену не применяем: она " +
+                    "оставила бы профиль с QUIC-инициалом и ответом SIP в I2."
+            )
+            return extras
+        }
+        LogManager.log(
+            "AWG I1 подобран для ${config.host}:${config.port}: домен ${override.sni}."
+        )
+        // Подпись значений, а не сами значения: без неё в журнале видно только
+        // намерение подставить, но не то, что подставилось, — а именно здесь подбор
+        // либо доезжает до рукопожатия, либо тихо теряется.
+        LogManager.log(
+            "AWG I1 подмена: из прошивки ${firmwareI1?.let(::describeI1Value) ?: "своего I1 нет"}, " +
+                "подставляем ${describeI1Value(override.i1)}."
+        )
+        return AwgI1Adaptation.applyI1(extras, override.i1)
+    }
+
+    /**
+     * Компактная подпись значения `I1` — длина и начало.
+     *
+     * Целиком его печатать нельзя: полторы тысячи шестнадцатеричных знаков в журнале
+     * не читает никто, а отличить подобранный пакет от зашитого в прошивку надо.
+     */
+    private fun describeI1Value(value: String): String {
+        val hex = value.substringAfter("0x", "").substringBefore('>').trim()
+        if (hex.isEmpty()) return "значение не разобрано"
+        return "${hex.length / 2} Б, начало ${hex.take(16)}"
     }
 
     private fun extractSupportedAwgInterfaceLines(
@@ -9368,6 +9688,49 @@ class NovaVpnService : OperaNativeVpnService() {
         aggressiveFastStart: Boolean = false,
         exhaustiveCandidates: Boolean = false,
     ): Int {
+        masquePhaseSkipped = false
+        // В режиме «только импортированные» выбор — это протокол, а не регион.
+        //
+        // Список регионов там не показывается вовсе, поэтому оставшийся с прошлого
+        // раза «ru»/«eu»/«proton» не выбор, а мусор, сменить который пользователю
+        // физически нечем. Пока правило читалось из региона, импортированный
+        // MASQUE-профиль не получал ни одной попытки: фаза выходила по чужому
+        // региону, круг считал это провалом и служба останавливалась с
+        // «MASQUE не подключился» — то есть явный выбор отменялся молча (I1).
+        val importedSourceActive = clientData.isImportedConfigSourceActive()
+        // Кнопка «попробовать MASQUE» — это и есть явный выбор, на одно подключение.
+        // Отказывать ей по региону значило бы отменять то, о чём пользователь только
+        // что попросил вручную.
+        val manualMasqueStep = manualMasqueStepGenerationId == connectGenerationId
+        val transportChoiceBlocksMasque = !importedSourceActive && !manualMasqueStep
+        // Выбран AWG Proton — MASQUE за него не подставляем (I1).
+        //
+        // Проверка стоит здесь, а не в трёх местах вызова: MASQUE входит в цепочку
+        // с трёх разных сторон, и правило, размноженное по ним, разъезжается (G20).
+        // Молча выйти нельзя (I4) — иначе «Proton не подключился» выглядело бы как
+        // успех MASQUE, что на устройстве уже и наблюдалось: очередь Proton ещё
+        // перебиралась, а сессию успевал занять MASQUE-ZT на 8443.
+        if (transportChoiceBlocksMasque && clientData.isProtonSourceActive()) {
+            LogManager.log(
+                "MASQUE пропущен: выбран AWG Proton. Явный выбор пользователя другим " +
+                    "транспортом не подменяем."
+            )
+            masquePhaseSkipped = true
+            return 0
+        }
+        // То же правило для остальных названных транспортов. Проверка нужна отдельно
+        // от MasqueStartPolicy: та решает лишь «идти ли MASQUE первым», а в цепочку он
+        // входит и мимо неё — при выбранном WARP цикл всё равно начинался с
+        // «Пробуем MASQUE / HTTP3».
+        val regionPreference = clientData.getExitRegionPreference()
+        if (transportChoiceBlocksMasque && !RegionTransportPolicy.allowsMasqueTransport(regionPreference)) {
+            LogManager.log(
+                "MASQUE пропущен: выбран ${regionPreference.trim().uppercase(Locale.US)}. " +
+                    "Явный выбор пользователя другим транспортом не подменяем."
+            )
+            masquePhaseSkipped = true
+            return 0
+        }
         var activeMasqueIdentity = identity
         // Метку ставим до первой попытки: интерфейс туннеля собирается раньше,
         // чем начинается перебор, и сбой на этом шаге тоже должен засчитаться
@@ -9969,6 +10332,9 @@ class NovaVpnService : OperaNativeVpnService() {
                     var connectivityProbeAttempts = 0
                     var connectivityProbeSucceeded = false
                     var connectivityProbeSuccessCount = 0
+                    // Отказы пробы считаем отдельно: счётчики трафика — замена
+                    // отсутствующему ответу пробы, а не возражение против её «нет».
+                    var connectivityProbeFailures = 0
                     var connectivityProbeLastAtMs = 0L
                     var earlyMasqueProbeAttempted = false
                     var validationSignalLogged = false
@@ -10156,6 +10522,7 @@ class NovaVpnService : OperaNativeVpnService() {
                                 LogManager.log("Tunnel-probe через VPN прошёл для $modeLabel@$currentPort.")
                             }
                         } else {
+                            connectivityProbeFailures += 1
                             LogManager.log("Tunnel-probe через VPN не прошёл для $modeLabel@$currentPort.")
                         }
                     }
@@ -10195,13 +10562,26 @@ class NovaVpnService : OperaNativeVpnService() {
                             sustainedInbound &&
                             tunnelStats.rxBytes >= 8_192L &&
                             tunnelStats.txBytes >= 4_096L
+                    // Единственная ветка готовности, у которой нет ни системного
+                    // `VALIDATED`, ни успешной пробы, — значит порог обязан быть
+                    // высоким, а отрицательный вердикт пробы обязан её отменять.
+                    //
+                    // Дефект, который это чинит: при выбранном Proton профиль
+                    // объявлялся подключённым по `rx=15912, tx=19178`, сквозная
+                    // проба тут же дважды говорила «не прошёл», и пользователь
+                    // получал туннель, через который не идёт ничего: `ping` 0/6,
+                    // `curl` в таймаут. Восемь килобайт набирают сами рукопожатия и
+                    // мусор `Jc`/`I1` — в `rx_bytes` они и попадают (G15). Порог
+                    // выровнен со `strongBidirectionalTrafficReady`.
+                    val probeSaidNo = connectivityProbeSuccessCount == 0 && connectivityProbeFailures > 0
                     val importedRawValidatedTrafficReady =
                         transportMode.engine != "masque" &&
                             currentAttempt.importedConfigHost != null &&
                             transportMode.preferImportedRawIdentity &&
                             handshakeReady &&
-                            tunnelStats.rxBytes >= 8_192L &&
-                            tunnelStats.txBytes >= 8_192L
+                            !probeSaidNo &&
+                            tunnelStats.rxBytes >= 32_768L &&
+                            tunnelStats.txBytes >= 32_768L
                     if (legacyValidatedTrafficReady && !legacyValidatedTrafficLogged) {
                         legacyValidatedTrafficLogged = true
                         LogManager.log(
@@ -10215,9 +10595,12 @@ class NovaVpnService : OperaNativeVpnService() {
                         legacyValidatedTrafficLogged = true
                         noteImportedExactAwgTrafficProof(rawTunnelStats)
                         LogManager.log(
-                            "$modeLabel@$currentPort дал системный VALIDATED и устойчивый двусторонний " +
-                                "traffic на imported raw-profile " +
-                                "(rx=${tunnelStats.rxBytes}, tx=${tunnelStats.txBytes}). " +
+                            // Прежняя формулировка обещала «системный VALIDATED», которого
+                            // это условие не проверяет вовсе. Читать журнал, где написано
+                            // не то, что проверено, — хуже, чем не читать его.
+                            "$modeLabel@$currentPort дал устойчивый двусторонний traffic на " +
+                                "imported raw-profile (rx=${tunnelStats.rxBytes}, tx=${tunnelStats.txBytes}), " +
+                                "и сквозная проба не возражала. " +
                                 "Для exact imported AWG считаем это достаточным data-plane подтверждением."
                         )
                     }
@@ -10581,6 +10964,10 @@ class NovaVpnService : OperaNativeVpnService() {
                                 // смениться цикл подключения и обнулить её, а бейдж
                                 // берёт значение именно из этой публикации.
                                 setCurrentTransportForAttempt(currentAttempt)
+                                // Имя, на котором сессия действительно поднялась,
+                                // запоминается для этой сети: следующий раз оно
+                                // пойдёт первым и перебор не начнётся с нуля.
+                                rememberSuccessfulSni(currentAttempt)
                                 broadcastState(STATE_CONNECTED)
                             } else {
                                 LogManager.log(
@@ -11580,7 +11967,7 @@ class NovaVpnService : OperaNativeVpnService() {
         val connectivityManager = getSystemService(android.net.ConnectivityManager::class.java) ?: return
         val currentVpn = findCurrentVpnNetwork(connectivityManager)
         val selectedUnderlying = selectUnderlyingNetwork(connectivityManager)
-        val currentVpnIsNova = isLikelyNovaVpnNetwork(connectivityManager, currentVpn)
+        val currentVpnIsNova = isVpnNetworkNotForeign(connectivityManager, currentVpn)
         if (currentState == STATE_STOPPED) {
             connectedHealthProbeFailures = 0
             resetConnectedWarpHealthWindow()
@@ -12254,7 +12641,7 @@ class NovaVpnService : OperaNativeVpnService() {
                 importedExactAwgActive &&
                 !requiresFreshTunnelProbeNow() &&
                 currentVpn != null &&
-                isLikelyNovaVpnNetwork(connectivityManager, currentVpn)
+                isVpnNetworkNotForeign(connectivityManager, currentVpn)
             ) {
                 observeImportedExactAwgTrafficProof()
             } else {
@@ -12262,7 +12649,7 @@ class NovaVpnService : OperaNativeVpnService() {
             }
         if (
             currentVpn != null &&
-            isLikelyNovaVpnNetwork(connectivityManager, currentVpn) &&
+            isVpnNetworkNotForeign(connectivityManager, currentVpn) &&
             if (importedExactAwgActive) {
                 importedExactAwgProof ||
                     hasTunnelConnectivity(currentVpn, probeTimeout, allowHttpDnsFallback = true)
@@ -12294,7 +12681,7 @@ class NovaVpnService : OperaNativeVpnService() {
             if (shouldRecordWarpHealthWindow &&
                 warpBackend &&
                 currentVpn != null &&
-                isLikelyNovaVpnNetwork(connectivityManager, currentVpn)
+                isVpnNetworkNotForeign(connectivityManager, currentVpn)
             ) {
                 recordConnectedWarpHealthProbe(success = false)
             } else {
@@ -12374,7 +12761,7 @@ class NovaVpnService : OperaNativeVpnService() {
             )
             return
         }
-        if (currentVpn != null && isLikelyNovaVpnNetwork(connectivityManager, currentVpn)) {
+        if (currentVpn != null && isVpnNetworkNotForeign(connectivityManager, currentVpn)) {
             if (!forceImmediateRecovery) {
                 connectedHealthProbeFailures += 1
                 val requiredFailures = healthReconnectFailureThreshold(health.reason)
@@ -12400,7 +12787,7 @@ class NovaVpnService : OperaNativeVpnService() {
         }
 
         if (!clientData.getAutoReconnect()) {
-            if (currentVpn != null && isLikelyNovaVpnNetwork(connectivityManager, currentVpn)) {
+            if (currentVpn != null && isVpnNetworkNotForeign(connectivityManager, currentVpn)) {
                 LogManager.log(
                     if (health.currentVpn == null) {
                         "Подложная сеть пропала, авто-реконнект выключен. Полностью снимаем VPN-стек с delayed detach."
@@ -14862,18 +15249,25 @@ class NovaVpnService : OperaNativeVpnService() {
         if (attempts.isEmpty()) return attempts
 
         val importedProtocolModeActive = clientData.isImportedConfigSourceActive()
+        // Оба режима означают одно и то же для перебора: список пользователя вместо
+        // встроенного пула. Условие входа и условие выхода обязаны совпадать, иначе
+        // провал собственного списка тихо уводит цикл на встроенный WARP (G19).
+        val ownListModeActive = importedProtocolModeActive || clientData.isProtonSourceActive()
         val forcedImportedProtocol = clientData.resolveEffectiveImportedProtocol()
             .takeIf { importedProtocolModeActive && !it.equals("auto", ignoreCase = true) }
         val userImportedAttempts = buildUserImportedWarpAttemptSet(
             attempts,
             clientData,
-            limit = if (importedProtocolModeActive) attempts.size.coerceAtLeast(1) else 8,
+            limit = if (ownListModeActive) attempts.size.coerceAtLeast(1) else 8,
         )
-        if (importedProtocolModeActive && userImportedAttempts.isEmpty()) {
-            val selectedProtocol = forcedImportedProtocol?.uppercase(Locale.US) ?: "AUTO"
+        if (ownListModeActive && userImportedAttempts.isEmpty()) {
+            val selectedProtocol = when {
+                clientData.isProtonSourceActive() -> "AWG PROTON"
+                else -> forcedImportedProtocol?.uppercase(Locale.US) ?: "AUTO"
+            }
             LogManager.log(
-                "USER WARP: режим импортированных конфигураций ($selectedProtocol), " +
-                    "но подходящих импортированных профилей нет. Обычный WARP-пул не используем."
+                "USER WARP: режим собственных конфигураций ($selectedProtocol), " +
+                    "но подходящих профилей нет. Обычный WARP-пул не используем."
             )
             return emptyList()
         }
@@ -15040,15 +15434,30 @@ class NovaVpnService : OperaNativeVpnService() {
         limit: Int = 8,
     ): List<ConnectionAttempt> {
         if (attempts.isEmpty()) return emptyList()
+        val protonModeActive = clientData.isProtonSourceActive()
         val importedProtocolModeActive = clientData.isImportedConfigSourceActive()
-        if (!importedProtocolModeActive) {
+        if (!importedProtocolModeActive && !protonModeActive) {
             return emptyList()
         }
+        // В режиме Proton выбор протокола не участвует: он относится к тому, что
+        // принёс пользователь, а здесь семейство одно и оно наше.
         val forcedImportedProtocol = clientData.resolveEffectiveImportedProtocol()
-            .takeIf { importedProtocolModeActive && !it.equals("auto", ignoreCase = true) }
+            .takeIf { importedProtocolModeActive && !protonModeActive && !it.equals("auto", ignoreCase = true) }
 
         val importedConfigs = mergedVerifiedWarpConfigs(clientData)
             .filter { it.userImported && !it.manual && !it.engine.equals("masque", ignoreCase = true) }
+            // Выбран Proton — в очередь идут только его узлы.
+            //
+            // Профили Proton помечены `userImported`, как и всё, что принёс
+            // пользователь, поэтому без этого условия его собственные сторонние
+            // AWG-профили оказывались в одной очереди с ними — и вперёд, потому что
+            // сортировка начинается с `promotedAt`, а у профилей Proton он всегда 0.
+            // Побеждал чужой узел, а бейдж всё равно писал «AWG Proton: NL»: явный
+            // выбор подменялся молча (I1) и при этом врал о транспорте.
+            .filter { config ->
+                !protonModeActive ||
+                    config.endpointSource.equals(ProtonProfileStore.ENDPOINT_SOURCE, ignoreCase = true)
+            }
             .filter { config ->
                 forcedImportedProtocol == null || clientData.inferImportedProtocolFamily(config) == forcedImportedProtocol
             }
@@ -15086,7 +15495,7 @@ class NovaVpnService : OperaNativeVpnService() {
         }
         fun fallbackModeTemplate(config: WarpVerifiedConfig): TransportMode {
             val normalizedMode = config.mode.lowercase()
-            val explicitAwgImport = config.userImported && hasExplicitAwgImport(config.rawConfig)
+            val explicitAwgImport = isExactImportedProfile(config)
             // Первым идёт собственный порт профиля — см. пояснение ниже по коду о том,
             // почему подобранный по статистике порт стоил импортированному профилю
             // его же ключей и параметров обфускации.
@@ -15126,7 +15535,7 @@ class NovaVpnService : OperaNativeVpnService() {
 
         val selected = linkedSetOf<ConnectionAttempt>()
         for (config in importedConfigs) {
-            val explicitAwgImport = config.userImported && hasExplicitAwgImport(config.rawConfig)
+            val explicitAwgImport = isExactImportedProfile(config)
             fun applyImportedModeOverrides(mode: TransportMode): TransportMode {
                 if (!explicitAwgImport) return mode
                 return mode.copy(
@@ -15197,6 +15606,10 @@ class NovaVpnService : OperaNativeVpnService() {
                 if (existingAttempt != null) {
                     val adjusted = existingAttempt.copy(
                         mode = applyImportedModeOverrides(existingAttempt.mode),
+                        // Источник берётся у профиля, а не у подобранной попытки: по нему
+                        // подписывается транспорт, и попытка, найденная по совпадению
+                        // хоста и порта, принесла бы сюда чужую метку.
+                        endpointSource = config.endpointSource.ifBlank { existingAttempt.endpointSource },
                         importedConfigHost = config.host,
                         preferredSni = config.preferredSni.takeIf { it.isNotBlank() }
                             ?: existingAttempt.preferredSni,
@@ -15399,12 +15812,61 @@ class NovaVpnService : OperaNativeVpnService() {
     }
 
     private fun mergedVerifiedWarpConfigs(clientData: ClientData, scope: String? = null): List<WarpVerifiedConfig> {
-        return (clientData.getWarpVerifiedExportSnapshot(scope) + clientData.getWarpVerifiedConfigs(scope))
-            .distinctBy { it.id }
+        return (
+            protonVerifiedConfigs(clientData) +
+                clientData.getWarpVerifiedExportSnapshot(scope) +
+                clientData.getWarpVerifiedConfigs(scope)
+            ).distinctBy { it.id }
+    }
+
+    /**
+     * Proton-профили в виде записей перебора — и только когда выбран сам регион.
+     *
+     * Подмешиваются в общую точку слияния, а не в четырёх местах вызова: пока
+     * решение о том, что попадает в очередь, принималось в каждом вызове отдельно,
+     * исправление одного из них выглядело полным, а три остальных продолжали
+     * решать по-старому (G20).
+     *
+     * Короткий кэш здесь потому, что точка вызывается на каждую попытку, а список
+     * лежит в файле: без него один цикл подключения читал бы его десятки раз.
+     */
+    private fun protonVerifiedConfigs(clientData: ClientData): List<WarpVerifiedConfig> {
+        if (!clientData.isProtonSourceActive()) return emptyList()
+        val nowMs = SystemClock.elapsedRealtime()
+        val cached = cachedProtonConfigs
+        if (cached != null && nowMs - cachedProtonConfigsAt < PROTON_CONFIG_CACHE_MS) return cached
+        val store = ProtonProfileStore(this)
+        val account = store.readAccount()
+        val configs = if (account == null) {
+            emptyList()
+        } else {
+            ProtonProfileStore.toVerifiedConfigs(store.readProfiles(), account.wireGuardPrivateKey)
+        }
+        cachedProtonConfigs = configs
+        cachedProtonConfigsAt = nowMs
+        return configs
     }
 
     private fun hasExplicitAwgImport(rawConfig: String): Boolean {
         return Regex("(?im)^(Jc|Jmin|Jmax|S[1-4]|H[1-4]|I[1-5])\\s*=").containsMatchIn(rawConfig)
+    }
+
+    /**
+     * Профиль, который надо применить ровно как есть.
+     *
+     * Признак — не только параметры AWG, но и **собственная личность** в тексте:
+     * `PrivateKey` вместе с `[Peer] PublicKey`. Пока условием были одни AWG-строки,
+     * обычный WireGuard-профиль без обфускации подключался ключами собственной
+     * регистрации Nova: снаружи «профиль подключился», а работал совсем другой.
+     * Так выглядит, например, конфиг с proton-generator.github.io, если выключить
+     * в нём AWG 1.0 и 2.0 — там остаётся чистый WireGuard с ключами Proton.
+     *
+     * Предикат один на все места вызова намеренно: правило, размноженное по
+     * четырём точкам, уже расходилось между ними (G20).
+     */
+    private fun isExactImportedProfile(config: WarpVerifiedConfig): Boolean {
+        if (!config.userImported) return false
+        return hasExplicitAwgImport(config.rawConfig) || hasImportedWireGuardIdentity(config.rawConfig)
     }
 
     private fun hasImportedHandshakePayload(rawConfig: String): Boolean {
@@ -15434,17 +15896,21 @@ class NovaVpnService : OperaNativeVpnService() {
     ): List<ConnectionAttempt> {
         if (attempts.isEmpty() || importedAttempts.isEmpty() || limit <= 0) return emptyList()
         val importedProtocolModeActive = clientData.isImportedConfigSourceActive()
-        if (!importedProtocolModeActive) return emptyList()
+        val protonModeActive = clientData.isProtonSourceActive()
+        if (!importedProtocolModeActive && !protonModeActive) return emptyList()
         val forcedImportedProtocol = clientData.resolveEffectiveImportedProtocol()
-            .takeIf { importedProtocolModeActive && !it.equals("auto", ignoreCase = true) }
-        if (importedProtocolModeActive) {
+            .takeIf { importedProtocolModeActive && !protonModeActive && !it.equals("auto", ignoreCase = true) }
+        run {
             val forced = importedAttempts
                 .distinctBy { attemptExactKey(it) }
                 .take(limit)
             if (forced.isNotEmpty()) {
-                val selectedProtocol = forcedImportedProtocol?.uppercase(Locale.US) ?: "AUTO"
+                val selectedProtocol = when {
+                    protonModeActive -> "AWG PROTON"
+                    else -> forcedImportedProtocol?.uppercase(Locale.US) ?: "AUTO"
+                }
                 LogManager.log(
-                    "USER WARP: режим импортированных конфигураций ($selectedProtocol), используем " +
+                    "USER WARP: режим собственных конфигураций ($selectedProtocol), используем " +
                         forced.joinToString(",") { attemptLogLabel(it) }
                 )
             }
@@ -16534,6 +17000,145 @@ class NovaVpnService : OperaNativeVpnService() {
         return selected.toList()
     }
 
+    /**
+     * Кандидатный `I1`, выданный профилю на время ручной адаптации.
+     *
+     * Хранится прежнее значение, потому что кандидат остаётся только если профиль
+     * на нём прошёл data-plane. Не прошёл — возвращаем как было: адаптация не имеет
+     * права оставлять изменение, которое себя не подтвердило.
+     */
+    private data class AdaptationI1Candidate(
+        val profileId: String,
+        val attemptKey: String,
+        val host: String,
+        val port: Int,
+        val sni: String,
+        val previous: ClientData.AwgI1Override?,
+    )
+
+    /**
+     * Выдаёт кандидатные `I1` перед ручной адаптацией.
+     *
+     * Трогаются только встроенные семена с QUIC-прикрытием и только те, у кого
+     * сейчас нет рабочего data-plane ([AwgI1Adaptation.deservesManualI1Candidate]).
+     * Рабочий профиль остаётся с тем `I1`, на котором он работает. Меняется ровно
+     * один ключ — `I1`; `I2..I5`, `Jc` и `S/H` не трогаются, пустое значение не
+     * записывается никогда.
+     */
+    private fun assignAdaptationI1Candidates(
+        attempts: List<ConnectionAttempt>,
+        clientData: ClientData,
+    ): List<AdaptationI1Candidate> {
+        // Выключенный переключатель уважаем — это тоже выбор пользователя, — но молча
+        // не уходим (I4): иначе «подбор не сработал» и «подбор выключен» выглядят
+        // одинаково, а это разные вещи и лечатся по-разному.
+        if (!clientData.isAwgI1AdaptationEnabled()) {
+            LogManager.log(
+                "Адаптация I1: подбор выключен в настройках, меняем только замеры. " +
+                    "Включите «Адаптация к сети в фоновом режиме», чтобы подбирать имена."
+            )
+            return emptyList()
+        }
+        val pool = clientData.getSniMaskPools()
+            .let { it.white + it.russia }
+            .map(SniMaskPolicy::normalizeHost)
+            .filter { it.isNotBlank() }
+            .distinct()
+        if (pool.isEmpty()) {
+            LogManager.log("Адаптация I1: список имён пуст, подбирать нечего.")
+            return emptyList()
+        }
+        val overrides = clientData.getAwgI1Overrides()
+        // См. фоновый шаг: счётчик попыток живёт отдельно от записи именно потому,
+        // что неподтверждённый подбор снимается, а перебор имён обязан идти дальше.
+        val triedCounts = clientData.getAwgI1AttemptCounts()
+        val assigned = mutableListOf<AdaptationI1Candidate>()
+        attempts.forEach { attempt ->
+            val config = findMatchingWarpVerifiedConfigForAttempt(attempt, clientData) ?: return@forEach
+            if (!clientData.isBundledSeed(config)) return@forEach
+            if (config.engine.equals("masque", ignoreCase = true)) return@forEach
+            val firmwareI1 = extractSupportedAwgInterfaceLines(
+                rawConfig = config.rawConfig,
+                includeHandshakePayloads = true,
+            ).firstOrNull { it.substringBefore('=').trim().equals("I1", ignoreCase = true) }
+            val quicI1 = firmwareI1 != null && AwgI1Adaptation.isQuicInitial(firmwareI1)
+            val tier = clientData.getWarpVerifiedQualityTier(config)
+            if (!AwgI1Adaptation.deservesManualI1Candidate(tier, quicI1)) return@forEach
+            val previous = overrides[config.id]
+            val sni = AwgI1Adaptation.nextSniForProfile(
+                pool = pool,
+                adaptedSni = previous?.sni.orEmpty(),
+                attempts = triedCounts[config.id] ?: previous?.attempts ?: 0,
+            ) ?: return@forEach
+            val i1 = ProtonQuicInitial.buildI1(sni)
+            if (i1.isBlank()) {
+                // Молча пропустить нельзя (I4): «профиль не адаптировался» и «пакет
+                // не собрался» — разные вещи, и вторая означает нашу ошибку.
+                LogManager.log(
+                    "Адаптация I1: пакет для $sni не собрался, " +
+                        "${config.host}:${config.port} оставляем с прежним I1."
+                )
+                return@forEach
+            }
+            clientData.saveAwgI1Override(config.id, sni, i1)
+            assigned += AdaptationI1Candidate(
+                profileId = config.id,
+                attemptKey = attemptExactKey(attempt),
+                host = config.host,
+                port = config.port,
+                sni = sni,
+                previous = previous,
+            )
+        }
+        if (assigned.isNotEmpty()) {
+            LogManager.log(
+                "Адаптация I1: пробуем другое имя у ${assigned.size} профилей без рабочего " +
+                    "data-plane. Рабочие профили не трогаем."
+            )
+        } else {
+            // Пустой список — обычное состояние на здоровой сети, но сказать об этом
+            // надо: иначе «менять было нечего» неотличимо от «шаг не выполнялся».
+            LogManager.log(
+                "Адаптация I1: подбирать некому — все встроенные профили с QUIC-прикрытием " +
+                    "сейчас рабочие."
+            )
+        }
+        return assigned
+    }
+
+    /**
+     * Оставляет кандидатный `I1` только там, где профиль на нём прошёл data-plane.
+     *
+     * Критерий намеренно грубый — «дал трафик / не дал», а не сравнение чисел.
+     * Один и тот же узел за часы даёт от 0 % до 83.5 % потерь, и решать по разнице
+     * замеров значило бы гоняться за шумом и переписывать профили каждый прогон.
+     */
+    private fun resolveAdaptationI1Candidates(
+        candidates: List<AdaptationI1Candidate>,
+        successfulKeys: Set<String>,
+        clientData: ClientData,
+    ) {
+        if (candidates.isEmpty()) return
+        var kept = 0
+        var reverted = 0
+        candidates.forEach { candidate ->
+            if (candidate.attemptKey in successfulKeys) {
+                kept += 1
+                LogManager.log(
+                    "Адаптация I1: ${candidate.host}:${candidate.port} прошёл data-plane " +
+                        "с именем ${candidate.sni} — закрепляем."
+                )
+            } else {
+                clientData.restoreAwgI1Override(candidate.profileId, candidate.previous)
+                reverted += 1
+            }
+        }
+        LogManager.log(
+            "Адаптация I1: закреплено $kept, снято $reverted из ${candidates.size}. " +
+                "Остаётся только то, что подтвердилось трафиком."
+        )
+    }
+
     private fun buildWarpNetworkAdaptationAttemptSet(
         attempts: List<ConnectionAttempt>,
         clientData: ClientData,
@@ -16551,8 +17156,14 @@ class NovaVpnService : OperaNativeVpnService() {
                     it.endpointSource.equals("bundled-seed", ignoreCase = true)
                 }
             }
+            // Порядок — по убыванию измеренного качества, и только среди равных
+            // решает `seedOrder`. Раньше сортировка начиналась с `seedOrder`, а он
+            // различен на всех пятидесяти семенах, поэтому каждый `thenBy` после него
+            // был недостижим (G13) и замеры не влияли на порядок адаптации вовсе:
+            // лучший профиль сети мог оказаться последним в очереди.
             .sortedWith(
-                compareBy<WarpVerifiedConfig> { it.seedOrder }
+                compareByDescending<WarpVerifiedConfig> { clientData.getWarpVerifiedQualityTier(it) }
+                    .thenBy { it.seedOrder }
                     .thenBy { it.host }
                     .thenBy { it.port }
                     .thenBy { it.mode }
@@ -16605,7 +17216,7 @@ class NovaVpnService : OperaNativeVpnService() {
         clientData: ClientData,
     ): ConnectionAttempt {
         val normalizedHost = config.host.trim().removePrefix("[").removeSuffix("]")
-        val explicitAwgImport = config.userImported && hasExplicitAwgImport(config.rawConfig)
+        val explicitAwgImport = isExactImportedProfile(config)
         val hasRawIdentity = config.userImported && hasImportedWireGuardIdentity(config.rawConfig)
         val primaryPort = config.port
         val mode = template.copy(
@@ -16691,7 +17302,7 @@ class NovaVpnService : OperaNativeVpnService() {
                 },
             )
         } else {
-            val explicitAwgImport = config.userImported && hasExplicitAwgImport(config.rawConfig)
+            val explicitAwgImport = isExactImportedProfile(config)
             val hasRawIdentity = config.userImported && hasImportedWireGuardIdentity(config.rawConfig)
             TransportMode(
                 name = normalizedMode,
@@ -17389,7 +18000,11 @@ class NovaVpnService : OperaNativeVpnService() {
         val compactImportedAttempts = buildUserImportedWarpAttemptSet(
             attempts,
             clientData,
-            limit = if (clientData.isImportedConfigSourceActive()) attempts.size.coerceAtLeast(1) else 8,
+            limit = if (clientData.isImportedConfigSourceActive() || clientData.isProtonSourceActive()) {
+                attempts.size.coerceAtLeast(1)
+            } else {
+                8
+            },
         )
         val userImportedPrefix = selectPreferredUserImportedWarpPrefix(
             attempts = attempts,
@@ -17654,7 +18269,11 @@ class NovaVpnService : OperaNativeVpnService() {
         val primaryImportedAttempts = buildUserImportedWarpAttemptSet(
             pool,
             clientData,
-            limit = if (clientData.isImportedConfigSourceActive()) pool.size.coerceAtLeast(1) else 8,
+            limit = if (clientData.isImportedConfigSourceActive() || clientData.isProtonSourceActive()) {
+                pool.size.coerceAtLeast(1)
+            } else {
+                8
+            },
         )
         val userImportedPrefix = selectPreferredUserImportedWarpPrefix(
             attempts = pool,
@@ -18306,23 +18925,32 @@ class NovaVpnService : OperaNativeVpnService() {
         // Свой список пользователя сильнее подсказки от каталога приложений: он для
         // того и вводится, чтобы решать самому.
         if (!customMode && adaptive.isNotBlank() && !isCloudflareMasqueSni(adaptive) && failures == 0) {
+            // Записывается **всякое** уходящее имя, а не только выбранное политикой.
+            // Счётчик неудач заворачивается по размеру встроенного набора, поэтому
+            // каждая шестая неудача возвращает `failures` в ноль и следующая попытка
+            // уходит сюда — а в карте оставалось имя с прошлой попытки, и успех или
+            // отказ записывались не тому имени, что было в ClientHello.
+            lastChosenMasqueSni[masqueSniKey(mode, host, port)] = adaptive
             return adaptive
         }
         val seed = "$host:$port:${mode.name}".hashCode()
+        val regime = resolveSniRegime(clientData)
         val choice = SniMaskPolicy.pick(
             SniMaskPolicy.Inputs(
                 mode = clientData.getSniMaskMode(),
-                regime = resolveSniRegime(clientData),
+                regime = regime,
                 customHosts = clientData.getSniCustomHosts(),
                 pools = clientData.getSniMaskPools(),
                 seed = seed,
                 attempt = failures,
+                preferredHosts = clientData.getPreferredSniHosts(ClientData.SNI_SCOPE_MASQUE),
             )
         )
         if (choice != null && !isCloudflareMasqueSni(choice.host)) {
+            lastChosenMasqueSni[masqueSniKey(mode, host, port)] = choice.host
             LogManager.log(
                 "SNI маскировка: ${choice.host} (набор ${choice.source}, режим ${clientData.getSniMaskMode()}, " +
-                    "сеть ${resolveSniRegime(clientData).name.lowercase(Locale.US)}, попытка ${failures + 1})"
+                    "сеть ${regime.name.lowercase(Locale.US)}, попытка ${failures + 1})"
             )
             return choice.host
         }
@@ -18331,7 +18959,9 @@ class NovaVpnService : OperaNativeVpnService() {
         // `*.cloudflareclient.com`, а его-то DPI и блокирует (3g).
         val size = MASQUE_NEUTRAL_SNI_POOL.size
         val index = (((seed % size) + size) % size + failures) % size
-        return MASQUE_NEUTRAL_SNI_POOL[index]
+        val fallback = MASQUE_NEUTRAL_SNI_POOL[index]
+        lastChosenMasqueSni[masqueSniKey(mode, host, port)] = fallback
+        return fallback
     }
 
     /**
@@ -18347,8 +18977,50 @@ class NovaVpnService : OperaNativeVpnService() {
         when (clientData.getLatestRestrictedMobileStatus(freshnessMs = 5L * 60L * 1000L)) {
             true -> SniMaskPolicy.Regime.WHITELIST
             false -> SniMaskPolicy.Regime.BLACKLIST
-            null -> SniMaskPolicy.Regime.UNKNOWN
+            // На Wi-Fi сотовый детектор молчит по построению, а режим белого списка
+            // там встречается не реже. Проверяем те же 1.1.1.1/8.8.8.8 сами.
+            null -> when (resolveWhitelistRegimeForCurrentNetwork()) {
+                true -> SniMaskPolicy.Regime.WHITELIST
+                false -> SniMaskPolicy.Regime.BLACKLIST
+                null -> SniMaskPolicy.Regime.UNKNOWN
+            }
         }
+
+    /**
+     * Проба «пускает ли сеть к 1.1.1.1/8.8.8.8», с кэшем на сеть.
+     *
+     * Кэш обязателен: выбор имени случается на каждой попытке, а проба стоит до
+     * 700 мс на адрес. Ключ — подпись сети, поэтому переход с одной точки доступа
+     * на другую сбрасывает ответ сам, без таймера.
+     */
+    private fun resolveWhitelistRegimeForCurrentNetwork(): Boolean? {
+        val connectivityManager = getSystemService(android.net.ConnectivityManager::class.java)
+            ?: return null
+        val network = selectUnderlyingNetwork(connectivityManager) ?: return null
+        val signature = buildUnderlyingNetworkSignature(connectivityManager, network)
+            ?: network.toString()
+        val cached = cachedWhitelistRegime
+        if (cached != null && cached.first == signature &&
+            SystemClock.elapsedRealtime() - cachedWhitelistRegimeAt < WHITELIST_REGIME_CACHE_MS
+        ) {
+            return cached.second
+        }
+        val restricted = runCatching {
+            RestrictedMobileDetector.detect(connectivityManager, network, requireCellular = false)
+        }.getOrNull()
+        cachedWhitelistRegime = signature to restricted
+        cachedWhitelistRegimeAt = SystemClock.elapsedRealtime()
+        LogManager.log(
+            "Режим сети для SNI: ${
+                when (restricted) {
+                    true -> "белый список (1.1.1.1/8.8.8.8 недоступны)"
+                    false -> "обычный"
+                    null -> "неизвестно"
+                }
+            }, сеть $signature."
+        )
+        return restricted
+    }
 
     private fun masqueSniKey(mode: TransportMode, host: String, port: Int): String =
         "${mode.name}|${host.trim()}|$port"
@@ -18365,6 +19037,25 @@ class NovaVpnService : OperaNativeVpnService() {
         val key = masqueSniKey(mode, host, port)
         val next = ((masqueSniFailures[key] ?: 0) + 1) % MASQUE_NEUTRAL_SNI_POOL.size
         masqueSniFailures[key] = next
+        // Запись потребляется: имя уже получило свою оценку, и оставленное здесь оно
+        // могло бы получить вторую — за попытку, в которой не участвовало.
+        lastChosenMasqueSni.remove(key)?.let { host ->
+            ClientData(this).recordSniOutcome(ClientData.SNI_SCOPE_MASQUE, host, success = false)
+        }
+    }
+
+    /**
+     * Запоминает имя победившей попытки.
+     *
+     * Только для MASQUE: у WireGuard/AmneziaWG никакого TLS нет, и «успешное имя»
+     * там означало бы, что успех приписан тому, что в датаплейне не участвовало.
+     */
+    private fun rememberSuccessfulSni(attempt: ConnectionAttempt) {
+        if (!attempt.mode.engine.equals("masque", ignoreCase = true)) return
+        val key = masqueSniKey(attempt.mode, attempt.endpointHost, attempt.port)
+        val host = lastChosenMasqueSni.remove(key) ?: return
+        ClientData(this).recordSniOutcome(ClientData.SNI_SCOPE_MASQUE, host, success = true)
+        LogManager.log("SNI $host запомнен как рабочий для MASQUE на этой сети.")
     }
 
     private fun isCloudflareMasqueSni(value: String): Boolean {
@@ -19479,6 +20170,17 @@ class NovaVpnService : OperaNativeVpnService() {
             .ifBlank { clientData.getLastSuccessProtocol() }
         val mode = clientData.getStableLastSuccessMode().orEmpty()
             .ifBlank { protocol }
+        val regionPreference = clientData.getExitRegionPreference()
+        if (!RegionTransportPolicy.allowsRememberedStrategy(regionPreference, mode)) {
+            // Молчаливый отказ здесь читался бы как «памяти нет» (I4), а это другое:
+            // память есть, но она про другой транспорт, чем выбрал пользователь.
+            LogManager.log(
+                "Последняя стабильная стратегия — $mode@$host:$port, а выбран " +
+                    "${regionPreference.trim().ifBlank { RegionTransportPolicy.AUTO }}. " +
+                    "Чужой транспорт из памяти не поднимаем: подмена допустима только в «Авто»."
+            )
+            return null
+        }
         return StableSuccessSnapshot(
             host = host,
             port = port,
@@ -19604,7 +20306,7 @@ class NovaVpnService : OperaNativeVpnService() {
             .filter { network ->
                 val caps = connectivityManager.getNetworkCapabilities(network) ?: return@filter false
                 caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) &&
-                    isLikelyNovaVpnNetwork(connectivityManager, network)
+                    isVpnNetworkNotForeign(connectivityManager, network)
             }
             .maxByOrNull { networkId(it) }
     }
@@ -19618,7 +20320,7 @@ class NovaVpnService : OperaNativeVpnService() {
             active != null &&
             connectivityManager.getNetworkCapabilities(active)
                 ?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true &&
-            isLikelyNovaVpnNetwork(connectivityManager, active)
+            isVpnNetworkNotForeign(connectivityManager, active)
         ) {
             return active
         }
@@ -19627,7 +20329,7 @@ class NovaVpnService : OperaNativeVpnService() {
             val caps = connectivityManager.getNetworkCapabilities(network) ?: return Int.MIN_VALUE
             if (!caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) return Int.MIN_VALUE
             var score = 0
-            if (isLikelyNovaVpnNetwork(connectivityManager, network)) score += 1_000
+            if (isVpnNetworkNotForeign(connectivityManager, network)) score += 1_000
             if (caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)) score += 200
             if (caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)) score += 50
             if (getVpnUnderlyingNetworks(connectivityManager, network).isNotEmpty()) score += 100
@@ -19643,23 +20345,122 @@ class NovaVpnService : OperaNativeVpnService() {
                 compareBy<android.net.Network> { score(it) }
                     .thenBy { networkId(it) }
             )
-        if (bestVpn != null && isLikelyNovaVpnNetwork(connectivityManager, bestVpn)) {
-            return bestVpn
-        }
-        return if (bestVpn != null && hasStrongLocalNovaSessionEvidence()) bestVpn else null
+        // Раньше здесь стоял строгий предикат, а «не смогли определить владельца»
+        // добиралось отдельной веткой по локальным признакам. Обе проверки теперь
+        // внутри isVpnNetworkNotForeign, а чужой VPN больше не проходит по локальным
+        // признакам своего сеанса.
+        return if (bestVpn != null && isVpnNetworkNotForeign(connectivityManager, bestVpn)) bestVpn else null
     }
 
-    private fun isLikelyNovaVpnNetwork(
+    /**
+     * Владелец VPN-сети: наш, чужой или **неизвестен**. Третье состояние обязано быть
+     * отдельным. Android 9 вычищает `EstablishingAppUid` из той копии
+     * `NetworkCapabilities`, которую отдаёт приложению (в `dumpsys` у system_server оно
+     * есть, у нас нет), а метка сессии существует только с Android 10. Поэтому там
+     * «владелец не прочитался» — не исключение, а всегда, и трактовать это как «сеть
+     * чужая» значит объявлять исправный туннель пропавшим (P16).
+     */
+    private enum class VpnOwnership { OURS, FOREIGN, UNKNOWN }
+
+    private fun classifyVpnOwnership(caps: android.net.NetworkCapabilities?): VpnOwnership {
+        if (caps == null) return VpnOwnership.UNKNOWN
+        val ownerUid = extractVpnOwnerUid(caps)
+        if (ownerUid != null) {
+            return if (ownerUid == applicationInfo.uid) VpnOwnership.OURS else VpnOwnership.FOREIGN
+        }
+        val transportInfo = extractVpnTransportLabel(caps)
+        if (transportInfo.isBlank()) return VpnOwnership.UNKNOWN
+        return if (
+            transportInfo.contains("NovaVPN", ignoreCase = true) ||
+            transportInfo.contains("NovaOperaVPN", ignoreCase = true)
+        ) {
+            VpnOwnership.OURS
+        } else {
+            VpnOwnership.FOREIGN
+        }
+    }
+
+    /**
+     * «Эта VPN-сеть не чужая»: либо доказуемо наша, либо владельца прочитать нечем, а
+     * локальные признаки говорят, что сеанс наш. Именно этот предикат должен стоять там,
+     * где ложное «не наша» рушит живой туннель или, наоборот, оставляет зависший.
+     */
+    private fun isVpnNetworkNotForeign(
         connectivityManager: android.net.ConnectivityManager?,
         network: android.net.Network?,
     ): Boolean {
         if (connectivityManager == null || network == null) return false
         val caps = connectivityManager.getNetworkCapabilities(network) ?: return false
         if (!caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) return false
-        if (isNovaVpnOwner(caps)) return true
-        val transportInfo = extractVpnTransportLabel(caps)
-        return transportInfo.contains("NovaVPN", ignoreCase = true) ||
-            transportInfo.contains("NovaOperaVPN", ignoreCase = true)
+        return when (classifyVpnOwnership(caps)) {
+            VpnOwnership.OURS -> true
+            VpnOwnership.FOREIGN -> false
+            VpnOwnership.UNKNOWN -> hasStrongLocalNovaSessionEvidence()
+        }
+    }
+
+    /**
+     * Сообщает, что живой туннель удержан по локальным признакам, потому что владельца
+     * VPN-сети этой прошивке прочитать нечем. Раз в десять минут: иначе строка пойдёт
+     * каждую минуту всё время, пока экран погашен.
+     */
+    private fun logVpnOwnershipRescueIfNeeded(
+        connectivityManager: android.net.ConnectivityManager?,
+        network: android.net.Network?,
+    ) {
+        val caps = connectivityManager?.getNetworkCapabilities(network ?: return) ?: return
+        if (classifyVpnOwnership(caps) != VpnOwnership.UNKNOWN) return
+        val now = SystemClock.elapsedRealtime()
+        if (lastVpnOwnershipRescueLogAtMs != 0L && now - lastVpnOwnershipRescueLogAtMs < 600_000L) return
+        lastVpnOwnershipRescueLogAtMs = now
+        LogManager.log(
+            "Владельца VPN-сети эта прошивка приложению не отдаёт, сеанс признан своим " +
+                "по локальным признакам. " + describeVpnNetworksForDiagnostics(connectivityManager)
+        )
+    }
+
+    /**
+     * Снимок того, что процесс `:vpn` видит про VPN-сети прямо сейчас. Нужен там, где
+     * по этому снимку принимается решение снести живой сеанс: без него в журнале
+     * остаётся только вердикт, а не основания.
+     */
+    private fun describeVpnNetworksForDiagnostics(
+        connectivityManager: android.net.ConnectivityManager?,
+    ): String {
+        if (connectivityManager == null) return "ConnectivityManager недоступен"
+        val active = try {
+            connectivityManager.activeNetwork
+        } catch (_: Throwable) {
+            null
+        }
+        val activeCaps = active?.let { connectivityManager.getNetworkCapabilities(it) }
+        val activeDesc = when {
+            active == null -> "нет"
+            activeCaps == null -> "${networkId(active)}/без caps"
+            else -> "${networkId(active)}/vpn=" +
+                activeCaps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
+        }
+        val all = try {
+            connectivityManager.allNetworks
+        } catch (_: Throwable) {
+            emptyArray()
+        }
+        val vpnDescs = all.mapNotNull { network ->
+            val caps = connectivityManager.getNetworkCapabilities(network) ?: return@mapNotNull null
+            if (!caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) return@mapNotNull null
+            val dump = caps.toString()
+            val label = extractVpnTransportLabel(caps)
+            "id=${networkId(network)}" +
+                " ownerUid=${extractVpnOwnerUid(caps) ?: "нет"}" +
+                " uidЕстьВСтроке=${dump.contains("OwnerUid") || dump.contains("EstablishingAppUid")}" +
+                " метка=${if (label.isBlank()) "пусто" else label.take(48)}" +
+                " владелец=${classifyVpnOwnership(caps)}" +
+                " неЧужая=${isVpnNetworkNotForeign(connectivityManager, network)}"
+        }
+        return "наш uid=${applicationInfo.uid}, active=$activeDesc, сетей=${all.size}," +
+            " VPN-сетей=${vpnDescs.size} [${vpnDescs.joinToString(" | ")}]," +
+            " findCurrentVpnNetwork=${findCurrentVpnNetwork(connectivityManager)?.let { networkId(it) } ?: "null"}," +
+            " локальныеПризнаки=${hasStrongLocalNovaSessionEvidence()}"
     }
 
     private fun hasActiveForeignVpnNetwork(
@@ -19669,7 +20470,7 @@ class NovaVpnService : OperaNativeVpnService() {
         return connectivityManager.allNetworks.any { network ->
             val caps = connectivityManager.getNetworkCapabilities(network) ?: return@any false
             caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) &&
-                !isLikelyNovaVpnNetwork(connectivityManager, network)
+                !isVpnNetworkNotForeign(connectivityManager, network)
         }
     }
 
@@ -19687,16 +20488,16 @@ class NovaVpnService : OperaNativeVpnService() {
     }
 
     private fun hasStrongLocalNovaSessionEvidence(): Boolean {
-        val clientData = ClientData(this)
-        if (
-            currentState == STATE_CONNECTED ||
-            currentState == STATE_CONNECTING ||
-            clientData.isSoftReapplyPending() ||
-            clientData.isTransientConnectingPending()
-        ) {
+        // Признаки в памяти проверяем первыми: предикат зовут из фильтров по списку
+        // сетей, а `ClientData` — это чтение файлов (I9, не блокировать datapath).
+        if (currentState == STATE_CONNECTED || currentState == STATE_CONNECTING) {
             return true
         }
         if (isRunning) {
+            return true
+        }
+        val clientData = ClientData(this)
+        if (clientData.isSoftReapplyPending() || clientData.isTransientConnectingPending()) {
             return true
         }
         val persistedState = clientData.getServiceState()
@@ -19705,10 +20506,6 @@ class NovaVpnService : OperaNativeVpnService() {
         return clientData.getRestartSession() != null &&
             persistedState == STATE_CONNECTING &&
             ageMs in 0..12_000L
-    }
-
-    private fun isNovaVpnOwner(caps: android.net.NetworkCapabilities?): Boolean {
-        return extractVpnOwnerUid(caps) == applicationInfo.uid
     }
 
     private fun extractVpnOwnerUid(caps: android.net.NetworkCapabilities?): Int? {
@@ -19862,7 +20659,7 @@ class NovaVpnService : OperaNativeVpnService() {
     private fun adoptHealthyExistingVpnIfPresent(expectedBackendHint: String? = null): Boolean {
         val connectivityManager = getSystemService(android.net.ConnectivityManager::class.java) ?: return false
         val currentVpn = findCurrentVpnNetwork(connectivityManager) ?: return false
-        if (!isLikelyNovaVpnNetwork(connectivityManager, currentVpn)) return false
+        if (!isVpnNetworkNotForeign(connectivityManager, currentVpn)) return false
 
         val persistedBackend = ClientData(this).getServiceBackend().ifBlank { currentBackendLabel }
         val expectedBackend = expectedBackendHint?.trim()?.uppercase().orEmpty()
@@ -20025,6 +20822,7 @@ class NovaVpnService : OperaNativeVpnService() {
             "eu" -> "eu"
             "us" -> "us"
             "ru" -> "ru"
+            "proton" -> "proton"
             else -> "auto"
         }
     }
@@ -20039,7 +20837,9 @@ class NovaVpnService : OperaNativeVpnService() {
      * импортированная попытка не выполнялась.
      */
     private fun ownProfileSourceChosen(clientData: ClientData = ClientData(this)): Boolean =
-        clientData.isImportedConfigSourceActive() || clientData.isVlessExplicitlyChosen()
+        clientData.isImportedConfigSourceActive() ||
+            clientData.isVlessExplicitlyChosen() ||
+            clientData.isProtonSourceActive()
 
     private fun shouldUseWarpTransport(
         regionPreference: String,
@@ -20059,7 +20859,7 @@ class NovaVpnService : OperaNativeVpnService() {
         // профили нельзя ни в одной ветке: правило «явный выбор не подменяем»
         // (RegionTransportPolicy) распространяется и на выбор источника профилей.
         if (ownProfileSourceChosen(clientData)) return false
-        if (regionPreference == "ru") return false
+        if (!RegionTransportPolicy.allowsOperaTransport(regionPreference)) return false
         return OperaProxyManager.isSupportedOnDevice(this)
     }
 
@@ -21061,7 +21861,7 @@ class NovaVpnService : OperaNativeVpnService() {
                 writer.write("Connection: close\r\n\r\n")
                 writer.flush()
                 val statusLine = socket.getInputStream().bufferedReader().readLine().orEmpty()
-                statusLine.contains("200")
+                proxyProbeStatusConfirmsUpstream(parseHttpStatusCode(statusLine))
             }
         } catch (_: Exception) {
             false
@@ -21069,10 +21869,366 @@ class NovaVpnService : OperaNativeVpnService() {
     }
 
     /**
+     * Код ответа из первой строки HTTP или -1, если её разобрать нельзя.
+     *
+     * Разбор нужен именно числом. Прежняя проверка искала «200» подстрокой во всей
+     * строке состояния, а это и не код, и не только код: под неё подходит любая
+     * причина с такими цифрами, и не подходит ни один другой успешный ответ.
+     */
+    private fun parseHttpStatusCode(statusLine: String): Int {
+        val parts = statusLine.trim().split(' ')
+        if (parts.size < 2 || !parts[0].startsWith("HTTP/", ignoreCase = true)) return -1
+        return parts[1].toIntOrNull() ?: -1
+    }
+
+    /**
+     * Годится ли ответ прокси как подтверждение канала.
+     *
+     * Полоса та же, что у [httpProbe]: 2xx и 3xx. Ответ по эту сторону полосы
+     * пришёл с края Cloudflare, то есть запрос прошёл прокси насквозь и вернулся —
+     * а больше от пробы живости ничего и не требуется. 4xx/5xx прокси умеет
+     * сочинять сам (407, 502, 503), и они о канале не говорят ничего.
+     *
+     * Дефект, который это чинит: проба требовала ровно 200, а
+     * `GET http://1.1.1.1/cdn-cgi/trace` Cloudflare отдаёт как «301 Moved
+     * Permanently» — обычный перевод с http на https. Проба возвращала false на
+     * каждой итерации, `publishTransportLatency` не вызывался ни разу, и на
+     * рабочем EU-подключении экран показывал «Ping: ---». Тем же отказом
+     * обнуляется единственное на Opera подтверждение туннеля (см. комментарий
+     * выше): сессия держалась только за счёт VALIDATED/tunnelReady, а там, где их
+     * нет, гаснет как «не дал tunnel-probe».
+     */
+    private fun proxyProbeStatusConfirmsUpstream(code: Int): Boolean = code in 200..399
+
+    /**
      * Через Opera туннеля Cloudflare нет — там трафик идёт по HTTP-прокси, и
      * запрос ушёл бы мимо, в заблокированный домен. Поэтому добываем личность
      * только на собственном WARP/MASQUE-туннеле.
      */
+    /**
+     * Мерит задержку до Proton-узлов настоящим рукопожатием WireGuard.
+     *
+     * Сокет каждой пробы защищается от собственного туннеля: замер обязан описывать
+     * прямой путь до узла. Первая версия жила в процессе интерфейса, где `protect()`
+     * недоступен, и получила ответ от нуля узлов из пятидесяти двух.
+     *
+     * Перед рукопожатием уходит `I1` и мусор профиля — ровно то, чем пользуется
+     * настоящее подключение. Голая проба на сети с DPI блокируется сама по себе, и
+     * результат «узел мёртв» относился бы к пробе, а не к узлу.
+     */
+    private fun probeProtonProfilesFromServiceProcess() {
+        val store = ProtonProfileStore(this)
+        val account = store.readAccount()
+        val candidates = store.readProfiles()
+        if (account == null || candidates.isEmpty()) {
+            LogManager.log("Proton probe: мерить нечего — нет личности или списка кандидатов.")
+            store.writeProbeState(ProtonProfileStore.ProbeState(ProtonProfileStore.STATE_FAILED, 0, 0, 0))
+            return
+        }
+        // `protect()` только исключает сокет из туннеля, но не выбирает ему сеть:
+        // маршрут по умолчанию в этот момент принадлежит `tun`, и пакеты уходят
+        // в никуда. Ту же цену уже платили на резолвинге (G17) — там лечилось
+        // явной привязкой к нижележащей сети, и здесь лечится так же.
+        val underlyingNetwork = runCatching {
+            selectUnderlyingNetwork(getSystemService(android.net.ConnectivityManager::class.java))
+        }.getOrNull()
+        startSafeServiceThread("NovaProtonProbe") {
+            val privateKey = account.wireGuardPrivateKey
+            val total = candidates.size
+            store.writeProbeState(
+                ProtonProfileStore.ProbeState(ProtonProfileStore.STATE_RUNNING, total, 0, 0)
+            )
+            LogManager.log("Proton probe: меряем $total кандидатов рукопожатием, сокеты защищены.")
+
+            val pool = java.util.concurrent.Executors.newFixedThreadPool(PROTON_PROBE_PARALLELISM)
+            val done = java.util.concurrent.atomic.AtomicInteger(0)
+            val alive = java.util.concurrent.atomic.AtomicInteger(0)
+            val probeReplyType2 = java.util.concurrent.atomic.AtomicInteger(0)
+            val probeReplyCookie = java.util.concurrent.atomic.AtomicInteger(0)
+            val probeReplyOther = java.util.concurrent.atomic.AtomicInteger(0)
+            val measured = try {
+                val futures = candidates.mapIndexed { index, candidate ->
+                    pool.submit<ProtonProfile> {
+                        val rtt = ProtonCrypto.probeHandshakeRttMs(
+                            privateKeyB64 = privateKey,
+                            peerPublicKeyB64 = candidate.peerPublicKey,
+                            host = candidate.entryIp,
+                            port = candidate.port,
+                            timeoutMs = PROTON_PROBE_TIMEOUT_MS,
+                            i1 = candidate.i1,
+                            junkCount = candidate.junkCount,
+                            junkMin = candidate.junkMin,
+                            junkMax = candidate.junkMax,
+                            protect = { socket ->
+                                val protectedOk = protect(socket)
+                                val bound = underlyingNetwork?.let { network ->
+                                    runCatching { network.bindSocket(socket) }.isSuccess
+                                }
+                                // Молча проглоченный отказ здесь читался бы как
+                                // «узел мёртв» (I4): и защита, и привязка меняют
+                                // маршрут пакета целиком.
+                                if (index == 0) {
+                                    LogManager.log(
+                                        "Proton probe: protect=$protectedOk, bindSocket=$bound, " +
+                                            "сеть=${underlyingNetwork?.toString() ?: "нет"}."
+                                    )
+                                }
+                            },
+                            diagnosticLabel = "Proton probe [${candidate.entryIp}:${candidate.port}]"
+                                .takeIf { index == 0 },
+                            // Без разбора по типам «0 из 52» ничего не значит: это
+                            // одинаково и «узлы молчат», и «узлы отвечают cookie, а
+                            // мы его выбрасываем». Разные диагнозы, разное лечение.
+                            onPacketType = { type ->
+                                when (type) {
+                                    2 -> probeReplyType2.incrementAndGet()
+                                    3 -> probeReplyCookie.incrementAndGet()
+                                    else -> probeReplyOther.incrementAndGet()
+                                }
+                            },
+                        )
+                        if (rtt > 0) alive.incrementAndGet()
+                        val finished = done.incrementAndGet()
+                        if (finished % 5 == 0 || finished == total) {
+                            store.writeProbeState(
+                                ProtonProfileStore.ProbeState(
+                                    ProtonProfileStore.STATE_RUNNING,
+                                    total,
+                                    finished,
+                                    alive.get(),
+                                )
+                            )
+                        }
+                        candidate.copy(pingMs = rtt)
+                    }
+                }
+                futures.mapNotNull {
+                    runCatching { it.get(PROTON_PROBE_TIMEOUT_MS * 4L, TimeUnit.MILLISECONDS) }.getOrNull()
+                }
+            } finally {
+                pool.shutdownNow()
+            }
+
+            if (measured.none { it.pingMs > 0 }) {
+                runControlHandshakeProbe(underlyingNetwork)
+                runTunnelledProtonProbe(candidates.first(), privateKey)
+            }
+
+            // Если не отозвался никто, список не выбрасывается: проба — догадка, а не
+            // приговор, и молчание узла на неё уже один раз означало не мёртвый узел.
+            // Тогда порядок задаёт нагрузка, а честность выдачи — счётчик `alive`.
+            val answered = measured.filter { it.pingMs > 0 }
+            val ranked = if (answered.isNotEmpty()) {
+                answered.sortedBy { it.pingMs }
+            } else {
+                measured.sortedBy { it.load }
+            }.take(ProtonProfileManager.TARGET_COUNT)
+            store.writeProfiles(ranked)
+            store.writeProbeState(
+                ProtonProfileStore.ProbeState(
+                    ProtonProfileStore.STATE_DONE,
+                    total,
+                    total,
+                    answered.size,
+                )
+            )
+            LogManager.log(
+                "Proton probe: из $total ответили ${answered.size}, " +
+                    "сохранено ${ranked.size}, лучший ${ranked.firstOrNull()?.pingMs ?: -1} мс."
+            )
+            // Счётчик без разбивки лжёт (G11): «ответили 0» — это и «узлы молчат», и
+            // «узлы отвечают, а мы ответ выбрасываем». Пакетов приходит больше, чем
+            // засчитано ответов, ровно во втором случае.
+            LogManager.log(
+                "Proton probe: принято пакетов — рукопожатий (тип 2): ${probeReplyType2.get()}, " +
+                    "cookie (тип 3): ${probeReplyCookie.get()}, прочих: ${probeReplyOther.get()}."
+            )
+        }
+    }
+
+    /**
+     * Контрольный замер по встроенному семени WARP тем же кодом.
+     *
+     * Нужен ровно для одного вопроса, на который иначе нет ответа: когда не
+     * отозвался ни один узел Proton, это сломанная проба или закрытая сеть?
+     * Встроенные семена на этой сети заведомо работают — Nova через них и стоит.
+     * Ответ «контроль тоже молчит» означает ошибку в нашем рукопожатии, ответ
+     * «контроль отвечает» — что до узлов Proton отсюда не достучаться, и врать про
+     * это пользователю нельзя.
+     */
+    /**
+     * Вариант контрольного замера: что шлём и каким сокетом.
+     *
+     * @param isolate строить сокет как в основной пробе (`protect` + привязка к
+     *        подложной сети) или взять обычный. Различать обязательно: молчание
+     *        только у изолированного сокета означало бы, что дело в маршруте наших
+     *        пакетов, а не в узле и не в рукопожатии.
+     */
+    private data class ControlProbeVariant(
+        val name: String,
+        val i1: String,
+        val junk: Int,
+        val isolate: Boolean,
+    )
+
+    private fun runControlHandshakeProbe(underlyingNetwork: android.net.Network?) {
+        val clientData = ClientData(this)
+        // Ключи берутся те же, которыми к этому семени ходит движок.
+        //
+        // Здесь дважды ошибались в противоположные стороны, и оба раза контроль
+        // оговаривал невиновных. Сначала он брал `PrivateKey` из текста семени и
+        // молчал — вывод «сломано наше рукопожатие» оказался ложным. Потом его
+        // «починили» на регистрацию устройства (P6) — и он молчал снова, теперь уже
+        // потому, что этим ключом к семени никто не ходит: все 50 семян несут
+        // собственный `PrivateKey`, и режим `warp-awg-exact` поднимается именно им
+        // (`rawIdentity=true`, в журнале `[raw-id]`). Cloudflare молча роняет
+        // рукопожатие от незнакомого ключа, и обе версии контроля выглядели
+        // одинаково — «узел молчит».
+        //
+        // Отсюда правило: контроль обязан повторять **ровно то**, что делает рабочий
+        // путь, а не то, что про него написано.
+        val warp = clientData.resolveWarpConfigForReuse(repairWithBootstrap = false)?.config
+        // Семя берётся **заведомо рабочее**, а не первое попавшееся. Иначе «контроль
+        // молчит» означает всего лишь «это семя на этой сети и не поднималось», и
+        // сравнивать с ним молчание узлов Proton бессмысленно. Сначала тот узел, на
+        // котором держался последний стабильный сеанс, затем — лучший по замерам.
+        val bundledSeeds = clientData.getWarpVerifiedConfigs()
+            .filter { clientData.isBundledSeed(it) && !it.engine.equals("masque", ignoreCase = true) }
+        val stableHost = clientData.getStableLastSuccessEndpoint()
+            ?.trim()?.removePrefix("[")?.removeSuffix("]").orEmpty()
+        val stablePort = clientData.getStableLastSuccessPort()
+        val seed = bundledSeeds.firstOrNull { it.host == stableHost && it.port == stablePort }
+            ?: bundledSeeds.maxByOrNull { clientData.getWarpVerifiedQualityTier(it) }
+        if (warp == null || seed == null) {
+            LogManager.log("Proton probe control: нет регистрации WARP или семян, сравнить не с чем.")
+            return
+        }
+        fun field(name: String): String? = Regex("(?im)^$name\\s*=\\s*(.+)$")
+            .find(seed.rawConfig)?.groupValues?.getOrNull(1)?.trim()
+
+        val seedPrivateKey = field("PrivateKey").orEmpty()
+        val seedPeerKey = field("PublicKey").orEmpty()
+        val usesSeedIdentity = seedPrivateKey.isNotBlank() && seedPeerKey.isNotBlank()
+        val privateKey = if (usesSeedIdentity) seedPrivateKey else warp.privateKey
+        val peerKey = if (usesSeedIdentity) seedPeerKey else warp.peerPublicKey
+        if (privateKey.isBlank() || peerKey.isBlank()) {
+            LogManager.log("Proton probe control: ключей для семени нет ни в нём самом, ни в регистрации.")
+            return
+        }
+        LogManager.log(
+            "Proton probe control: личность " +
+                if (usesSeedIdentity) "из семени (как у движка в raw-id)." else "из регистрации устройства."
+        )
+        LogManager.log(
+            "Proton probe control: узел ${seed.host}:${seed.port}, " +
+                "подложная сеть=${underlyingNetwork?.toString() ?: "нет"}, " +
+                "туннель ${if (isRunning) "поднят" else "не поднят"}."
+        )
+        // Подпись в том же виде, что печатает движок (`peer(bmXO…fgyo)`): иначе
+        // «узел молчит» неотличимо от «стучимся не тем ключом и не к тому пиру», а
+        // именно этим одна проверка P11 уже была испорчена (G48).
+        LogManager.log(
+            "Proton probe control: пир ${ProtonCrypto.abbreviateKey(peerKey)}, " +
+                "наш публичный ${ProtonCrypto.abbreviateKey(ProtonCrypto.x25519PublicKeyBase64(privateKey))}."
+        )
+        // Три варианта подряд на одном узле: без обфускации, только с мусором и с
+        // мусором вместе с `I1`. Разделять их обязательно — иначе непонятно, узел
+        // молчит или наша же обфускация ему мешает, и правку опять пришлось бы
+        // угадывать.
+        // Сокет строится ровно так же, как в замере рукопожатия. Вынесен, чтобы
+        // контрольная UDP-проба и рукопожатие отличались только содержимым пакета.
+        val isolateSocket: (java.net.DatagramSocket) -> Unit = { socket ->
+            if (!protect(socket)) {
+                LogManager.log("Proton probe control: protect() не сработал, сокет уйдёт в туннель.")
+            }
+            // Привязка к подложной сети обязательна ровно по той же причине,
+            // что и в основной пробе: `protect()` исключает сокет из туннеля,
+            // но сети ему не выбирает, а маршрут по умолчанию в этот момент
+            // принадлежит `tun`. Без неё контроль молчал бы всегда — и
+            // «контроль тоже молчит» читалось бы как «сломано рукопожатие».
+            // Контроль, построенный на непроверенном допущении, хуже, чем
+            // отсутствие контроля (G48).
+            underlyingNetwork?.let { network ->
+                if (runCatching { network.bindSocket(socket) }.isFailure) {
+                    LogManager.log("Proton probe control: bindSocket($network) не сработал.")
+                }
+            }
+        }
+        // Первым делом — живость самого сокета. «Узел молчит» и «наш сокет никуда
+        // не шлёт» снаружи одинаковы, и без этой строки все прошлые заходы по P11
+        // спорили о втором, имея данные только про первое.
+        val sanityRtt = ProtonCrypto.probeUdpAnswerRttMs(
+            host = "8.8.8.8",
+            port = 53,
+            payload = ProtonCrypto.dnsQuery("example.com"),
+            timeoutMs = PROTON_PROBE_TIMEOUT_MS,
+            protect = isolateSocket,
+        )
+        LogManager.log(
+            "Proton probe control: сокет с protect+bind до 8.8.8.8:53 → " +
+                if (sanityRtt > 0) "ответ за $sanityRtt мс" else "ответа нет"
+        )
+        val variants = listOf(
+            ControlProbeVariant("голое", "", 0, isolate = true),
+            ControlProbeVariant("мусор", "", field("Jc")?.toIntOrNull() ?: 0, isolate = true),
+            ControlProbeVariant("мусор+I1", field("I1").orEmpty(), field("Jc")?.toIntOrNull() ?: 0, isolate = true),
+            // Тот же пакет, но обычным сокетом: если ответ приходит только здесь,
+            // виновата не сеть и не рукопожатие, а маршрут наших пакетов.
+            ControlProbeVariant("мусор+I1 без protect", field("I1").orEmpty(), field("Jc")?.toIntOrNull() ?: 0, isolate = false),
+        )
+        var anyAnswered = false
+        variants.forEach { (name, i1, junk, isolate) ->
+            val rtt = ProtonCrypto.probeHandshakeRttMs(
+                privateKeyB64 = privateKey,
+                peerPublicKeyB64 = peerKey,
+                host = seed.host,
+                port = seed.port,
+                timeoutMs = PROTON_PROBE_TIMEOUT_MS,
+                i1 = i1,
+                junkCount = junk,
+                junkMin = field("Jmin")?.toIntOrNull() ?: 0,
+                junkMax = field("Jmax")?.toIntOrNull() ?: 0,
+                protect = if (isolate) isolateSocket else null,
+                diagnosticLabel = "Proton probe control [$name]",
+            )
+            if (rtt > 0) anyAnswered = true
+            LogManager.log("Proton probe control [$name] ${seed.host}:${seed.port} → $rtt мс.")
+        }
+        LogManager.log(
+            if (anyAnswered) {
+                "Proton probe control: встроенное семя отвечает — рукопожатие исправно, молчат узлы Proton."
+            } else {
+                "Proton probe control: встроенное семя тоже молчит на всех вариантах."
+            }
+        )
+    }
+
+    /**
+     * Тот же узел Proton, но **через поднятый туннель** — сокет не защищается.
+     *
+     * Разделяет два исхода, которые снаружи выглядят одинаково: узел мёртв или до
+     * него не пускает сеть оператора. Ответ отсюда означает, что узел живой и
+     * ключ зарегистрирован, а молчание защищённой пробы — заслуга блокировки.
+     */
+    private fun runTunnelledProtonProbe(candidate: ProtonProfile, privateKey: String) {
+        val rtt = ProtonCrypto.probeHandshakeRttMs(
+            privateKeyB64 = privateKey,
+            peerPublicKeyB64 = candidate.peerPublicKey,
+            host = candidate.entryIp,
+            port = candidate.port,
+            timeoutMs = PROTON_PROBE_TIMEOUT_MS,
+            diagnosticLabel = "Proton probe tunnelled",
+        )
+        LogManager.log(
+            if (rtt > 0) {
+                "Proton probe tunnelled: ${candidate.entryIp}:${candidate.port} ответил за $rtt мс через туннель — " +
+                    "узел живой и ключ зарегистрирован, напрямую до него не пускает сеть."
+            } else {
+                "Proton probe tunnelled: ${candidate.entryIp}:${candidate.port} молчит и через туннель."
+            }
+        )
+    }
+
     private fun probeMasqueFromServiceProcess(clientData: ClientData) {
         val identityJson = clientData.getMasqueConfigJson().orEmpty()
         if (identityJson.isBlank()) {

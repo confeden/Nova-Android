@@ -22,6 +22,14 @@ class LiveNodeRotationTest {
             LiveNodeRotation.Candidate(host, port, rank = index)
         }
 
+    /**
+     * Механизм проверяется с явным лимитом: по умолчанию он выключен
+     * (`MAX_ROTATIONS_PER_SESSION = 0`), потому что за восемь замеров не вернул
+     * трафик ни разу. Код перехода оставлен, и эти случаи стерегут его на случай,
+     * если лимит когда-нибудь вернут.
+     */
+    private val MECHANISM_LIMIT = 4
+
     private val pool = candidates(
         "8.47.69.6" to 945,
         "8.34.70.4" to 864,
@@ -33,7 +41,7 @@ class LiveNodeRotationTest {
 
     @Test
     fun `уходит на лучшего кандидата и не возвращается на брошенный`() {
-        val r = LiveNodeRotation()
+        val r = LiveNodeRotation(maxRotationsPerSession = MECHANISM_LIMIT)
         val first = r.decide(100_000L, "8.47.69.6", 945, pool)
         assertTrue(first is LiveNodeRotation.Decision.Switch)
         first as LiveNodeRotation.Decision.Switch
@@ -49,7 +57,7 @@ class LiveNodeRotationTest {
 
     @Test
     fun `свежепереключённому узлу даётся время проявить себя`() {
-        val r = LiveNodeRotation()
+        val r = LiveNodeRotation(maxRotationsPerSession = MECHANISM_LIMIT)
         r.decide(100_000L, "8.47.69.6", 945, pool)
         val tooSoon = r.decide(100_000L + LiveNodeRotation.SETTLE_MS - 1, "8.34.70.4", 864, pool)
         assertTrue(tooSoon is LiveNodeRotation.Decision.Settling)
@@ -79,7 +87,7 @@ class LiveNodeRotationTest {
 
     @Test
     fun `пустая личность честно сообщает, что идти некуда`() {
-        val r = LiveNodeRotation()
+        val r = LiveNodeRotation(maxRotationsPerSession = MECHANISM_LIMIT)
         val only = candidates("8.47.69.6" to 945)
         val d = r.decide(100_000L, "8.47.69.6", 945, only)
         assertTrue(d is LiveNodeRotation.Decision.Exhausted)
@@ -88,7 +96,7 @@ class LiveNodeRotationTest {
 
     @Test
     fun `порядок задаётся рангом, а не позицией в списке`() {
-        val r = LiveNodeRotation()
+        val r = LiveNodeRotation(maxRotationsPerSession = MECHANISM_LIMIT)
         val ranked = listOf(
             LiveNodeRotation.Candidate("8.34.70.4", 864, rank = 9),
             LiveNodeRotation.Candidate("8.39.146.3", 903, rank = 1),
@@ -101,7 +109,7 @@ class LiveNodeRotationTest {
 
     @Test
     fun `reset снимает сессионное состояние`() {
-        val r = LiveNodeRotation()
+        val r = LiveNodeRotation(maxRotationsPerSession = MECHANISM_LIMIT)
         r.decide(100_000L, "8.47.69.6", 945, pool)
         assertEquals(1, r.rotationCount)
         r.reset()
@@ -112,8 +120,20 @@ class LiveNodeRotationTest {
     }
 
     @Test
-    fun `некорректные кандидаты отбрасываются`() {
+    fun `по умолчанию бесшовный переход выключен`() {
         val r = LiveNodeRotation()
+        val d = r.decide(100_000L, "8.47.69.6", 945, pool)
+        assertTrue(d is LiveNodeRotation.Decision.Exhausted)
+        assertTrue(
+            "причина обязана называть замер, а не абстрактный лимит",
+            (d as LiveNodeRotation.Decision.Exhausted).reason.contains("не вернул трафик"),
+        )
+        assertEquals(0, r.rotationCount)
+    }
+
+    @Test
+    fun `некорректные кандидаты отбрасываются`() {
+        val r = LiveNodeRotation(maxRotationsPerSession = MECHANISM_LIMIT)
         val dirty = listOf(
             LiveNodeRotation.Candidate("", 945, rank = 0),
             LiveNodeRotation.Candidate("8.34.70.4", 0, rank = 1),

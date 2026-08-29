@@ -15,7 +15,9 @@ import java.util.Locale
  * Правила ротации задал владелец:
  *   * российские имена идут первыми, зарубежные — следом;
  *   * «белый список» (провайдер пускает только к разрешённым адресам) — только
- *     российские;
+ *     проверенные имена из `white.sni`: там, где закрыт даже 1.1.1.1, большой
+ *     российский список тоже в основном недоступен, и каждое имя из него — это
+ *     потраченная впустую попытка рукопожатия;
  *   * «чёрный список» (зарубежное доступно) — российские и зарубежные
  *     чередуются;
  *   * свой список пользователя, если он его задал, отменяет оба набора.
@@ -64,6 +66,16 @@ object SniMaskPolicy {
         val seed: Int = 0,
         val attempt: Int = 0,
         val blockedHosts: Set<String> = emptySet(),
+        /**
+         * Имена, которые уже поднимали сессию **на этом устройстве**, в порядке
+         * убывания заслуг. Идут впереди любого набора: общий список составлен без
+         * знания конкретной сети, а это знание — единственное, что про неё есть.
+         *
+         * Список свой у каждого транспорта: имя, проходящее в MASQUE, не обязано
+         * проходить в Opera — рукопожатия у них разные и смотрит на них DPI
+         * по-разному.
+         */
+        val preferredHosts: List<String> = emptyList(),
     )
 
     /** @param source откуда имя: `custom`, `white`, `russia` или `global` */
@@ -117,22 +129,38 @@ object SniMaskPolicy {
      * же порядок, поэтому повтор подключения не начинает перебор заново.
      */
     fun buildOrder(inputs: Inputs): List<String> {
+        val learned = inputs.preferredHosts.map(::normalizeHost).filter { it.isNotBlank() }.distinct()
         if (inputs.mode == MODE_CUSTOM) {
-            return rotate(inputs.customHosts.map(::normalizeHost).filter { it.isNotBlank() }, inputs.seed)
-                .take(MAX_ORDER)
+            val custom = rotate(
+                inputs.customHosts.map(::normalizeHost).filter { it.isNotBlank() },
+                inputs.seed,
+            )
+            // Выученное поднимается только внутри списка пользователя: подставить
+            // сюда чужое имя значило бы отменить его выбор (I1).
+            return (promoteFrom(custom, learned) + custom).distinct().take(MAX_ORDER)
         }
-        val domestic = rotate(
-            (inputs.pools.white + inputs.pools.russia).map(::normalizeHost).filter { it.isNotBlank() }.distinct(),
-            inputs.seed,
-        )
+        val white = inputs.pools.white.map(::normalizeHost).filter { it.isNotBlank() }.distinct()
+        val russia = inputs.pools.russia.map(::normalizeHost).filter { it.isNotBlank() }.distinct()
         val foreign = rotate(
             inputs.pools.global.map(::normalizeHost).filter { it.isNotBlank() }.distinct(),
             inputs.seed,
         )
-        if (inputs.regime == Regime.WHITELIST || foreign.isEmpty()) {
-            return domestic.take(MAX_ORDER)
+        if (inputs.regime == Regime.WHITELIST) {
+            // Только `white`. Откат на большой российский список — лишь когда
+            // проверенных имён нет вовсе: пустая очередь хуже неточной.
+            val pool = rotate(white.ifEmpty { russia }, inputs.seed)
+            return (promoteFrom(pool, learned) + pool).distinct().take(MAX_ORDER)
         }
-        if (domestic.isEmpty()) return foreign.take(MAX_ORDER)
+        val domestic = rotate((white + russia).distinct(), inputs.seed)
+        if (foreign.isEmpty()) {
+            return (promoteFrom(domestic, learned) + domestic).distinct().take(MAX_ORDER)
+        }
+        if (domestic.isEmpty()) return (promoteFrom(foreign, learned) + foreign).distinct().take(MAX_ORDER)
+        // Выученные имена ищутся во **всём** наборе, а не в уже обрезанной очереди.
+        // Пока подъём делался после чередования, имя искалось среди 64 кандидатов,
+        // а взято оно из пятисот с лишним — и на устройстве не поднималось ни разу,
+        // хотя записывалось исправно.
+        val front = promoteFrom(domestic + foreign, learned)
         // Чередование начинается с российского имени: «сначала российские, потом
         // зарубежные» — правило владельца, и на сети с белым списком ошибиться в
         // эту сторону дешевле.
@@ -144,8 +172,16 @@ object SniMaskPolicy {
             foreign.getOrNull(i)?.let(interleaved::add)
             i++
         }
-        return interleaved.distinct()
+        return (front + interleaved).distinct().take(MAX_ORDER)
     }
+
+    /** Выученные имена, встречающиеся в наборе, в порядке их заслуг. */
+    private fun promoteFrom(pool: List<String>, learned: List<String>): List<String> {
+        if (learned.isEmpty() || pool.isEmpty()) return emptyList()
+        val allowed = pool.toHashSet()
+        return learned.filter { it in allowed }
+    }
+
 
     /**
      * Имя для текущей попытки или `null`, если подставлять нечего.

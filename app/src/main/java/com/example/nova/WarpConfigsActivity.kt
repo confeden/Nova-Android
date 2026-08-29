@@ -19,6 +19,7 @@ import android.text.InputType
 import android.text.Html
 import android.view.View
 import android.view.WindowManager
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -1579,11 +1580,21 @@ class WarpConfigsActivity : AppCompatActivity() {
 
         parseClashWarpConfigs(normalized).forEach(::rememberImported)
 
-        val vlessLinks = normalized.lineSequence()
-            .map { it.trim() }
-            .filter { it.startsWith("vless://", ignoreCase = true) }
-            .filter { VlessConfig.parse(it) != null }
-            .toList()
+        // Outbound-ы sing-box сводятся к тем же ссылкам и дальше идут общим путём:
+        // хранилище, перебор и «следующий профиль» не должны знать, в каком виде
+        // конфигурацию принесли.
+        val singBoxLinks = VlessConfig.parseSingBoxText(normalized).map { it.toUri() }
+        if (singBoxLinks.isNotEmpty()) {
+            LogManager.log("Импорт: распознано ${singBoxLinks.size} VLESS в формате sing-box.")
+        }
+
+        val vlessLinks = (
+            normalized.lineSequence()
+                .map { it.trim() }
+                .filter { it.startsWith("vless://", ignoreCase = true) }
+                .filter { VlessConfig.parse(it) != null }
+                .toList() + singBoxLinks
+            ).distinct()
         val addedVlessLinks = clientData.addVlessProfileLinks(vlessLinks)
         val importedVless = addedVlessLinks.size
         newIds += addedVlessLinks.mapNotNull { link ->
@@ -2594,6 +2605,99 @@ class WarpConfigsActivity : AppCompatActivity() {
                 }
             }
         }.trim()
+    }
+
+    /**
+     * Правка профиля прямо в списке.
+     *
+     * Текст показывается целиком и сохраняется как есть: профиль, принесённый
+     * пользователем, применяется дословно, и «поправить за него» здесь нечего.
+     *
+     * Профилю из подписки при сохранении предлагается замок. Без него следующее
+     * обновление подписки вернуло бы провайдерскую версию — правка исчезла бы
+     * молча, а это худший вид потери: пользователь узнаёт о ней, только когда
+     * перестаёт работать то, ради чего он правил.
+     */
+    fun showEditConfigDialog(item: WarpVerifiedConfig) {
+        if (clientData.isBundledSeed(item)) {
+            Toast.makeText(this, "Встроенный профиль не редактируется", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val fromSubscription = item.id.startsWith(ClientData.VLESS_CONFIG_ID_PREFIX) &&
+            clientData.getVlessSubscription() != null
+        val input = EditText(this).apply {
+            minLines = 8
+            maxLines = 16
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            setText(item.rawConfig)
+        }
+        val pin = CheckBox(this).apply {
+            text = "Не трогать при обновлении подписки"
+            isChecked = clientData.isImportedProfilePinned(item.id)
+            visibility = if (fromSubscription) View.VISIBLE else View.GONE
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 16, 32, 0)
+            addView(input)
+            addView(pin)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Изменить профиль")
+            .setView(ScrollView(this).apply { addView(container) })
+            .setPositiveButton("Сохранить") { _, _ ->
+                val text = input.text?.toString().orEmpty()
+                // Разбор здесь, а не в хранилище: правка `Endpoint` обязана дойти до
+                // `host`/`port` записи — подключение читает их, а не текст, и без
+                // этого профиль молча продолжал бы ходить на прежний адрес.
+                val derived = if (item.id.startsWith(ClientData.VLESS_CONFIG_ID_PREFIX)) {
+                    null
+                } else {
+                    parseEditedImportedConfig(text)
+                }
+                val newId = clientData.updateImportedConfigRaw(item.id, text, derived)
+                if (newId == null) {
+                    Toast.makeText(this, "Не удалось сохранить: текст не разобрался", Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+                if (fromSubscription) {
+                    // Замок ставится на идентификатор **после** правки: у VLESS он
+                    // собирается из параметров ссылки, и почти любое изменение его
+                    // меняет. Отметка на прежнем ключе не защитила бы ничего и вдобавок
+                    // сделала бы неубираемым провайдерский исходник.
+                    if (newId != item.id) clientData.setImportedProfilePinned(item.id, false)
+                    clientData.setImportedProfilePinned(newId, pin.isChecked)
+                }
+                LogManager.log(
+                    "Профиль $newId изменён вручную" +
+                        if (fromSubscription && pin.isChecked) " и закреплён от обновления подписки." else "."
+                )
+                Toast.makeText(this, "Профиль сохранён", Toast.LENGTH_SHORT).show()
+                renderConfigs()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    /**
+     * Разбирает отредактированный текст профиля не-VLESS теми же парсерами, что и импорт.
+     *
+     * Форм у сохранённого текста две: классический блок `[Interface]`/`[Peer]` (в него
+     * приводятся импорты из Clash, Amnezia и WireGuard) и блок `HOST=`/`PORT=`.
+     * Пробуются обе; не разобравшийся текст — отказ, а не молча сохранённый мёртвый
+     * профиль в переборе.
+     */
+    private fun parseEditedImportedConfig(text: String): ClientData.ImportedEndpoint? {
+        val parsed = convertClassicWireGuardBlockToImportedConfig(text)
+            ?: convertHostBlockToImportedConfig(text)
+            ?: return null
+        return ClientData.ImportedEndpoint(
+            host = parsed.host,
+            port = parsed.port,
+            mode = parsed.mode,
+            engine = parsed.engine,
+            preferredSni = parsed.preferredSni,
+        )
     }
 
     fun isCurrentConfigPublic(item: WarpVerifiedConfig): Boolean {

@@ -514,6 +514,18 @@ object OperaProxyManager {
                 )
                 if (filtered.isNotEmpty()) filtered else hosts
             }.let { hosts ->
+                // Имена, уже поднимавшие Opera на этой сети, идут первыми — и
+                // только те, что и так есть в наборе: подставить сюда чужое имя
+                // значило бы обойти политику выбора, а не помочь ей.
+                val learned = clientData.getPreferredSniHosts(ClientData.SNI_SCOPE_OPERA)
+                if (learned.isEmpty()) {
+                    hosts
+                } else {
+                    val allowed = hosts.toHashSet()
+                    val front = learned.filter { it in allowed }
+                    if (front.isEmpty()) hosts else (front + hosts).distinct()
+                }
+            }.let { hosts ->
                 val limit = maxMaskHostAttempts?.coerceAtLeast(1)
                 if (limit != null && hosts.size > limit) hosts.take(limit) else hosts
             }
@@ -1043,9 +1055,19 @@ object OperaProxyManager {
                     successfulEndpoint?.let {
                         launchLogger("Opera endpoint сохранён в кэш $requestedCountry: $it")
                     }
+                    // Имя, на котором прокси действительно поднялся, запоминается
+                    // отдельно от MASQUE: рукопожатия у них разные, и общий список
+                    // учил бы политику на чужом опыте.
+                    if (fakeSni.isNotBlank()) {
+                        clientData.recordSniOutcome(ClientData.SNI_SCOPE_OPERA, fakeSni, success = true)
+                        launchLogger("SNI $fakeSni запомнен как рабочий для Opera на этой сети.")
+                    }
                     return ReadyState.STARTED_INTERNAL
                 }
 
+                if (fakeSni.isNotBlank()) {
+                    clientData.recordSniOutcome(ClientData.SNI_SCOPE_OPERA, fakeSni, success = false)
+                }
                 rememberFailedHostForSession(
                     country = requestedCountry,
                     pool = candidatePool,

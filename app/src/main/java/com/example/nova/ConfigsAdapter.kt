@@ -82,6 +82,7 @@ class ConfigsAdapter(
         private val boxDetails: LinearLayout = view.findViewById(R.id.box_config_details)
         private val tvBody: TextView = view.findViewById(R.id.tv_config_body)
         private val btnCopy: TextView = view.findViewById(R.id.btn_copy_config)
+        private val btnEdit: TextView = view.findViewById(R.id.btn_edit_config)
         private val btnDelete: TextView = view.findViewById(R.id.btn_delete_config)
         private val btnMoveTop: TextView = view.findViewById(R.id.btn_move_top)
         private val btnMoveUp: TextView = view.findViewById(R.id.btn_move_up)
@@ -186,6 +187,13 @@ class ConfigsAdapter(
                 )
                 Toast.makeText(activity, "Конфигурация скопирована", Toast.LENGTH_SHORT).show()
             }
+            // Встроенные профили не редактируются (I6): их текст приходит из
+            // прошивки, и подменить его значило бы получить профиль, о
+            // происхождении которого уже никто не скажет. Кнопку прячем, а не
+            // выключаем: неактивная кнопка читается как «сломано».
+            val editable = !clientData.isBundledSeed(item)
+            btnEdit.visibility = if (editable) View.VISIBLE else View.GONE
+            btnEdit.setOnClickListener { activity.showEditConfigDialog(item) }
             btnDelete.setOnClickListener {
                 expandedIds.remove(item.id)
                 // Профили VLESS лежат отдельно от хранилища WARP, поэтому удаление идёт

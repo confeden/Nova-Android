@@ -284,6 +284,9 @@ class ClientData(context: Context) {
     private val lastExitObservationFile = AtomicFile(File(appContext.filesDir, "last_exit_observation.json"))
     private val vlessProfilesFile = AtomicFile(File(appContext.filesDir, "vless_profiles.json"))
     private val importedSourceFile = AtomicFile(File(appContext.filesDir, "imported_source.json"))
+    private val sniStatsFile = AtomicFile(File(appContext.filesDir, "sni_stats.json"))
+    private val pinnedProfilesFile = AtomicFile(File(appContext.filesDir, "pinned_profiles.json"))
+    private val awgI1File = AtomicFile(File(appContext.filesDir, "awg_i1_overrides.json"))
 
     /**
      * Ключ MASQUE. В файле, а не в настройках.
@@ -303,6 +306,19 @@ class ClientData(context: Context) {
      * старое значение и повторил сброс.
      */
     private val appVersionStateFile = AtomicFile(File(appContext.filesDir, "app_version_state.json"))
+    /**
+     * Лицензия WARP+ и тип аккаунта. В файле, а не в настройках — тот же капкан, что у
+     * ключа MASQUE, `warp_imported_only_mode` и отладочного ключа AWG, четвёртый по счёту.
+     *
+     * Ключ вводят на экране настроек (главный процесс), а читает и применяет его
+     * `WarpIdentityBackfill` из процесса `:vpn`; тип аккаунта туда же и пишется. Пока обе
+     * величины лежали в `SharedPreferences`, любой следующий `commit()` из `:vpn`
+     * возвращал свою кэшированную карту — без только что введённого ключа — и ключ
+     * пропадал сам собой. Наблюдалось дважды подряд: ввёл ключ, переподключился,
+     * в настройках снова «Не задана».
+     */
+    private val warpLicenseFile = AtomicFile(File(appContext.filesDir, "warp_license.json"))
+    private val warpLicenseLock = Any()
     private val transportLatencyFile = AtomicFile(File(appContext.filesDir, "transport_latency.json"))
     private val vlessSubscriptionFile = AtomicFile(File(appContext.filesDir, "vless_subscription.json"))
     private val operaStateFile = AtomicFile(File(appContext.filesDir, "opera_state.json"))
@@ -1334,6 +1350,16 @@ class ClientData(context: Context) {
     }
 
     /**
+     * Выбран ли регион «AWG Proton».
+     *
+     * Отдельный предикат, а не сравнение строки по месту: решение о транспорте
+     * принимается в четырёх местах службы, и разъехавшиеся условия входа и выхода
+     * уже стоили проекта одного бага (кэш причин — G19, N-цепочка VLESS).
+     */
+    fun isProtonSourceActive(): Boolean =
+        normalizeRegionPreference(getExitRegionPreference()) == "proton"
+
+    /**
      * Профили VLESS и выбранная ссылка лежат в файле, а не в `SharedPreferences`.
      *
      * Служба живёт в отдельном процессе `:vpn`, а `SharedPreferences` межпроцессными
@@ -1536,6 +1562,7 @@ class ClientData(context: Context) {
             freshLinks = freshLinks,
             previousIdentities = previousIdentities,
             limit = MAX_VLESS_PROFILES,
+            pinnedIdentities = pinnedVlessIdentities(),
         )
         if (plan.changed) {
             // Активная ссылка могла оказаться среди удалённых: тогда перебор начнёт с
@@ -1607,6 +1634,280 @@ class ClientData(context: Context) {
      *
      * @return true, если запись действительно исчезла.
      */
+    /**
+     * Подобранные в фоне `I1` для встроенных AWG-профилей.
+     *
+     * Отдельный файл, а не правка текста профиля: встроенные конфигурации
+     * неприкосновенны (I6), и подмена их текста лишила бы нас возможности сказать,
+     * что в профиле от прошивки, а что подобрано. Здесь же лежит и выключатель —
+     * его читает служба, а `SharedPreferences` между процессами не работают (I2).
+     *
+     * **Файл намеренно не входит в сброс при обновлении**
+     * ([resetLearnedStateAfterUpdate] чистит замеры и ключи, а не этот файл):
+     * подбор идёт неделями по одному шагу в полчаса, и стирать его на каждой
+     * версии значило бы никогда его не закончить.
+     */
+    data class AwgI1Override(
+        val profileId: String,
+        val sni: String,
+        val i1: String,
+        val updatedAt: Long,
+        val attempts: Int,
+    )
+
+    fun isAwgI1AdaptationEnabled(): Boolean =
+        readAtomicJson(awgI1File)?.optBoolean("enabled", false) ?: false
+
+    fun setAwgI1AdaptationEnabled(enabled: Boolean) {
+        synchronized(awgI1Lock) {
+            val root = readAtomicJson(awgI1File) ?: JSONObject()
+            root.put("enabled", enabled)
+            writeAtomicRaw(awgI1File, root.toString())
+        }
+    }
+
+    fun getAwgI1Overrides(): Map<String, AwgI1Override> {
+        val items = readAtomicJson(awgI1File)?.optJSONObject("items") ?: return emptyMap()
+        val out = LinkedHashMap<String, AwgI1Override>()
+        items.keys().forEach { id ->
+            val entry = items.optJSONObject(id) ?: return@forEach
+            val i1 = entry.optString("i1")
+            if (i1.isBlank()) return@forEach
+            out[id] = AwgI1Override(
+                profileId = id,
+                sni = entry.optString("sni"),
+                i1 = i1,
+                updatedAt = entry.optLong("at", 0L),
+                attempts = entry.optInt("attempts", 0),
+            )
+        }
+        return out
+    }
+
+    fun getAwgI1LastStepAt(): Long = readAtomicJson(awgI1File)?.optLong("last_step_at", 0L) ?: 0L
+
+    /**
+     * Сколько имён профилю уже пробовали — счётчик, переживающий снятие подбора.
+     *
+     * Отдельно от [getAwgI1Overrides] потому, что подбор, себя не подтвердивший,
+     * **удаляется целиком**, а число попыток обязано остаться: именно оно выбирает
+     * следующее имя ([AwgI1Adaptation.nextSniForProfile]). Пока счётчик жил внутри
+     * записи, откат возвращал его к нулю, и ручная адаптация вечно предлагала одно
+     * и то же уже провалившееся имя.
+     */
+    fun getAwgI1AttemptCounts(): Map<String, Int> {
+        val root = readAtomicJson(awgI1File) ?: return emptyMap()
+        val out = LinkedHashMap<String, Int>()
+        root.optJSONObject("items")?.let { items ->
+            items.keys().forEach { id -> out[id] = items.optJSONObject(id)?.optInt("attempts", 0) ?: 0 }
+        }
+        root.optJSONObject("attempts")?.let { tried ->
+            tried.keys().forEach { id ->
+                val stored = tried.optInt(id, 0)
+                if (stored > (out[id] ?: 0)) out[id] = stored
+            }
+        }
+        return out
+    }
+
+    fun saveAwgI1Override(profileId: String, sni: String, i1: String, nowMs: Long = System.currentTimeMillis()) {
+        val id = profileId.trim()
+        if (id.isEmpty() || i1.isBlank()) return
+        synchronized(awgI1Lock) {
+            val root = readAtomicJson(awgI1File) ?: JSONObject()
+            val items = root.optJSONObject("items") ?: JSONObject()
+            val tried = root.optJSONObject("attempts") ?: JSONObject()
+            val previousAttempts = maxOf(
+                items.optJSONObject(id)?.optInt("attempts", 0) ?: 0,
+                tried.optInt(id, 0),
+            )
+            items.put(
+                id,
+                JSONObject().apply {
+                    put("sni", sni)
+                    put("i1", i1)
+                    put("at", nowMs)
+                    put("attempts", previousAttempts + 1)
+                },
+            )
+            tried.put(id, previousAttempts + 1)
+            root.put("items", items)
+            root.put("attempts", tried)
+            root.put("last_step_at", nowMs)
+            writeAtomicRaw(awgI1File, root.toString())
+        }
+    }
+
+    /**
+     * Возвращает подбор профиля к прежнему состоянию.
+     *
+     * Нужна ручной адаптации: она назначает кандидатный `I1` до прогона и обязана
+     * снять его, если профиль на нём data-plane не дал. Изменение, которое себя не
+     * подтвердило, оставаться не имеет права — иначе адаптация не подбирает, а
+     * рисует.
+     *
+     * @param previous прежняя запись или `null`, если её не было: тогда запись
+     *        удаляется целиком и профиль возвращается к `I1` из прошивки.
+     *
+     * Счётчик попыток при этом **не откатывается**: он живёт в отдельной карте
+     * `attempts` ([getAwgI1AttemptCounts]) и переживает и откат, и удаление записи.
+     * Пока он лежал внутри записи, откат возвращал его к прежнему значению — а
+     * выбор имени детерминирован по нему, так что следующий заход предлагал ровно
+     * то имя, которое только что не сработало, и адаптация не двигалась никогда.
+     */
+    fun restoreAwgI1Override(profileId: String, previous: AwgI1Override?) {
+        val id = profileId.trim()
+        if (id.isEmpty()) return
+        synchronized(awgI1Lock) {
+            val root = readAtomicJson(awgI1File) ?: JSONObject()
+            val items = root.optJSONObject("items") ?: JSONObject()
+            if (previous == null) {
+                items.remove(id)
+            } else {
+                items.put(
+                    id,
+                    JSONObject().apply {
+                        put("sni", previous.sni)
+                        put("i1", previous.i1)
+                        put("at", previous.updatedAt)
+                        put("attempts", previous.attempts)
+                    },
+                )
+            }
+            root.put("items", items)
+            writeAtomicRaw(awgI1File, root.toString())
+        }
+    }
+
+    fun clearAwgI1Overrides() {
+        synchronized(awgI1Lock) {
+            val root = readAtomicJson(awgI1File) ?: JSONObject()
+            root.remove("items")
+            root.remove("attempts")
+            root.remove("last_step_at")
+            writeAtomicRaw(awgI1File, root.toString())
+        }
+    }
+
+    /**
+     * Закреплённые профили: обновление подписки их не трогает.
+     *
+     * Файл, а не настройки (I2): список читает и служба, когда строит перебор, и
+     * экран, когда рисует замок на карточке.
+     */
+    fun isImportedProfilePinned(id: String): Boolean =
+        id.trim().takeIf { it.isNotEmpty() } in readPinnedProfileIds()
+
+    fun setImportedProfilePinned(id: String, pinned: Boolean) {
+        val normalized = id.trim()
+        if (normalized.isEmpty()) return
+        synchronized(pinnedProfilesLock) {
+            val ids = readPinnedProfileIds().toMutableSet()
+            val changed = if (pinned) ids.add(normalized) else ids.remove(normalized)
+            if (!changed) return
+            writeAtomicRaw(
+                pinnedProfilesFile,
+                JSONObject().put("ids", JSONArray(ids.toList())).toString(),
+            )
+        }
+    }
+
+    private fun readPinnedProfileIds(): Set<String> {
+        val array = readAtomicJson(pinnedProfilesFile)?.optJSONArray("ids") ?: return emptySet()
+        return (0 until array.length())
+            .mapNotNull { array.optString(it).trim().takeIf(String::isNotEmpty) }
+            .toSet()
+    }
+
+    /** Закреплённые профили VLESS в терминах их identity — в таком виде их знает `planSync`. */
+    private fun pinnedVlessIdentities(): Set<String> = readPinnedProfileIds()
+        .filter { it.startsWith(VLESS_CONFIG_ID_PREFIX) }
+        .mapTo(mutableSetOf()) { it.removePrefix(VLESS_CONFIG_ID_PREFIX) }
+
+    /**
+     * Разобранная конечная точка отредактированного профиля.
+     *
+     * Разбор делает экран — парсеры импорта живут там, и второй их экземпляр здесь
+     * разошёлся бы с первым молча. Хранилищу передаётся уже готовый результат
+     * именно потому, что без него правка `Endpoint` не доезжала никуда: подключение
+     * берёт `host`/`port` из записи, а не из текста.
+     */
+    data class ImportedEndpoint(
+        val host: String,
+        val port: Int,
+        val mode: String,
+        val engine: String,
+        val preferredSni: String,
+    )
+
+    /**
+     * Заменяет текст импортированного профиля, сохраняя его место в списке.
+     *
+     * Встроенные профили не редактируются (I6): их текст приходит из прошивки
+     * вместе с параметрами обфускации, и подменить его значило бы получить
+     * профиль, о происхождении которого никто уже не скажет.
+     *
+     * @param derived разобранные поля нового текста; `null` — текст не разобрался,
+     *        и правка отклоняется. Для профилей не-VLESS они обязательны: хранить
+     *        новый текст рядом со старыми `host`/`port` значит показывать один
+     *        адрес и подключаться к другому.
+     * @return идентификатор карточки **после** правки — у VLESS он меняется вместе
+     *         с identity, и закрепление надо ставить именно на него; `null`, если
+     *         профиль не найден, встроенный или текст не разобрался.
+     */
+    fun updateImportedConfigRaw(
+        id: String,
+        rawConfig: String,
+        derived: ImportedEndpoint? = null,
+    ): String? {
+        val normalizedId = id.trim()
+        val text = rawConfig.trim()
+        if (normalizedId.isEmpty() || text.isEmpty()) return null
+
+        if (normalizedId.startsWith(VLESS_CONFIG_ID_PREFIX)) {
+            val identity = normalizedId.removePrefix(VLESS_CONFIG_ID_PREFIX)
+            val parsed = VlessConfig.parse(text) ?: return null
+            val links = getVlessProfileLinks().toMutableList()
+            val index = links.indexOfFirst { VlessConfig.parse(it)?.identity == identity }
+            if (index < 0) return null
+            val wasActive = getVlessConfigLink().trim() == links[index].trim()
+            links[index] = text
+            writeVlessStore(links, if (wasActive) text else getVlessConfigLink())
+            // Закрепление живёт на identity, а правка могла её сменить: переносим
+            // отметку, иначе закреплённый профиль тихо перестал бы быть закреплённым.
+            val newIdentity = parsed.identity
+            if (newIdentity.isNotEmpty() && newIdentity != identity && isImportedProfilePinned(normalizedId)) {
+                setImportedProfilePinned(normalizedId, false)
+                setImportedProfilePinned("$VLESS_CONFIG_ID_PREFIX$newIdentity", true)
+            }
+            return if (newIdentity.isNotEmpty()) "$VLESS_CONFIG_ID_PREFIX$newIdentity" else normalizedId
+        }
+
+        if (derived == null || derived.host.isBlank() || derived.port !in 1..65535) return null
+        synchronized(warpVerifiedConfigsLock) {
+            val configs = getWarpVerifiedConfigs()
+            val target = configs.firstOrNull { it.id == normalizedId } ?: return null
+            if (isBundledSeed(target)) return null
+            saveWarpVerifiedConfigs(
+                configs.map {
+                    if (it.id == normalizedId) {
+                        it.copy(
+                            rawConfig = text,
+                            host = derived.host,
+                            port = derived.port,
+                            mode = derived.mode.ifBlank { it.mode },
+                            engine = derived.engine.ifBlank { it.engine },
+                            preferredSni = derived.preferredSni,
+                        )
+                    } else {
+                        it
+                    }
+                }
+            )
+        }
+        return normalizedId
+    }
+
     fun removeImportedConfig(id: String): Boolean {
         val normalized = id.trim()
         if (normalized.isEmpty()) return false
@@ -1705,8 +2006,10 @@ class ClientData(context: Context) {
     fun isVlessOnlyTransportMode(): Boolean = isVlessExplicitlyChosen()
 
     fun shouldAllowOperaTransport(): Boolean {
-        return when (getExitRegionPreference()) {
-            "ru" -> false
+        return when (normalizeRegionPreference(getExitRegionPreference())) {
+            // Proton — явный выбор пользователя, и подменять его встроенной Opera
+            // нельзя: снаружи это читалось бы как «Proton работает».
+            "ru", "proton" -> false
             else -> true
         }
     }
@@ -1720,7 +2023,7 @@ class ClientData(context: Context) {
         return when (normalizeRegionPreference(getExitRegionPreference())) {
             "eu" -> listOf("EU" to "EU")
             "us" -> listOf("AM" to "US")
-            "ru" -> emptyList()
+            "ru", "proton" -> emptyList()
             else -> listOf("EU" to "EU", "AM" to "US")
         }
     }
@@ -1860,6 +2163,76 @@ class ClientData(context: Context) {
         russia = TrafficMaskCatalog.getRussiaHosts(appContext).take(SNI_RUSSIA_POOL_LIMIT),
         global = TrafficMaskCatalog.getGlobalHosts(appContext),
     )
+
+    /**
+     * Имена SNI, которые уже поднимали сессию на **этом** устройстве.
+     *
+     * Отдельно по транспортам: рукопожатие MASQUE и рукопожатие Opera выглядят
+     * по-разному, и имя, проходящее в одном, не обязано проходить в другом —
+     * складывать их в один список значило бы учить политику на чужом опыте.
+     *
+     * Файл, а не настройки (I2): пишет процесс `:vpn`, а показывать список будет
+     * интерфейс.
+     */
+    fun getPreferredSniHosts(scope: String, limit: Int = SNI_PREFERRED_LIMIT): List<String> {
+        val stats = readAtomicJson(sniStatsFile)?.optJSONObject(normalizeSniScope(scope))
+            ?: return emptyList()
+        data class Row(val host: String, val score: Int, val lastOkAt: Long)
+        val rows = ArrayList<Row>()
+        stats.keys().forEach { host ->
+            val entry = stats.optJSONObject(host) ?: return@forEach
+            val successes = entry.optInt("ok", 0)
+            if (successes <= 0) return@forEach
+            val score = successes - entry.optInt("fail", 0)
+            // Одного давнего успеха мало. Успехи не гаснут и записи с ними не
+            // вычищаются, поэтому имя, поднявшее сессию однажды дома и с тех пор
+            // отказавшее двадцать раз в дороге, оставалось единственной строкой с
+            // `ok > 0` — то есть возглавляло список и забирало первую попытку
+            // каждого цикла на сети, где оно заведомо мертво.
+            if (score <= 0) return@forEach
+            rows += Row(host, score, entry.optLong("last_ok_at", 0L))
+        }
+        return rows
+            .sortedWith(compareByDescending<Row> { it.score }.thenByDescending { it.lastOkAt })
+            .take(limit)
+            .map { it.host }
+    }
+
+    /** @param success сессия действительно поднялась с этим именем */
+    fun recordSniOutcome(scope: String, host: String, success: Boolean) {
+        val normalizedHost = SniMaskPolicy.normalizeHost(host)
+        if (normalizedHost.isBlank()) return
+        val normalizedScope = normalizeSniScope(scope)
+        synchronized(sniStatsLock) {
+            val root = readAtomicJson(sniStatsFile) ?: JSONObject()
+            val scopeObject = root.optJSONObject(normalizedScope) ?: JSONObject()
+            val entry = scopeObject.optJSONObject(normalizedHost) ?: JSONObject()
+            if (success) {
+                entry.put("ok", entry.optInt("ok", 0) + 1)
+                entry.put("last_ok_at", System.currentTimeMillis())
+            } else {
+                entry.put("fail", entry.optInt("fail", 0) + 1)
+            }
+            scopeObject.put(normalizedHost, entry)
+            // Список не растёт бесконечно: держим только те имена, у которых есть
+            // хоть один успех, плюс свежие неудачи — иначе файл превращается в
+            // копию всего каталога.
+            if (scopeObject.length() > SNI_STATS_LIMIT) {
+                val worst = scopeObject.keys().asSequence()
+                    .filter { (scopeObject.optJSONObject(it)?.optInt("ok", 0) ?: 0) == 0 }
+                    .toList()
+                worst.take(scopeObject.length() - SNI_STATS_LIMIT).forEach(scopeObject::remove)
+            }
+            root.put(normalizedScope, scopeObject)
+            writeAtomicRaw(sniStatsFile, root.toString())
+        }
+    }
+
+    private fun normalizeSniScope(value: String?): String =
+        when (value?.trim()?.lowercase(Locale.US)) {
+            SNI_SCOPE_OPERA -> SNI_SCOPE_OPERA
+            else -> SNI_SCOPE_MASQUE
+        }
 
     fun getTrafficMaskEnabled(): Boolean = prefs.getBoolean("traffic_mask_enabled", true)
     fun setTrafficMaskEnabled(enabled: Boolean) {
@@ -3626,6 +3999,26 @@ class ClientData(context: Context) {
     }
 
     /**
+     * Токен и device id из личности MASQUE — запасной адресат для лицензии WARP+.
+     *
+     * Нужны потому, что на устройстве может не быть обычной регистрации WARP вовсе:
+     * встроенные семена поднимаются со своими ключами, а фоновая регистрация
+     * ([WarpIdentityBackfill]) выключена, как только готовая личность MASQUE уже есть
+     * ([shouldAttemptWarpIdentityBackfill]). В такой связке введённый ключ было некуда
+     * привязать никогда, хотя экран обещал «применится при регистрации», — а личность
+     * MASQUE это и есть устройство Cloudflare, которому лицензия предназначена.
+     */
+    fun getMasqueIdentityCredentials(): Pair<String, String>? {
+        val raw = getMasqueConfigJson()?.takeIf { it.isNotBlank() } ?: return null
+        return runCatching {
+            val json = JSONObject(raw)
+            val token = json.optString("access_token").trim()
+            val deviceId = json.optString("device_id").trim()
+            if (token.isEmpty() || deviceId.isEmpty()) null else token to deviceId
+        }.getOrNull()
+    }
+
+    /**
      * Лицензия WARP+, введённая пользователем.
      *
      * Хранится отдельно от личности и переживает её сброс: личность приложение
@@ -3633,20 +4026,55 @@ class ClientData(context: Context) {
      * каждом перевыпуске нельзя. При регистрации нового устройства лицензия применяется
      * заново — иначе оно снова окажется бесплатным.
      */
-    fun getWarpPlusLicense(): String = prefs.getString("warp_plus_license", "").orEmpty().trim()
+    fun getWarpPlusLicense(): String = readWarpLicenseState().optString("license").trim()
 
     fun setWarpPlusLicense(license: String) {
-        val normalized = license.trim()
-        prefs.edit().apply {
-            if (normalized.isEmpty()) remove("warp_plus_license") else putString("warp_plus_license", normalized)
-        }.commit()
+        writeWarpLicenseState("license" to license.trim())
     }
 
     /** Тип аккаунта, каким его вернул сервер при последней привязке лицензии. */
-    fun getWarpAccountType(): String = prefs.getString("warp_account_type", "").orEmpty().trim()
+    fun getWarpAccountType(): String = readWarpLicenseState().optString("account_type").trim()
 
     fun setWarpAccountType(accountType: String) {
-        prefs.edit().putString("warp_account_type", accountType.trim()).commit()
+        writeWarpLicenseState("account_type" to accountType.trim(), "last_error" to "")
+    }
+
+    /**
+     * Чем закончилась последняя попытка привязки, если она провалилась.
+     *
+     * Нужно затем, что «ключ сохранён, аккаунт ещё не проверен» и «Cloudflare отклонил
+     * ключ» — разные вещи, а на экране выглядели одинаково: отказ жил три секунды во
+     * всплывающем сообщении и исчезал. Живой пример: у ключей из публичных каналов
+     * лимит устройств давно исчерпан, и сервер отвечает `1056 Too many connected
+     * devices` — это ответ про ключ, а не про Nova, и пользователь должен его видеть.
+     */
+    fun getWarpLicenseLastError(): String = readWarpLicenseState().optString("last_error").trim()
+
+    fun setWarpLicenseLastError(message: String) {
+        writeWarpLicenseState("last_error" to message.trim().take(160))
+    }
+
+    private fun readWarpLicenseState(): JSONObject {
+        readAtomicJson(warpLicenseFile)?.let { return it }
+        // Перенос из prefs — ровно один раз, пока файла ещё нет. Если файл есть, но не
+        // прочитался, возвращаться к prefs нельзя: там лежит зеркало, которое любой
+        // `commit()` из `:vpn` мог откатить, то есть ровно тот дефект, ради которого
+        // значения сюда и переехали.
+        if (warpLicenseFile.baseFile.exists()) return JSONObject()
+        val migrated = JSONObject().apply {
+            put("license", prefs.getString("warp_plus_license", "").orEmpty().trim())
+            put("account_type", prefs.getString("warp_account_type", "").orEmpty().trim())
+        }
+        writeAtomicRaw(warpLicenseFile, migrated.toString())
+        return migrated
+    }
+
+    private fun writeWarpLicenseState(vararg values: Pair<String, String>) {
+        synchronized(warpLicenseLock) {
+            val root = readWarpLicenseState()
+            values.forEach { (key, value) -> root.put(key, value) }
+            writeAtomicRaw(warpLicenseFile, root.toString())
+        }
     }
 
     fun saveTunnelUiSnapshot(
@@ -7973,6 +8401,9 @@ class ClientData(context: Context) {
             // VLESS в общую цепочку не входит: узел задаёт пользователь, и подбирать
             // его перебором не из чего. Выбирается только явно.
             "vless" -> "vless"
+            // AWG Proton — собственные сгенерированные профили. Как и VLESS, только
+            // явно: встроенную цепочку они не дополняют, а заменяют.
+            "proton" -> "proton"
             else -> "auto"
         }
     }
@@ -8324,6 +8755,16 @@ class ClientData(context: Context) {
         private const val DEFAULT_TRAFFIC_MASK_HOST = "ads.max.ru"
         private const val UNSET_SENTINEL = "\u0000"
         private const val TRAFFIC_MASK_STATS_PREFIX = "traffic_mask_stats|"
+        const val SNI_SCOPE_MASQUE = "masque"
+        const val SNI_SCOPE_OPERA = "opera"
+
+        /** Сколько выученных имён поднимать наверх и сколько всего держать в файле. */
+        private const val SNI_PREFERRED_LIMIT = 8
+        private const val SNI_STATS_LIMIT = 256
+        private val sniStatsLock = Any()
+        private val pinnedProfilesLock = Any()
+        private val awgI1Lock = Any()
+
         private const val STRATEGY_SCOPE_DEFAULT = "default"
 
         /**

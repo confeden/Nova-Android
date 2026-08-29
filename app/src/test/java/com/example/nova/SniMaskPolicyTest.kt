@@ -21,6 +21,7 @@ class SniMaskPolicyTest {
         blocked: Set<String> = emptySet(),
         custom: List<String> = emptyList(),
         seed: Int = 0,
+        preferred: List<String> = emptyList(),
     ) = SniMaskPolicy.Inputs(
         mode = mode,
         regime = regime,
@@ -29,7 +30,34 @@ class SniMaskPolicyTest {
         seed = seed,
         attempt = attempt,
         blockedHosts = blocked,
+        preferredHosts = preferred,
     )
+
+    @Test
+    fun `на белом списке берутся только проверенные имена`() {
+        val order = SniMaskPolicy.buildOrder(inputs(regime = SniMaskPolicy.Regime.WHITELIST))
+        // Большой российский список там тоже недоступен: каждое имя из него —
+        // потраченная впустую попытка рукопожатия.
+        assertTrue(order.none { it in pools.russia })
+        assertTrue(order.all { it in pools.white })
+    }
+
+    @Test
+    fun `выученное имя поднимается наверх своего набора`() {
+        val order = SniMaskPolicy.buildOrder(
+            inputs(regime = SniMaskPolicy.Regime.WHITELIST, preferred = listOf("zakupki.gov.ru")),
+        )
+        assertEquals("zakupki.gov.ru", order.first())
+        assertTrue(order.contains("www.gosuslugi.ru"))
+    }
+
+    @Test
+    fun `выученное чужое имя не возвращает зарубежные в режим белого списка`() {
+        val order = SniMaskPolicy.buildOrder(
+            inputs(regime = SniMaskPolicy.Regime.WHITELIST, preferred = listOf("www.google.com")),
+        )
+        assertTrue(order.none { it in pools.global })
+    }
 
     @Test
     fun `на белом списке зарубежных имён не появляется`() {

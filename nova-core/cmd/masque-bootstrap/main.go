@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"nova-core/engine"
+	nova "nova-core/engine"
 )
 
 func main() {
@@ -21,7 +21,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	result, err := engine.EnsureMasqueConfig(*existing, *accessToken, *deviceID, *deviceName)
+	result, err := nova.EnsureMasqueConfig(*existing, *accessToken, *deviceID, *deviceName)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

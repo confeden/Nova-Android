@@ -367,11 +367,18 @@ object VlessSubscription {
      * 3. **Первая загрузка ничего не удаляет.** Состава прошлой загрузки нет, и любой
      *    уже сохранённый профиль выглядел бы как «пропал из подписки».
      */
+    /**
+     * @param pinnedIdentities профили, которые пользователь закрепил вручную.
+     *        Обновление подписки их не удаляет и не переписывает: человек правил
+     *        их сам, и молча вернуть провайдерскую версию — значит потерять его
+     *        работу без единого следа.
+     */
     fun planSync(
         existingLinks: List<String>,
         freshLinks: List<String>,
         previousIdentities: Collection<String>,
         limit: Int,
+        pinnedIdentities: Set<String> = emptySet(),
     ): SyncPlan {
         val freshByIdentity = LinkedHashMap<String, String>()
         for (link in freshLinks) {
@@ -384,7 +391,7 @@ object VlessSubscription {
         var removed = 0
         for (link in existingLinks) {
             val identity = VlessConfig.parse(link)?.identity
-            if (identity != null && identity in goneIdentities) {
+            if (identity != null && identity in goneIdentities && identity !in pinnedIdentities) {
                 removed++
                 continue
             }

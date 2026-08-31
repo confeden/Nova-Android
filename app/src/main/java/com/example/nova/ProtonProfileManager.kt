@@ -5,6 +5,7 @@ import android.content.Intent
 import androidx.core.content.ContextCompat
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.random.Random
@@ -33,6 +34,9 @@ object ProtonProfileManager {
     /** Перевыпуск за месяц до конца сертификата: молча умерший профиль хуже лишнего прогона. */
     private const val CERT_RENEW_MARGIN_MS = 30L * 24 * 60 * 60 * 1000
 
+    /** Шаг счётчика у длинных сетевых шагов, см. [publishTicking]. */
+    private const val TICK_PERIOD_SECONDS = 2L
+
     fun interface StatusListener {
         fun onStatus(text: String)
     }
@@ -44,6 +48,18 @@ object ProtonProfileManager {
     private val lastStatus = AtomicReference("")
     private val listeners = CopyOnWriteArrayList<StatusListener>()
     private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "ProtonProfiles") }
+
+    /**
+     * Аренда прогона, взятая этим процессом, и её старшинство.
+     *
+     * Хранится здесь, а не передаётся по цепочке вызовов, ровно потому, что
+     * признак жизни ставится из [publish] — а туда доходит и тик длинного шага,
+     * который о владельце ничего не знает.
+     */
+    private val activeLease = AtomicReference<Pair<String, Int>?>(null)
+
+    /** Что уже сказано журналу: тики одного шага не должны его засорять. */
+    private val lastLoggedStep = AtomicReference("")
 
     /**
      * Пользователь выбрал Proton и ещё не передумал.
@@ -88,14 +104,73 @@ object ProtonProfileManager {
         listeners -= listener
     }
 
-    private fun publish(text: String) {
+    /**
+     * @param step true — это новый шаг прогона, а не тик секундомера внутри него.
+     *
+     * Шаги пишутся в журнал. Раньше не писался ни один: строки уходили только
+     * слушателям экрана, и на устройстве, где экран уже закрыт, весь прогон
+     * оставлял в журнале ровно одну строку — свой итог. Разобрать по такому
+     * журналу, на каком шаге всё встало, нельзя было в принципе (I4).
+     */
+    private fun publish(text: String, step: Boolean = true) {
         lastStatus.set(text)
+        if (step && lastLoggedStep.getAndSet(text) != text) LogManager.log(text)
+        activeLease.get()?.let { (owner, priority) ->
+            runCatching { leaseStore?.heartbeatRunLease(owner, priority) }
+        }
         listeners.forEach { runCatching { it.onStatus(text) } }
+    }
+
+    /**
+     * Хранилище для признака жизни аренды.
+     *
+     * Отдельным полем, потому что [publish] вызывается и из тика, у которого на
+     * руках нет ни контекста, ни хранилища.
+     */
+    @Volatile
+    private var leaseStore: ProtonProfileStore? = null
+
+    /**
+     * Шаг с бегущим счётчиком секунд.
+     *
+     * Сетевые шаги прогона длинные и без единого признака жизни: «беру список
+     * серверов» висело на экране 2 мин 27 с одной и той же строкой, потому что
+     * весь шаг — один вызов, внутрь которого экран не видит. Гонка по хостам
+     * сократила это до ~23 с, но неподвижная строка и на двадцать третьей секунде
+     * читается как зависание. Счётчик ничего не обещает и ничего не предсказывает
+     * — он только показывает, что работа идёт.
+     */
+    private fun <T> publishTicking(text: String, block: () -> T): T {
+        publish(text)
+        val ticker = Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "ProtonStatusTick").apply { isDaemon = true }
+        }
+        val startedAt = System.nanoTime()
+        ticker.scheduleWithFixedDelay(
+            {
+                val seconds = (System.nanoTime() - startedAt) / 1_000_000_000L
+                runCatching { publish("$text — $seconds с", step = false) }
+            },
+            TICK_PERIOD_SECONDS,
+            TICK_PERIOD_SECONDS,
+            TimeUnit.SECONDS,
+        )
+        return try {
+            block()
+        } finally {
+            // `shutdownNow`, а не `shutdown`: иначе уже поставленный тик успел бы
+            // перебить статус следующего шага собственным, устаревшим.
+            ticker.shutdownNow()
+        }
     }
 
     /**
      * Запускает прогон, если он ещё не идёт.
      *
+     * @param background прогон никто не ждёт: он идёт сам по себе при живом
+     *        подключении, чтобы к моменту выбора Proton всё уже было готово.
+     *        Такой прогон уступает явному выбору пользователя и не берётся, пока
+     *        тот идёт.
      * @param onFinished вызывается в рабочем потоке ровно один раз за прогон.
      * @return false, если прогон уже шёл — тогда [onFinished] вызван не будет, а
      *         экран увидит происходящее через слушателя статуса.
@@ -103,17 +178,39 @@ object ProtonProfileManager {
     fun ensureProfiles(
         context: Context,
         force: Boolean = false,
+        background: Boolean = false,
         onFinished: ((Outcome) -> Unit)? = null,
     ): Boolean {
-        if (!running.compareAndSet(false, true)) return false
         val appContext = context.applicationContext
+        val store = ProtonProfileStore(appContext)
+        val priority = if (background) {
+            ProtonProfileStore.RUN_PRIORITY_BACKGROUND
+        } else {
+            ProtonProfileStore.RUN_PRIORITY_USER
+        }
+        val owner = "${if (background) "bg" else "user"}:${android.os.Process.myPid()}"
+        if (!running.compareAndSet(false, true)) return false
+        if (!store.tryAcquireRunLease(owner, priority)) {
+            running.set(false)
+            LogManager.log(
+                "Proton: выпуск уже ведёт другой процесс (${store.readRunLease()?.owner ?: "?"}) — " +
+                    "второй прогон не начинаем."
+            )
+            return false
+        }
+        activeLease.set(owner to priority)
+        leaseStore = store
+        lastLoggedStep.set("")
         worker.execute {
             val outcome = try {
-                run(appContext, force)
+                run(appContext, store, owner, force)
             } catch (e: Exception) {
                 LogManager.log("Proton: прогон упал — ${e.message}")
                 Outcome(emptyList(), "Proton: ошибка — ${shortReason(e)}", false)
             } finally {
+                activeLease.set(null)
+                leaseStore = null
+                store.releaseRunLease(owner)
                 running.set(false)
             }
             publish(outcome.message)
@@ -122,11 +219,29 @@ object ProtonProfileManager {
         return true
     }
 
+    /**
+     * Прогон продолжается, только пока аренда наша.
+     *
+     * Отобрать её может лишь явный выбор Proton пользователем; фоновая подготовка
+     * при этом обязана закончиться, не записав ни профилей, ни личности, — иначе
+     * она перезапишет чужой ключ, а сервер помнит только последний.
+     */
+    private fun holdsLease(store: ProtonProfileStore, owner: String): Boolean =
+        store.ownsRunLease(owner)
+
     private fun shortReason(e: Exception): String =
         (e.message ?: e.javaClass.simpleName).take(48)
 
-    private fun run(context: Context, force: Boolean): Outcome {
-        val store = ProtonProfileStore(context)
+    private fun run(
+        context: Context,
+        store: ProtonProfileStore,
+        owner: String,
+        force: Boolean,
+    ): Outcome {
+        // Узел, через который прошлый заход достучался до API, подсказывается до
+        // первого запроса: поиск через DoH — самое хрупкое звено, и пропустить его
+        // значит продолжить прогон, а не начать его заново.
+        ProtonApi.seedAlternativeHost(store.readAlternativeHost())
 
         publish("Proton: проверяю профили")
         val existing = store.readProfiles()
@@ -154,19 +269,21 @@ object ProtonProfileManager {
         val device = account?.device ?: ProtonProfileStore.buildDeviceProfile()
         val seed = account?.seed?.takeIf { certAlive } ?: ProtonCrypto.randomSeed()
 
-        publish("Proton: создаю сессию")
-        val session = ProtonApi.createCredentiallessSession(device)
+        val session = publishTicking("Proton: создаю сессию") {
+            ProtonApi.createCredentiallessSession(device)
+        }
 
-        publish("Proton: беру список серверов")
         // Отказ этого шага — не отказ прогона: ниже лежит встроенный список. Из
         // России `/vpn/logicals` не возвращает пустоту, а **подвисает до таймаута**
         // (P3), то есть выходит исключением — и без этого перехвата запас,
         // положенный ровно на этот случай, не доставался никогда.
-        val liveServers = try {
-            ProtonApi.fetchFreeServers(device, session)
-        } catch (e: Exception) {
-            LogManager.log("Proton: /vpn/logicals не ответил — ${e.message}")
-            emptyList()
+        val liveServers = publishTicking("Proton: беру список серверов") {
+            try {
+                ProtonApi.fetchFreeServers(device, session)
+            } catch (e: Exception) {
+                LogManager.log("Proton: /vpn/logicals не ответил — ${e.message}")
+                emptyList()
+            }
         }
         // Живой список всегда в приоритете, встроенный — запасной. Из России падает
         // ровно этот шаг: маленькие вызовы по альтернативному маршруту проходят, а
@@ -190,12 +307,22 @@ object ProtonProfileManager {
             bundled
         }
 
+        // Проверка вплотную к регистрации ключа, а не только перед записью личности:
+        // сервер помнит **последний** зарегистрированный ключ, и прогон, потерявший
+        // аренду, отобрал бы ключ у победителя, ничего при этом не записав.
+        if (!holdsLease(store, owner)) return preempted()
+
         // Живой сертификат переиспользуется: он выдаётся на год, и повторная
         // регистрация того же ключа — лишний запрос без единого последствия.
         val certExpiresAt = account?.certExpiresAt?.takeIf { certAlive } ?: run {
-            publish("Proton: регистрирую ключ")
-            ProtonApi.registerClientKey(device, session, ProtonCrypto.ed25519PublicKeyPem(seed))
+            publishTicking("Proton: регистрирую ключ") {
+                ProtonApi.registerClientKey(device, session, ProtonCrypto.ed25519PublicKeyPem(seed))
+            }
         }
+
+        // Последняя точка, где уступить ещё бесплатно: дальше идёт запись личности,
+        // а она общая для обоих процессов.
+        if (!holdsLease(store, owner)) return preempted()
 
         store.writeAccount(
             ProtonProfileStore.Account(
@@ -207,6 +334,11 @@ object ProtonProfileManager {
                 device = device,
             )
         )
+
+        // Порядок здесь больше ничего не решает: `writeAccount` правит файл, а не
+        // пересобирает его, и чужие поля переживают запись. Раньше решал — узел
+        // приходилось писать строго после аккаунта, иначе его вымывало.
+        store.writeAlternativeHost(ProtonApi.currentAlternativeHost())
 
         val whiteHosts = runCatching { TrafficMaskCatalog.getWhiteHosts(context) }
             .getOrDefault(emptyList())
@@ -242,6 +374,8 @@ object ProtonProfileManager {
                     createdAt = System.currentTimeMillis(),
                 )
             }
+
+        if (!holdsLease(store, owner)) return preempted()
 
         // Кандидаты уходят в файл, а мерит их служба: `protect()` есть только у
         // `VpnService`, а незащищённый сокет ушёл бы внутрь поднятого туннеля и
@@ -286,6 +420,31 @@ object ProtonProfileManager {
         }
     }
 
+    /**
+     * Есть ли всё, без чего выбор Proton не поднимется: личность, живой сертификат и
+     * полный список узлов.
+     *
+     * Замер сюда **намеренно не входит**, хотя [run] без него в сеть всё-таки идёт.
+     * Разница по назначению: у прогона замер — это ранжирование, и переделать его при
+     * явном выборе полезно. А для фоновой подготовки «замер не прошёл» — это
+     * состояние сети, а не незаконченная работа: на сети, где узлы Proton не отвечают
+     * на пробу (открытый P11), список никогда не станет измеренным, и подготовка
+     * заводила бы полный сорокасекундный прогон каждые пятнадцать минут до конца
+     * сеанса, ничего этим не меняя.
+     */
+    fun isPreparationComplete(context: Context): Boolean {
+        val store = ProtonProfileStore(context)
+        val account = store.readAccount() ?: return false
+        if (account.certExpiresAt <= System.currentTimeMillis() + CERT_RENEW_MARGIN_MS) return false
+        return store.readProfiles().size >= TARGET_COUNT
+    }
+
+    /** Итог прогона, у которого аренду забрал явный выбор пользователя. */
+    private fun preempted(): Outcome {
+        LogManager.log("Proton: выпуск перехватил явный выбор пользователя — фоновый прогон заканчиваем.")
+        return Outcome(emptyList(), "Proton: подготовку продолжает выбор пользователя", false)
+    }
+
     private fun requestProbe(context: Context) {
         runCatching {
             ContextCompat.startForegroundService(
@@ -314,6 +473,12 @@ object ProtonProfileManager {
         val deadline = System.currentTimeMillis() + PROBE_WAIT_MS
         var lastDone = -1
         while (System.currentTimeMillis() < deadline) {
+            // Признак жизни аренды: замер идёт до двух минут, а `publish` здесь
+            // случается только при сдвиге счётчика — без этого аренда протухла бы
+            // прямо посреди работающего прогона.
+            activeLease.get()?.let { (owner, priority) ->
+                runCatching { store.heartbeatRunLease(owner, priority) }
+            }
             val state = store.readProbeState()
             if (state != null) {
                 if (state.done != lastDone) {

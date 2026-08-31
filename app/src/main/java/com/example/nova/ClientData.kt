@@ -55,6 +55,12 @@ data class TunnelUiSnapshot(
     val ipv6: String = "",
     val country: String = "",
     val backend: String = NovaVpnService.BACKEND_WARP,
+    /**
+     * Транспорт, на котором снят снимок. Бэкенда мало: `WARP` носят и встроенные
+     * семена, и MASQUE, и импортированный AWG, и Proton — по нему снимок одной
+     * сессии подходил к любой другой, и выход прошлой сессии показывался как текущий.
+     */
+    val transport: String = "",
     val observedAt: Long = 0L,
 )
 
@@ -319,6 +325,11 @@ class ClientData(context: Context) {
      */
     private val warpLicenseFile = AtomicFile(File(appContext.filesDir, "warp_license.json"))
     private val warpLicenseLock = Any()
+    /** Выбранный регион/протокол — см. [getExitRegionPreference]. */
+    private val exitRegionFile = AtomicFile(File(appContext.filesDir, "exit_region.json"))
+    private val exitRegionLock = Any()
+    /** Идёт регистрация Proton — см. [isProtonPreparationRequested]. */
+    private val protonPreparationFile = AtomicFile(File(appContext.filesDir, "proton_preparation.json"))
     private val transportLatencyFile = AtomicFile(File(appContext.filesDir, "transport_latency.json"))
     private val vlessSubscriptionFile = AtomicFile(File(appContext.filesDir, "vless_subscription.json"))
     private val operaStateFile = AtomicFile(File(appContext.filesDir, "opera_state.json"))
@@ -436,7 +447,13 @@ class ClientData(context: Context) {
         val lastFailureAt: Long = 0L,
     )
 
-    private data class ExitObservation(
+    /**
+     * Одно наблюдение выхода: адрес, страна и colo из **одного** ответа
+     * `/cdn-cgi/trace` (I10). Публичный, потому что его отдаёт
+     * [getLastExitObservation] — читателю нужна вся тройка сразу, иначе поля снова
+     * начнут разъезжаться по разным наблюдениям.
+     */
+    data class ExitObservation(
         val country: String = "",
         val colo: String = "",
         val ip: String = "",
@@ -1331,9 +1348,75 @@ class ClientData(context: Context) {
     fun clearRestartSession() {
         saveRestartSession(null)
     }
-    fun getExitRegionPreference(): String = prefs.getString("exit_region_preference", "auto") ?: "auto"
+    /**
+     * Выбранный регион/протокол. В файле, а не в настройках (I2) — пятый случай ловушки.
+     *
+     * Значение пишет экран настроек, а читает и служба: по нему решается всё —
+     * `isProtonSourceActive`, `isVlessExplicitlyChosen`, `shouldAllowOperaTransport`.
+     * `SharedPreferences` в `MODE_PRIVATE` кэшируются каждым процессом отдельно, и
+     * любой `commit()` из `:vpn` (их там десятки — один `saveRestartSession` зовётся
+     * двенадцать раз) переписывал весь файл настроек из своей карты, возвращая region
+     * к тому, что `:vpn` прочитал при старте. Наружу это выглядело так: на экране
+     * выбран AWG Proton, а подключение идёт по встроенным семенам WARP — служба
+     * держала `auto` и честно строила очередь для него.
+     *
+     * Тот же капкан, что у ключа MASQUE (G2), отладочного ключа AWG (G16) и лицензии
+     * WARP+ (G70); лечение то же.
+     */
+    fun getExitRegionPreference(): String =
+        normalizeRegionPreference(readExitRegionState().optString("region").ifBlank { "auto" })
+
     fun setExitRegionPreference(value: String) {
-        prefs.edit().putString("exit_region_preference", normalizeRegionPreference(value)).commit()
+        val normalized = normalizeRegionPreference(value)
+        synchronized(exitRegionLock) {
+            writeAtomicRaw(exitRegionFile, JSONObject().put("region", normalized).toString())
+        }
+        // Зеркала в настройках здесь больше нет.
+        //
+        // Читать его перестали, а писать продолжали — и это не безобидно: регион
+        // задают оба процесса, а `commit()` выкладывает на диск **весь** снимок
+        // настроек из кэша своего процесса. То есть каждая смена региона из `:vpn`
+        // могла откатить чужие ключи, записанные интерфейсом, и наоборот — ровно
+        // капкан I2, которым уже поплатились ключ MASQUE (G2), отладочный ключ AWG
+        // (G16) и лицензия WARP+ (G70). Старый ключ ещё читается один раз при
+        // переносе в файл ([readExitRegionState]) — этого для обновления достаточно.
+    }
+
+    /**
+     * Пользователь выбрал Proton, а профилей ещё нет — идёт регистрация.
+     *
+     * В файле, а не в памяти: выпуск занимает минуты и обязан **продолжаться**, а не
+     * начинаться с нуля. Пока признак жил в объекте, он терялся вместе с процессом —
+     * пользователь отключался, возвращался и видел, что всё начинается заново.
+     * Файл читает и главный экран (чтобы показать «РЕГИСТРАЦИЯ PROTON» вместо
+     * зелёного «АКТИВНО» чужого транспорта), и служба (I2).
+     */
+    fun isProtonPreparationRequested(): Boolean =
+        readAtomicJson(protonPreparationFile)?.optBoolean("requested", false) ?: false
+
+    fun setProtonPreparationRequested(requested: Boolean) {
+        writeAtomicRaw(
+            protonPreparationFile,
+            JSONObject()
+                .put("requested", requested)
+                .put("at", System.currentTimeMillis())
+                .toString(),
+        )
+    }
+
+    private fun readExitRegionState(): JSONObject {
+        readAtomicJson(exitRegionFile)?.let { return it }
+        // Перенос из prefs ровно один раз, пока файла нет. Если файл есть, но не
+        // прочитался, к prefs не возвращаемся: там лежит зеркало, которое чужой
+        // `commit()` мог откатить — ровно тот дефект, ради которого значение сюда и
+        // переехало.
+        if (exitRegionFile.baseFile.exists()) return JSONObject().put("region", "auto")
+        val migrated = JSONObject().put(
+            "region",
+            normalizeRegionPreference(prefs.getString("exit_region_preference", "auto")),
+        )
+        writeAtomicRaw(exitRegionFile, migrated.toString())
+        return migrated
     }
     fun shouldUseWarpTransport(): Boolean {
         // Источник профилей старше региона. Регион EU/US мог остаться от прошлого
@@ -1779,11 +1862,110 @@ class ClientData(context: Context) {
         }
     }
 
+    /**
+     * Фоновый кандидат, который ещё не проверен трафиком.
+     *
+     * Ручная адаптация назначает имя, тут же гоняет перебор и снимает всё, что не
+     * дало data-plane. У фонового шага такой развязки не было вовсе: он записывал
+     * имя и обещал, что «проверит следующее подключение», а проверять было некому.
+     * Не сработавшее имя оставалось на профиле до следующего шага по нему — а шаг
+     * идёт раз в полчаса и выбирает самый слабый профиль, так что «до следующего
+     * раза» здесь означает часы. Причём портился именно тот профиль, которому уже
+     * плохо.
+     *
+     * @param previous запись, которая была до кандидата; `null` — записи не было и
+     *        откат вернёт профиль к `I1` из прошивки.
+     */
+    data class AwgI1Pending(
+        val profileId: String,
+        val sni: String,
+        val previous: AwgI1Override?,
+        val assignedAt: Long,
+    )
+
+    fun getAwgI1Pending(): Map<String, AwgI1Pending> {
+        val pending = readAtomicJson(awgI1File)?.optJSONObject("pending") ?: return emptyMap()
+        val out = LinkedHashMap<String, AwgI1Pending>()
+        pending.keys().forEach { id ->
+            val entry = pending.optJSONObject(id) ?: return@forEach
+            val previousObject = entry.optJSONObject("prev")
+            val previous = previousObject?.let { prev ->
+                val i1 = prev.optString("i1")
+                if (i1.isBlank()) {
+                    null
+                } else {
+                    AwgI1Override(
+                        profileId = id,
+                        sni = prev.optString("sni"),
+                        i1 = i1,
+                        updatedAt = prev.optLong("at", 0L),
+                        attempts = prev.optInt("attempts", 0),
+                    )
+                }
+            }
+            out[id] = AwgI1Pending(
+                profileId = id,
+                sni = entry.optString("sni"),
+                previous = previous,
+                assignedAt = entry.optLong("at", 0L),
+            )
+        }
+        return out
+    }
+
+    fun saveAwgI1Pending(
+        profileId: String,
+        sni: String,
+        previous: AwgI1Override?,
+        nowMs: Long = System.currentTimeMillis(),
+    ) {
+        val id = profileId.trim()
+        if (id.isEmpty()) return
+        synchronized(awgI1Lock) {
+            val root = readAtomicJson(awgI1File) ?: JSONObject()
+            val pending = root.optJSONObject("pending") ?: JSONObject()
+            pending.put(
+                id,
+                JSONObject().apply {
+                    put("sni", sni)
+                    put("at", nowMs)
+                    if (previous != null) {
+                        put(
+                            "prev",
+                            JSONObject().apply {
+                                put("sni", previous.sni)
+                                put("i1", previous.i1)
+                                put("at", previous.updatedAt)
+                                put("attempts", previous.attempts)
+                            },
+                        )
+                    }
+                },
+            )
+            root.put("pending", pending)
+            writeAtomicRaw(awgI1File, root.toString())
+        }
+    }
+
+    fun clearAwgI1Pending(profileId: String) {
+        val id = profileId.trim()
+        if (id.isEmpty()) return
+        synchronized(awgI1Lock) {
+            val root = readAtomicJson(awgI1File) ?: return
+            val pending = root.optJSONObject("pending") ?: return
+            if (!pending.has(id)) return
+            pending.remove(id)
+            root.put("pending", pending)
+            writeAtomicRaw(awgI1File, root.toString())
+        }
+    }
+
     fun clearAwgI1Overrides() {
         synchronized(awgI1Lock) {
             val root = readAtomicJson(awgI1File) ?: JSONObject()
             root.remove("items")
             root.remove("attempts")
+            root.remove("pending")
             root.remove("last_step_at")
             writeAtomicRaw(awgI1File, root.toString())
         }
@@ -3077,16 +3259,6 @@ class ClientData(context: Context) {
         }
     }
 
-    /**
-     * Адреса DNS, запросы к которым обязаны идти напрямую к провайдеру, мимо VPN.
-     *
-     * Требование владельца: Xbox DNS используется во всех режимах, и обращения к нему
-     * не должны заворачиваться в туннель. Реализуется исключением этих адресов из
-     * маршрутов `VpnService.Builder`: пакет к ним просто не попадает в TUN — ни к
-     * перехвату DNS в ядре (WARP/MASQUE), ни в tun2proxy (Opera, VLESS).
-     */
-    fun getDirectBypassDnsServers(): List<String> = XBOX_DNS_SERVERS
-
     fun getPreferredVpnDnsServers(
         backendLabel: String = getServiceBackend(),
         countryHint: String? = null,
@@ -3179,24 +3351,29 @@ class ClientData(context: Context) {
     private fun resolvePreferredOperaBootstrapProfile(
         allowLocalDnsOverride: Boolean,
     ): Pair<String, String> {
-        // Xbox DNS стоит первым и здесь: opera-proxy резолвит свой API до того, как
-        // поднят туннель, то есть по сети оператора — ровно там, где этот резолвер и
-        // должен работать. Дальше идут DNS провайдера и публичные, как раньше.
+        // Порядок: приоритетный DoH владельца, затем Xbox DNS, затем DNS провайдера и
+        // публичные. opera-proxy резолвит свой API до того, как поднят туннель, то есть
+        // по сети оператора — ровно там, где эти резолверы и должны работать. Список
+        // перебирается по порядку, поэтому шифрованный идёт первым: имя API наружу
+        // тогда не уходит открытым текстом.
         if (!allowLocalDnsOverride) {
-            return (XBOX_BOOTSTRAP_RESOLVER_LIST + DEFAULT_OPERA_BOOTSTRAP_RESOLVER_LIST)
+            return (PRIORITY_DOH_BOOTSTRAP_RESOLVER_LIST + XBOX_BOOTSTRAP_RESOLVER_LIST + DEFAULT_OPERA_BOOTSTRAP_RESOLVER_LIST)
                 .distinct()
-                .joinToString(",") to "xbox-public-opera-bootstrap"
+                .joinToString(",") to "priority-doh-xbox-public-opera-bootstrap"
         }
         val providerResolvers = resolveProviderOperaBootstrapResolvers()
         if (providerResolvers.isEmpty()) {
-            return (XBOX_BOOTSTRAP_RESOLVER_LIST + DEFAULT_OPERA_BOOTSTRAP_RESOLVER_LIST)
+            return (PRIORITY_DOH_BOOTSTRAP_RESOLVER_LIST + XBOX_BOOTSTRAP_RESOLVER_LIST + DEFAULT_OPERA_BOOTSTRAP_RESOLVER_LIST)
                 .distinct()
-                .joinToString(",") to "xbox-public-opera-bootstrap"
+                .joinToString(",") to "priority-doh-xbox-public-opera-bootstrap"
         }
         val combined = (
-            XBOX_BOOTSTRAP_RESOLVER_LIST + providerResolvers + DEFAULT_OPERA_BOOTSTRAP_RESOLVER_LIST
+            PRIORITY_DOH_BOOTSTRAP_RESOLVER_LIST +
+                XBOX_BOOTSTRAP_RESOLVER_LIST +
+                providerResolvers +
+                DEFAULT_OPERA_BOOTSTRAP_RESOLVER_LIST
             ).distinct()
-        return combined.joinToString(",") to "xbox-provider-public-opera-bootstrap"
+        return combined.joinToString(",") to "priority-doh-xbox-provider-public-opera-bootstrap"
     }
 
     private fun resolveProviderOperaBootstrapResolvers(): List<String> {
@@ -3572,10 +3749,34 @@ class ClientData(context: Context) {
         }
     }
 
+    /**
+     * Неразрушающее чтение [AtomicFile] — единственный способ читать эти файлы.
+     *
+     * `readFully()` идёт через `openRead()`, а тот до Android 11 при существующем
+     * `.bak` **переименовывает резерв поверх основного файла**: читатель, попавший
+     * между `startWrite()` и `finishWrite()` соседнего процесса, отменяет чужую
+     * запись, и та пропадает молча (G66). У Nova ровно эта расстановка — `:vpn`
+     * пишет состояние, экран опрашивает его раз в две секунды, — и лечение было
+     * применено только в `ProtonProfileStore`, хотя `service_state.json` держит
+     * весь обмен между процессами (I2).
+     *
+     * Читаем сам файл, а к `.bak` обращаемся, только если основной пуст: рваное
+     * чтение стоит одного пропущенного такта опроса и лечится само, потерянная
+     * запись — нет.
+     */
+    private fun readAtomicFileText(file: AtomicFile): String {
+        val base = runCatching { file.baseFile.readText(Charsets.UTF_8) }.getOrNull()
+        if (!base.isNullOrBlank()) return base
+        val backup = File(file.baseFile.path + ".bak")
+        return runCatching { backup.takeIf { it.exists() }?.readText(Charsets.UTF_8) }
+            .getOrNull()
+            .orEmpty()
+    }
+
     private fun readServiceStateFile(): JSONObject {
         return try {
-            val bytes = serviceStateFile.readFully()
-            if (bytes.isEmpty()) JSONObject() else JSONObject(String(bytes, Charsets.UTF_8))
+            val raw = readAtomicFileText(serviceStateFile)
+            if (raw.isBlank()) JSONObject() else JSONObject(raw)
         } catch (_: Exception) {
             JSONObject()
         }
@@ -3597,14 +3798,7 @@ class ClientData(context: Context) {
         }
     }
 
-    private fun readAtomicRaw(file: AtomicFile): String {
-        return try {
-            val bytes = file.readFully()
-            if (bytes.isEmpty()) "" else String(bytes, Charsets.UTF_8)
-        } catch (_: Exception) {
-            ""
-        }
-    }
+    private fun readAtomicRaw(file: AtomicFile): String = readAtomicFileText(file)
 
     private fun readAtomicJson(file: AtomicFile): JSONObject? {
         val raw = readAtomicRaw(file)
@@ -3632,14 +3826,7 @@ class ClientData(context: Context) {
         }
     }
 
-    private fun readWarpDiscoveryStateFile(): String {
-        return try {
-            val bytes = warpDiscoveryStateFile.readFully()
-            if (bytes.isEmpty()) "" else String(bytes, Charsets.UTF_8)
-        } catch (_: Exception) {
-            ""
-        }
-    }
+    private fun readWarpDiscoveryStateFile(): String = readAtomicFileText(warpDiscoveryStateFile)
 
     private fun updateTrafficMaskStateFile(
         activeHost: String? = UNSET_SENTINEL,
@@ -3688,8 +3875,8 @@ class ClientData(context: Context) {
 
     private fun readTrafficMaskStateFile(): JSONObject {
         return try {
-            val bytes = trafficMaskStateFile.readFully()
-            if (bytes.isEmpty()) JSONObject() else JSONObject(String(bytes, Charsets.UTF_8))
+            val raw = readAtomicFileText(trafficMaskStateFile)
+            if (raw.isBlank()) JSONObject() else JSONObject(raw)
         } catch (_: Exception) {
             JSONObject()
         }
@@ -3832,21 +4019,41 @@ class ClientData(context: Context) {
         val normalized = normalizeStableSuccessNetworkClass(networkClass) ?: return ""
         return prefs.getString("${normalized}_stable_last_success_network_signature", "").orEmpty()
     }
-    fun getLastExitColo(): String {
+    /**
+     * Последнее наблюдение выхода — **целиком**, одним ответом трассы (I10).
+     *
+     * Раньше адрес, страну и colo читали три отдельные функции, и каждая
+     * самостоятельно откатывалась в `SharedPreferences`, если её поле в файле
+     * оказалось пустым. А в prefs поля писались только непустыми, то есть держали
+     * значения разных, более старых наблюдений. Стоило трассе вернуть адрес без
+     * страны — и экран показывал адрес нового выхода со страной прошлого: «AWG
+     * PROTON: RU» при американском узле. Смешивать источники адреса и страны прямо
+     * запрещено I10, и запрет обходился именно здесь.
+     *
+     * Теперь либо берётся тройка из файла, либо — если файла ещё нет — тройка из
+     * prefs, но всегда целиком и всегда из одного наблюдения.
+     */
+    fun getLastExitObservation(): ExitObservation {
         val fileJson = readAtomicJson(lastExitObservationFile)
-        return fileJson?.optString("colo")?.takeIf { it.isNotBlank() }
-            ?: (prefs.getString("last_exit_colo", "") ?: "")
+        if (fileJson != null) {
+            return ExitObservation(
+                country = fileJson.optString("country"),
+                colo = fileJson.optString("colo"),
+                ip = fileJson.optString("ip"),
+                observedAt = fileJson.optLong("observed_at", 0L),
+            )
+        }
+        return ExitObservation(
+            country = prefs.getString("last_exit_country", "").orEmpty(),
+            colo = prefs.getString("last_exit_colo", "").orEmpty(),
+            ip = prefs.getString("last_exit_ip", "").orEmpty(),
+            observedAt = prefs.getLong("last_exit_observed_at", 0L),
+        )
     }
-    fun getLastExitIp(): String {
-        val fileJson = readAtomicJson(lastExitObservationFile)
-        return fileJson?.optString("ip")?.takeIf { it.isNotBlank() }
-            ?: (prefs.getString("last_exit_ip", "") ?: "")
-    }
-    fun getLastExitCountry(): String {
-        val fileJson = readAtomicJson(lastExitObservationFile)
-        return fileJson?.optString("country")?.takeIf { it.isNotBlank() }
-            ?: (prefs.getString("last_exit_country", "") ?: "")
-    }
+
+    fun getLastExitColo(): String = getLastExitObservation().colo
+    fun getLastExitIp(): String = getLastExitObservation().ip
+    fun getLastExitCountry(): String = getLastExitObservation().country
     fun hasFreshLastSuccess(nowMs: Long = System.currentTimeMillis()): Boolean {
         val lastSuccessAt = getLastSuccessAt()
         if (lastSuccessAt <= 0L) return false
@@ -4082,6 +4289,7 @@ class ClientData(context: Context) {
         ipv6: String?,
         country: String?,
         backend: String?,
+        transport: String? = null,
         nowMs: Long = System.currentTimeMillis(),
     ) {
         val snapshot = JSONObject().apply {
@@ -4089,6 +4297,7 @@ class ClientData(context: Context) {
             put("ipv6", ipv6?.trim().orEmpty())
             put("country", country?.trim()?.uppercase().orEmpty())
             put("backend", backend?.trim().orEmpty().ifBlank { NovaVpnService.BACKEND_WARP })
+            put("transport", transport?.trim().orEmpty().ifBlank { getServiceTransport() })
             put("observed_at", nowMs)
         }
         val raw = snapshot.toString()
@@ -4166,6 +4375,7 @@ class ClientData(context: Context) {
                 ipv6 = json.optString("ipv6").orEmpty(),
                 country = json.optString("country").orEmpty(),
                 backend = json.optString("backend").ifBlank { NovaVpnService.BACKEND_WARP },
+                transport = json.optString("transport").orEmpty(),
                 observedAt = json.optLong("observed_at", 0L),
             ).takeIf {
                 it.ipv4.isNotBlank() || it.ipv6.isNotBlank() || it.country.isNotBlank()
@@ -4732,6 +4942,26 @@ class ClientData(context: Context) {
             8095 -> 15
             else -> 100 + port
         }
+    }
+
+    /**
+     * Профили Proton в том же виде, в каком их видит очередь подключения.
+     *
+     * Нужен интерфейсу: кнопка «следующий профиль» перебирала
+     * [getWarpVerifiedMergedConfigs] — там только встроенные семена и импорт из
+     * настроек, а профили Proton лежат в `proton_profiles.json` и подмешивались к
+     * очереди **только внутри службы**. В режиме Proton кнопка поэтому называла
+     * чужой узел, служба его игнорировала (очередь Proton строится другой веткой) и
+     * заново поднимала тот же самый профиль: адрес выхода не менялся никогда.
+     *
+     * Читается из того же файла, что и у службы, — значит обе стороны ранжируют
+     * один список (I2).
+     */
+    fun getProtonVerifiedConfigs(): List<WarpVerifiedConfig> {
+        if (!isProtonSourceActive()) return emptyList()
+        val store = ProtonProfileStore(appContext)
+        val account = store.readAccount() ?: return emptyList()
+        return ProtonProfileStore.toVerifiedConfigs(store.readProfiles(), account.wireGuardPrivateKey)
     }
 
     fun getWarpVerifiedMergedConfigs(scope: String? = null): List<WarpVerifiedConfig> {
@@ -6477,9 +6707,11 @@ class ClientData(context: Context) {
         if (normalizedIp.isBlank() && normalizedCountry.isBlank() && normalizedColo.isBlank()) return
 
         prefs.edit().apply {
-            if (normalizedIp.isNotBlank()) putString("last_exit_ip", normalizedIp)
-            if (normalizedCountry.isNotBlank()) putString("last_exit_country", normalizedCountry)
-            if (normalizedColo.isNotBlank()) putString("last_exit_colo", normalizedColo)
+            // Все три поля пишутся вместе, включая пустые: условная запись оставляла
+            // в зеркале обрывки разных наблюдений, и чтение собирало из них химеру.
+            putString("last_exit_ip", normalizedIp)
+            putString("last_exit_country", normalizedCountry)
+            putString("last_exit_colo", normalizedColo)
             putLong("last_exit_observed_at", nowMs)
 
             val exactKey = currentLastSuccessExitKey()
@@ -8827,6 +9059,18 @@ class ClientData(context: Context) {
             "111.88.96.51",
             "2a00:ab00:1233:26::50",
             "2a00:ab00:1233:26::51",
+        )
+
+        /**
+         * Приоритетный DoH владельца в формате opera-proxy.
+         *
+         * Здесь допустим именно URL: у opera-proxy список резолверов понимает схемы
+         * `dns://`, `tls://` и `https://`. В `VpnService.Builder` тот же адрес попасть
+         * не может — `addDnsServer` принимает только IP, — поэтому за пределами
+         * bootstrap он живёт только в перехвате DNS ядра (`PriorityDns`).
+         */
+        private val PRIORITY_DOH_BOOTSTRAP_RESOLVER_LIST = listOf(
+            PriorityDns.DOH_URL,
         )
 
         /**

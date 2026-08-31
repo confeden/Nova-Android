@@ -1,0 +1,12 @@
+- Encrypted DNS of your own: queries now travel over DNS-over-HTTPS instead of in the clear.
+- Plaintext DNS no longer leaves outside the tunnel, so the provider cannot see the names you look up.
+- The YouTube/Twitch DNS profile no longer left every other name unencrypted.
+- A node whose return traffic stops is abandoned in seconds instead of minutes.
+- A reconnect no longer returns to the same dead node.
+- A background masquerade domain is kept only after real traffic confirms it.
+- The first Proton run is noticeably faster: nodes are queried at once instead of one by one.
+- Proton registration no longer stalls: the built-in bypass of the blocked API is finally used.
+- MASQUE and Proton get ready quietly in the background, so choosing them connects right away.
+- While a registration runs, Connect is replaced by Disconnect — it can be stopped, not restarted.
+- The ping shown for Opera EU/US was up to three times too high; it now matches reality.
+- With EU or US chosen by hand, the next-profile button is gone: it used to jump to another region.

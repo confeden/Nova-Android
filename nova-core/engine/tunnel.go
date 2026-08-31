@@ -103,6 +103,12 @@ func SetDNSInterceptPolicy(enabled bool, mediaUpstreams []string, defaultUpstrea
 	}
 	dnsInterceptMu.Unlock()
 	dnsInterceptLogBudget.Store(12)
+	// Конфигурация меняется вместе с туннелем, а под кэшем DoH висят keep-alive
+	// соединения по старой сети: после переподключения каждое из них стоит одного
+	// таймаута. Здоровье апстримов обнуляем по той же причине — «не отвечал» с
+	// прошлой сети ничего не говорит о новой.
+	resetDohClients()
+	resetDNSUpstreamHealth()
 
 	if enabled && len(normalized) > 0 {
 		log.Printf(
@@ -969,7 +975,20 @@ func selectDNSInterceptUpstreams(query []byte, cfg dnsInterceptConfig) ([]string
 		return nil, "", false, err
 	}
 	if !matchesDNSDomainSuffix(queryName, cfg.mediaDomainSuffixes) {
-		return nil, queryName, false, nil
+		// Имя не из списка — отвечаем обычными апстримами, а не отпускаем запрос
+		// в туннель.
+		//
+		// Отпускать нельзя: список интерфейса начинается с Xbox DNS, а он выведен
+		// из маршрутов туннеля, то есть незашифрованный запрос уходил бы прямо
+		// провайдеру. В таргетированном режиме под это попадало **всё, кроме
+		// YouTube и Twitch**, и приоритетный шифрованный резолвер не применялся
+		// вовсе (замер на Mi A1, 2026-08-30, профиль Proton).
+		//
+		// Пустой список запасных оставляет прежнее поведение: перехватывать нечем.
+		if len(cfg.defaultUpstreams) == 0 {
+			return nil, queryName, false, nil
+		}
+		return cfg.defaultUpstreams, queryName, true, nil
 	}
 	return combinedUpstreams, queryName, true, nil
 }
@@ -1024,6 +1043,63 @@ func matchesDNSDomainSuffix(queryName string, suffixes []string) bool {
 	return false
 }
 
+// Сколько апстрим не предлагается первым после отказа.
+//
+// Без этого один недоступный резолвер стоил бы полного таймаута на каждом
+// запросе: список перебирается по порядку, и первый в нём — приоритетный. При
+// приоритетном DoH это особенно заметно, потому что его отказ (нет маршрута,
+// перехвачен провайдером) отодвигает ответ на 2,5 с — для браузера это «интернета
+// нет».
+const dnsUpstreamFailureCooldown = 15 * time.Second
+
+var (
+	dnsUpstreamCooldownMu    sync.Mutex
+	dnsUpstreamCooldownUntil = make(map[string]time.Time)
+)
+
+// orderDNSUpstreamsByHealth ставит недавно отказавшие апстримы в конец очереди.
+//
+// Именно в конец, а не мимо: остывать может весь список сразу, и «пропустить»
+// значило бы остаться совсем без резолвинга. Порядок владельца (приоритетный DoH,
+// затем Xbox, затем публичные) сохраняется, пока все живы.
+func orderDNSUpstreamsByHealth(upstreams []string) []string {
+	now := time.Now()
+	healthy := make([]string, 0, len(upstreams))
+	cooling := make([]string, 0, len(upstreams))
+	dnsUpstreamCooldownMu.Lock()
+	for _, upstream := range upstreams {
+		trimmed := strings.TrimSpace(upstream)
+		if trimmed == "" {
+			continue
+		}
+		if until, ok := dnsUpstreamCooldownUntil[trimmed]; ok && until.After(now) {
+			cooling = append(cooling, trimmed)
+			continue
+		}
+		healthy = append(healthy, trimmed)
+	}
+	dnsUpstreamCooldownMu.Unlock()
+	return append(healthy, cooling...)
+}
+
+func noteDNSUpstreamFailure(upstream string) {
+	dnsUpstreamCooldownMu.Lock()
+	dnsUpstreamCooldownUntil[upstream] = time.Now().Add(dnsUpstreamFailureCooldown)
+	dnsUpstreamCooldownMu.Unlock()
+}
+
+func noteDNSUpstreamSuccess(upstream string) {
+	dnsUpstreamCooldownMu.Lock()
+	delete(dnsUpstreamCooldownUntil, upstream)
+	dnsUpstreamCooldownMu.Unlock()
+}
+
+func resetDNSUpstreamHealth() {
+	dnsUpstreamCooldownMu.Lock()
+	dnsUpstreamCooldownUntil = make(map[string]time.Time)
+	dnsUpstreamCooldownMu.Unlock()
+}
+
 func resolveDNSPayload(query []byte, upstreams []string, timeout time.Duration) ([]byte, string, error) {
 	if len(query) < 12 {
 		return nil, "", errors.New("dns payload too short")
@@ -1033,14 +1109,26 @@ func resolveDNSPayload(query []byte, upstreams []string, timeout time.Duration) 
 	}
 
 	var lastErr error
-	for _, upstream := range upstreams {
-		trimmed := strings.TrimSpace(upstream)
-		if trimmed == "" {
-			continue
+	for _, trimmed := range orderDNSUpstreamsByHealth(upstreams) {
+		if isDohUpstream(trimmed) {
+			upstream, err := parseDohUpstream(trimmed)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			payload, err := resolveDNSViaDoh(query, upstream, timeout)
+			if err != nil {
+				noteDNSUpstreamFailure(trimmed)
+				lastErr = fmt.Errorf("doh %s: %w", upstream.url, err)
+				continue
+			}
+			noteDNSUpstreamSuccess(trimmed)
+			return payload, upstream.url, nil
 		}
 
 		endpoint, err := net.ResolveUDPAddr("udp", net.JoinHostPort(trimmed, "53"))
 		if err != nil {
+			noteDNSUpstreamFailure(trimmed)
 			lastErr = fmt.Errorf("resolve upstream %s: %w", trimmed, err)
 			continue
 		}
@@ -1051,11 +1139,13 @@ func resolveDNSPayload(query []byte, upstreams []string, timeout time.Duration) 
 		}
 		conn, err := net.ListenUDP(network, nil)
 		if err != nil {
+			noteDNSUpstreamFailure(trimmed)
 			lastErr = fmt.Errorf("open dns socket for %s: %w", trimmed, err)
 			continue
 		}
 		if err := protectDNSUDPConn(conn); err != nil {
 			_ = conn.Close()
+			noteDNSUpstreamFailure(trimmed)
 			lastErr = fmt.Errorf("protect dns socket for %s: %w", trimmed, err)
 			continue
 		}
@@ -1063,6 +1153,7 @@ func resolveDNSPayload(query []byte, upstreams []string, timeout time.Duration) 
 
 		if _, err := conn.WriteToUDP(query, endpoint); err != nil {
 			_ = conn.Close()
+			noteDNSUpstreamFailure(trimmed)
 			lastErr = fmt.Errorf("send dns query to %s: %w", trimmed, err)
 			continue
 		}
@@ -1071,17 +1162,21 @@ func resolveDNSPayload(query []byte, upstreams []string, timeout time.Duration) 
 		n, _, err := conn.ReadFromUDP(buffer)
 		_ = conn.Close()
 		if err != nil {
+			noteDNSUpstreamFailure(trimmed)
 			lastErr = fmt.Errorf("read dns response from %s: %w", trimmed, err)
 			continue
 		}
 		if n < 12 {
+			noteDNSUpstreamFailure(trimmed)
 			lastErr = fmt.Errorf("short dns response from %s", trimmed)
 			continue
 		}
 		if buffer[0] != query[0] || buffer[1] != query[1] {
+			noteDNSUpstreamFailure(trimmed)
 			lastErr = fmt.Errorf("dns transaction id mismatch from %s", trimmed)
 			continue
 		}
+		noteDNSUpstreamSuccess(trimmed)
 		return append([]byte(nil), buffer[:n]...), trimmed, nil
 	}
 

@@ -131,12 +131,22 @@ object AwgI1Adaptation {
      *
      * Общая для фонового шага и ручной адаптации, чтобы правило выбора имени было
      * одно. Повторно назначить то же имя — потраченный впустую заход.
+     *
+     * Совпадение с уже выданным именем сдвигает выбор **на одно вперёд**, а не
+     * возвращает к началу списка: возврат к началу предлагал бы имя, которое этому
+     * профилю пробовали самым первым, то есть заход всё равно уходил бы впустую.
+     * Отрицательный счётчик тоже нормализуется — остаток от деления в Kotlin
+     * сохраняет знак, и без этого выбор ушёл бы за границы списка.
      */
     fun nextSniForProfile(pool: List<String>, adaptedSni: String, attempts: Int): String? {
         if (pool.isEmpty()) return null
-        val firstDifferent = pool.firstOrNull { it != adaptedSni } ?: return null
-        val index = (attempts % pool.size).coerceIn(0, pool.size - 1)
-        return pool.getOrNull(index)?.takeIf { it != adaptedSni } ?: firstDifferent
+        val start = ((attempts % pool.size) + pool.size) % pool.size
+        for (offset in pool.indices) {
+            val candidate = pool[(start + offset) % pool.size]
+            if (candidate != adaptedSni) return candidate
+        }
+        // Весь список состоит из уже выданного имени — предлагать нечего.
+        return null
     }
 
     /**

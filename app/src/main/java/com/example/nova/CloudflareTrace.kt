@@ -31,8 +31,20 @@ object CloudflareTrace {
     val IPV4_HOSTS = listOf("1.1.1.1", "1.0.0.1")
     val IPV6_HOSTS = listOf("2606:4700:4700::1111", "2606:4700:4700::1001")
 
-    val IPV4_URLS = IPV4_HOSTS.map { "http://$it$PATH" }
-    val IPV6_URLS = IPV6_HOSTS.map { "http://[$it]$PATH" }
+    /**
+     * По литералам ходим **по HTTPS**, а не по обычному HTTP.
+     *
+     * Замер на устройстве через туннель Proton: `https://1.1.1.1/cdn-cgi/trace`
+     * отвечает `ip=`/`loc=`, а `http://1.1.1.1/cdn-cgi/trace` и
+     * `http://[2606:4700:4700::1111]/cdn-cgi/trace` не отвечают вовсе. Пока входы
+     * были на HTTP, оба семейных запроса через Proton проваливались, адрес
+     * доставался только с именного входа по HTTPS — а там стек выбирал IPv6, — и
+     * поле IPv4 на экране оставалось прочерком при живом адресе выхода.
+     * Сертификат Cloudflare покрывает и литеральные адреса, так что DNS по-прежнему
+     * не нужен.
+     */
+    val IPV4_URLS = IPV4_HOSTS.map { "https://$it$PATH" }
+    val IPV6_URLS = IPV6_HOSTS.map { "https://[$it]$PATH" }
 
     /**
      * Входы по имени. Нужны там, где литеральный адрес не проходит: HTTP-прокси

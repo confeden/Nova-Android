@@ -226,8 +226,6 @@ class SettingsActivity : AppCompatActivity() {
      */
     private var protonStatusListener: ProtonProfileManager.StatusListener? = null
 
-    /** Ожидание туннеля перед выпуском: 30 проб по две секунды. */
-    private val PROTON_TUNNEL_WAIT_ATTEMPTS = 30
 
     /**
      * Идёт подготовка Proton, начатая с этого экрана.
@@ -3108,153 +3106,26 @@ class SettingsActivity : AppCompatActivity() {
 
         val previousRegion = clientData.getExitRegionPreference()
 
-        if (isNovaSessionLikelyActive()) {
+        // Выбор записывается сразу, а не по успеху.
+        //
+        // Пока предпочтение писалось только в ветке успеха, любой сбой выпуска
+        // оставлял регион прежним, и человек, выбравший AWG Proton, приезжал на
+        // встроенном семени WARP с зелёным «АКТИВНО»: явный выбор молча подменялся
+        // (I1), а узнать об этом было неоткуда.
+        //
+        // Помощный туннель для выпуска больше не поднимается. Он был нужен ради
+        // `/vpn/logicals`, но у того давно есть встроенный запас на 50 узлов, а
+        // маленькие вызовы и так идут по альтернативному маршруту Proton без всякого
+        // туннеля (kb P2). Зато поднятый WARP выглядел как «подключились к WARP,
+        // хотя выбран Proton» — ровно то, на что жаловались.
+        clientData.setExitRegionPreference("proton")
+        clientData.setProtonPreparationRequested(true)
+        initialExitRegionPreference = "proton"
 
-            runProtonGeneration(summaryView, radioGroup, buttons, previousRegion)
-
-            return
-
-        }
-
-        // Без туннеля до API Proton не достучаться, и это проверено на устройстве:
-        // прямой хост в России закрыт на транспортном уровне, а запасной узел
-        // Proton отдаёт первые ~16 КБ и глохнет — список серверов по нему не
-        // доходит. Изнутри поднятого туннеля тот же запрос выполняется за 0,5 с.
-        // Поэтому сначала поднимается обычный транспорт, и только потом выпуск.
-        if (android.net.VpnService.prepare(this) != null) {
-
-            LogManager.log(
-                "Proton: согласия на VPN ещё нет, выпуск профилей отложен — " +
-                    "туннель поднимается с главного экрана."
-            )
-
-            failProtonPreparation(
-                summaryView,
-                radioGroup,
-                buttons,
-                previousRegion,
-                "Proton: сначала подключитесь на главном экране",
-            )
-
-            return
-
-        }
-
-        summaryView.text = "Proton: поднимаю туннель"
-
-        runCatching {
-
-            ContextCompat.startForegroundService(
-
-                this,
-
-                Intent(this, NovaVpnService::class.java).apply {
-
-                    action = NovaVpnService.ACTION_CONNECT_SMART
-
-                    putExtra(NovaVpnService.EXTRA_EXIT_REGION, previousRegion)
-
-                }
-
-            )
-
-        }.onFailure { error ->
-
-            LogManager.log("Proton: не удалось поднять туннель для выпуска — ${error.message}")
-
-            failProtonPreparation(
-                summaryView,
-                radioGroup,
-                buttons,
-                previousRegion,
-                "Proton: туннель не поднялся",
-            )
-
-            return
-
-        }
-
-        waitForTunnelThenGenerate(summaryView, radioGroup, buttons, previousRegion, attempt = 0)
+        runProtonGeneration(summaryView, radioGroup, buttons, previousRegion)
 
     }
 
-    /**
-     * Ждёт CONNECTED и запускает выпуск.
-     *
-     * Опрос, а не подписка на широковещание: экран уже слушает состояние VPN для
-     * своих нужд, и вплетать сюда второй смысл в тот же приёмник значило бы
-     * связать два независимых сценария одним обработчиком.
-     *
-     * Опрос висит на главном лупере, а не на `summaryView`, и **не прекращается**,
-     * если экран закрыли. `SettingsActivity` не объявляет `configChanges`, поэтому
-     * поворот за эту минуту уничтожает вид гарантированно — а прежний выход по
-     * `isFinishing` отменял вместе с ним весь выпуск: профили не выдавались, регион
-     * не записывался, в журнале не было ни строки. Снаружи это ровно «выбрал
-     * Proton, а ничего не произошло» (I4). Рисуем только когда есть куда.
-     */
-    private fun waitForTunnelThenGenerate(
-        summaryView: TextView,
-        radioGroup: RadioGroup,
-        buttons: List<RadioButton>,
-        previousRegion: String,
-        attempt: Int,
-    ) {
-
-        val screenAlive = !isFinishing && !isDestroyed
-
-        // Пользователь мог за эту минуту выбрать другой транспорт — возможно, вообще
-        // на другом экземпляре экрана, до которого `removeCallbacksAndMessages` не
-        // дотянулся. Продолжать выпуск значило бы записать «proton» поверх сделанного
-        // после него явного выбора (I1).
-        if (!ProtonProfileManager.isPreparationRequested()) {
-
-            LogManager.log("Proton: выбран другой транспорт, ожидание туннеля прекращено.")
-
-            return
-
-        }
-
-        if (clientData.getServiceState() == NovaVpnService.STATE_CONNECTED) {
-
-            runProtonGeneration(summaryView, radioGroup, buttons, previousRegion)
-
-            return
-
-        }
-
-        if (attempt >= PROTON_TUNNEL_WAIT_ATTEMPTS) {
-
-            LogManager.log(
-                "Proton: туннель не поднялся за минуту, выпуск профилей отменён."
-            )
-
-            failProtonPreparation(
-                summaryView,
-                radioGroup,
-                buttons,
-                previousRegion,
-                "Proton: туннель не поднялся за минуту",
-            )
-
-            return
-
-        }
-
-        if (screenAlive) {
-
-            summaryView.text = "Proton: поднимаю туннель (${attempt * 2} с)"
-
-        }
-
-        protonWaitHandler.postDelayed(
-
-            { waitForTunnelThenGenerate(summaryView, radioGroup, buttons, previousRegion, attempt + 1) },
-
-            2_000L,
-
-        )
-
-    }
 
     /** Снимает слушатель этапов Proton: его строки перестают принадлежать экрану. */
     private fun detachProtonStatusListener() {
@@ -3284,17 +3155,24 @@ class SettingsActivity : AppCompatActivity() {
 
         ProtonProfileManager.cancelPreparation()
 
+        clientData.setProtonPreparationRequested(false)
+
         detachProtonStatusListener()
 
         protonPendingMessage = message
+
+        // Выбор пользователя при отказе **не откатывается**. Прежде здесь стоял
+        // `restoreRegionSelection`, и неудачный выпуск возвращал регион на прежний —
+        // человек, выбравший AWG Proton, оказывался на «Авто» и уезжал на встроенном
+        // WARP, не узнав об этом. Регион остаётся `proton`, а причина видна и на
+        // экране, и в журнале: повторить можно, ничего не выбирая заново.
+        LogManager.log("Proton: $message. Регион остаётся proton, выбор не меняем.")
 
         if (isFinishing || isDestroyed) return
 
         summaryView.visibility = View.VISIBLE
 
         summaryView.text = message
-
-        restoreRegionSelection(radioGroup, buttons, previousRegion)
 
         Toast.makeText(this, message, Toast.LENGTH_LONG).show()
 
@@ -3361,6 +3239,8 @@ class SettingsActivity : AppCompatActivity() {
 
                 ProtonProfileManager.cancelPreparation()
 
+                clientData.setProtonPreparationRequested(false)
+
                 connectToFastestProtonProfile()
 
                 summaryView.post {
@@ -3383,6 +3263,18 @@ class SettingsActivity : AppCompatActivity() {
                 // выполниться вовсе, и тогда переключатель остался бы на Proton
                 // навсегда.
                 ProtonProfileManager.cancelPreparation()
+
+                // И признак в файле — здесь же, по той же причине.
+                //
+                // Дефект, который это чинит: `setProtonPreparationRequested(false)`
+                // стоял только внутри `failProtonPreparation`, а её вызывала посылка
+                // на вид. К концу минутного прогона экран настроек обычно уже закрыт,
+                // посылка не выполняется — и файл навсегда оставался в состоянии «идёт
+                // регистрация». Главный экран рисует по нему жёлтую «РЕГИСТРАЦИЯ
+                // PROTON» поверх любого другого состояния, поэтому снаружи это было
+                // «приложение висит на регистрации Proton и никуда не двигается»,
+                // причём при полностью остановленном VPN.
+                clientData.setProtonPreparationRequested(false)
 
                 summaryView.post {
 
@@ -3505,13 +3397,39 @@ class SettingsActivity : AppCompatActivity() {
 
             )
 
-            LogManager.log("Proton: профили готовы, запускаем подключение к самому быстрому.")
+            // «Самый быстрый» — только когда замер действительно был.
+            //
+            // При `alive == 0` профили лежат в порядке нагрузки узла, а не задержки
+            // (`probeProtonProfilesFromServiceProcess`), и на устройстве это как раз
+            // обычный случай: 0 из 50 ответивших. Строка про скорость там описывала
+            // намерение, а не то, что произошло, — счётчик без замера лжёт (G11).
+
+            val measured = runCatching {
+
+                (ProtonProfileStore(appContext).readProbeState()?.alive ?: 0) > 0
+
+            }.getOrDefault(false)
+
+            LogManager.log(
+                "Proton: профили готовы, запускаем подключение к " +
+                    if (measured) "самому быстрому." else "наименее загруженному — замер не прошёл."
+            )
 
             runOnUiThread {
 
                 runCatching {
 
-                    Toast.makeText(this, "Подключаемся к самому быстрому профилю Proton...", Toast.LENGTH_SHORT).show()
+                    val text = if (measured) {
+
+                        "Подключаемся к самому быстрому профилю Proton..."
+
+                    } else {
+
+                        "Подключаемся к наименее загруженному профилю Proton..."
+
+                    }
+
+                    Toast.makeText(this, text, Toast.LENGTH_SHORT).show()
 
                 }
 
@@ -3793,6 +3711,13 @@ class SettingsActivity : AppCompatActivity() {
                 // экземпляром экрана, а итог прогона применяется в рабочем потоке —
                 // ни того, ни другого этот обработчик не достанет.
                 ProtonProfileManager.cancelPreparation()
+
+                // И признак в файле: он живёт дольше экрана и процесса. Без этой
+                // строки выбор другого транспорта оставлял файл в состоянии «идёт
+                // регистрация Proton» — главный экран рисовал по нему жёлтую надпись
+                // поверх нового транспорта, а `resumeProtonPreparationIfPending`
+                // заводил брошенный выпуск заново на каждом возврате на экран.
+                clientData.setProtonPreparationRequested(false)
 
                 // Слушатель снимается вместе с выбором. Прогон продолжается — обрывать
                 // его посреди регистрации ключа незачем, — но его строки больше не

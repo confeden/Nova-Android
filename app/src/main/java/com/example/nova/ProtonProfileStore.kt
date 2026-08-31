@@ -63,6 +63,7 @@ class ProtonProfileStore(context: Context) {
     private val accountFile = AtomicFile(File(appContext.filesDir, "proton_account.json"))
     private val profilesFile = AtomicFile(File(appContext.filesDir, "proton_profiles.json"))
     private val probeFile = AtomicFile(File(appContext.filesDir, "proton_probe.json"))
+    private val runLeaseFile = AtomicFile(File(appContext.filesDir, "proton_run.json"))
 
     /**
      * Состояние замера. Живёт в файле, потому что замер идёт в процессе `:vpn`
@@ -116,8 +117,29 @@ class ProtonProfileStore(context: Context) {
         }.getOrNull()
     }
 
-    fun writeAccount(account: Account) {
-        val json = JSONObject().apply {
+    /**
+     * Правит `proton_account.json`, **сохраняя** поля, которых не касается.
+     *
+     * Файл делят между собой личность и запасной узел, а пишут их разные шаги
+     * прогона. Пересобрать его с нуля значит стереть чужое поле молча: так
+     * [writeAccount] и стирал запомненный `alt_host` при каждом обновлении токенов,
+     * и запоминание узла переставало работать, ничем этого не показывая (I4).
+     *
+     * Чтение и запись идут под тем же замком, что и сама запись: между ними
+     * помещается чужой `writeAccount`, и тогда одно из двух изменений пропало бы.
+     */
+    private fun mutateAccountJson(block: (JSONObject) -> Boolean) {
+        synchronized(writeLock) {
+            val json = readAtomically(accountFile)
+                ?.let { runCatching { JSONObject(it) }.getOrNull() }
+                ?: JSONObject()
+            if (!block(json)) return
+            writeAtomically(accountFile, json.toString())
+        }
+    }
+
+    fun writeAccount(account: Account) = mutateAccountJson { json ->
+        json.apply {
             put("seed", Base64.encodeToString(account.seed, Base64.NO_WRAP))
             put("uid", account.uid)
             put("access_token", account.accessToken)
@@ -135,11 +157,60 @@ class ProtonProfileStore(context: Context) {
                 put("keyboards", JSONArray(account.device.keyboards))
             })
         }
-        writeAtomically(accountFile, json.toString())
+        true
+    }
+
+    /**
+     * Запасной узел Proton, через который прошлый прогон реально достучался до API.
+     *
+     * Хранится рядом с личностью, потому что ищется он через DoH, а DoH — самое
+     * хрупкое звено на чистой установке: один раз не ответил, и выпуск профилей
+     * упал целиком. Сохранённый узел позволяет следующему заходу пропустить поиск.
+     */
+    fun readAlternativeHost(): String =
+        readAtomically(accountFile)
+            ?.let { runCatching { JSONObject(it).optString("alt_host") }.getOrDefault("") }
+            .orEmpty()
+            .trim()
+
+    fun writeAlternativeHost(host: String) {
+        val normalized = host.trim()
+        if (normalized.isEmpty()) return
+        mutateAccountJson { json ->
+            if (json.optString("alt_host") == normalized) {
+                false
+            } else {
+                json.put("alt_host", normalized)
+                true
+            }
+        }
     }
 
     fun clearAccount() {
         runCatching { accountFile.delete() }
+    }
+
+    /**
+     * Когда фоновая подготовка последний раз не удалась.
+     *
+     * В том же файле, а не в настройках: пишет его служба, а читать может и экран, а
+     * `SharedPreferences` между процессами не работают — `commit()` одной стороны
+     * откатывает кэш другой (I2, и уже четырежды пойманный G70).
+     *
+     * @return 0, если провалов не было.
+     */
+    fun readBackgroundFailureAt(): Long =
+        readAtomically(accountFile)
+            ?.let { runCatching { JSONObject(it).optLong("bg_failed_at", 0L) }.getOrDefault(0L) }
+            ?: 0L
+
+    fun writeBackgroundFailureAt(atMs: Long) = mutateAccountJson { json ->
+        if (json.optLong("bg_failed_at", 0L) == atMs) {
+            false
+        } else {
+            json.put("bg_failed_at", atMs)
+            true
+        }
     }
 
     // --- профили ------------------------------------------------------------
@@ -234,6 +305,95 @@ class ProtonProfileStore(context: Context) {
                 put("alive", state.alive)
             }.toString(),
         )
+    }
+
+    // --- аренда прогона -----------------------------------------------------
+
+    /**
+     * Кто сейчас выпускает профили: владелец, его старшинство и последний признак жизни.
+     */
+    data class RunLease(val owner: String, val priority: Int, val heartbeatAt: Long)
+
+    fun readRunLease(): RunLease? {
+        val raw = readAtomically(runLeaseFile)
+        if (raw.isNullOrBlank()) return null
+        return runCatching {
+            val json = JSONObject(raw)
+            val owner = json.optString("owner")
+            if (owner.isBlank()) return@runCatching null
+            RunLease(
+                owner = owner,
+                priority = json.optInt("priority", RUN_PRIORITY_BACKGROUND),
+                heartbeatAt = json.optLong("heartbeat_at", 0L),
+            )
+        }.getOrNull()
+    }
+
+    /**
+     * Занимает прогон за [owner], если он свободен, протух или принадлежит младшему.
+     *
+     * Аренда лежит в файле, потому что выпускать профили умеют оба процесса: службу
+     * просит фоновая подготовка, экран — явный выбор Proton. Признака в памяти хватало
+     * бы ровно на один процесс, а два одновременных прогона регистрируют ключ дважды,
+     * и сервер помнит только последний — то есть первый прогон дорисовал бы профили
+     * под ключ, который уже никому не подходит.
+     *
+     * Старшинство одностороннее: явный выбор пользователя вытесняет фоновую
+     * подготовку, обратное запрещено. Проигравшая сторона узнаёт об этом по
+     * [ownsRunLease] на ближайшем шаге и заканчивает, ничего не записав.
+     */
+    fun tryAcquireRunLease(
+        owner: String,
+        priority: Int,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Boolean {
+        synchronized(writeLock) {
+            val current = readRunLease()
+            val alive = current != null && nowMs - current.heartbeatAt < RUN_LEASE_STALE_MS
+            if (alive && current!!.owner != owner && current.priority >= priority) return false
+            writeAtomically(
+                runLeaseFile,
+                JSONObject()
+                    .put("owner", owner)
+                    .put("priority", priority)
+                    .put("heartbeat_at", nowMs)
+                    .toString(),
+            )
+            return true
+        }
+    }
+
+    /**
+     * Признак жизни: без него аренда протухает и её заберёт следующий желающий.
+     *
+     * Зовётся часто — из каждого шага, из тика длинного шага раз в две секунды и из
+     * опроса замера раз в 700 мс, — поэтому запись прореживается: окно протухания
+     * измеряется десятками секунд, и писать файл чаще раза в десять секунд незачем.
+     */
+    fun heartbeatRunLease(owner: String, priority: Int, nowMs: Long = System.currentTimeMillis()) {
+        synchronized(writeLock) {
+            val current = readRunLease()
+            if (current?.owner != owner) return
+            if (nowMs - current.heartbeatAt < RUN_LEASE_HEARTBEAT_MIN_MS) return
+            writeAtomically(
+                runLeaseFile,
+                JSONObject()
+                    .put("owner", owner)
+                    .put("priority", priority)
+                    .put("heartbeat_at", nowMs)
+                    .toString(),
+            )
+        }
+    }
+
+    fun ownsRunLease(owner: String): Boolean = readRunLease()?.owner == owner
+
+    /** Освобождает аренду, если она ещё наша: чужую снимать нельзя. */
+    fun releaseRunLease(owner: String) {
+        synchronized(writeLock) {
+            if (readRunLease()?.owner != owner) return
+            runCatching { runLeaseFile.delete() }
+        }
     }
 
     /**
@@ -397,5 +557,24 @@ class ProtonProfileStore(context: Context) {
         const val STATE_RUNNING = "running"
         const val STATE_DONE = "done"
         const val STATE_FAILED = "failed"
+
+        /** Фоновая подготовка уступает всем. */
+        const val RUN_PRIORITY_BACKGROUND = 0
+
+        /** Явный выбор Proton пользователем вытесняет фоновую подготовку. */
+        const val RUN_PRIORITY_USER = 1
+
+        /**
+         * Через столько молчания аренда считается брошенной.
+         *
+         * Признак жизни ставится на каждом шаге прогона и раз в две секунды внутри
+         * длинных сетевых шагов, так что живой прогон обновляет его многократно за
+         * это окно. Порог с большим запасом: убитый процесс не освобождает аренду
+         * сам, и слишком короткое окно значило бы два прогона наперегонки.
+         */
+        const val RUN_LEASE_STALE_MS = 90_000L
+
+        /** Реже этого признак жизни не пишется — см. [heartbeatRunLease]. */
+        private const val RUN_LEASE_HEARTBEAT_MIN_MS = 10_000L
     }
 }

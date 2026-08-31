@@ -38,6 +38,19 @@ package com.example.nova
  * длинная тишина узла. Время берётся из `uptimeMillis`, а слишком большой разрыв
  * между тиками ([MAX_GAP_MS]) означает «за нами не наблюдали» и сбрасывает
  * накопитель, а не обвиняет узел.
+ *
+ * Четвёртая, из-за которой детектор до этого почти не срабатывал на живом телефоне:
+ * **пороги в байтах нельзя мерить окном переменной длины**. Оба они выведены для
+ * шага 4,5 с (378 Б отправки за окно в измеренном провале), а при подозрении шаг
+ * учащается до 1,5 с — те же 84 Б/с дают тогда 126 Б за окно, то есть ниже порога
+ * [MIN_TX_BYTES]. Окно объявлялось несудящим, накопленная тишина обнулялась,
+ * подозрение снималось, шаг возвращался к 4,5 с — и так по кругу: **порог
+ * срабатывания не набирался никогда**, провал доживал до пятнадцатисекундного
+ * таймера ядра. Ровно на это и жаловались «пропадают пинги».
+ *
+ * Поэтому судится не соседняя пара замеров, а **скользящее окно не короче
+ * [MIN_WINDOW_MS]**: калибровка порогов остаётся той же, что и была, а учащённый
+ * шаг даёт не другие пороги, а более частую проверку того же окна.
  */
 class TunnelStallDetector(
     private val minTxBytes: Long = MIN_TX_BYTES,
@@ -45,6 +58,8 @@ class TunnelStallDetector(
     private val triggerMs: Long = TRIGGER_MS,
     private val rearmMs: Long = REARM_MS,
     private val maxUnhelpfulForces: Int = MAX_UNHELPFUL_FORCES,
+    private val minWindowMs: Long = MIN_WINDOW_MS,
+    private val healthyFlowMs: Long = HEALTHY_FLOW_MS,
 ) {
 
     /**
@@ -93,8 +108,22 @@ class TunnelStallDetector(
         val forceBudgetJustExhausted: Boolean = false,
     )
 
-    private var previous: Sample? = null
-    private var stalledMs = 0L
+    /**
+     * Замеры за последнее окно наблюдения, от старого к новому.
+     *
+     * Хранится ровно столько, чтобы самый старый давал окно не короче
+     * [minWindowMs]: на шаге 4,5 с это две записи, на учащённом 1,5 с — четыре.
+     */
+    private val history = ArrayDeque<Sample>()
+
+    /**
+     * Начало текущей непрерывной тишины по `uptimeMillis`, 0 — тишины нет.
+     *
+     * Раньше здесь копилась сумма длин окон. С перекрывающимися окнами так делать
+     * нельзя — одно и то же время засчиталось бы столько раз, сколько окон его
+     * накрыло. Отметка начала даёт ту же величину без двойного счёта.
+     */
+    private var silenceStartedAtMs = 0L
     private var mutedUntilUptimeMs = 0L
 
     /**
@@ -109,6 +138,18 @@ class TunnelStallDetector(
     private var unhelpfulForces = 0
     private var budgetExhaustionAnnounced = false
 
+    /**
+     * С какого момента обратный поток идёт непрерывно, 0 — не идёт.
+     *
+     * Нужно, чтобы бюджет форсирований открывало **устойчивое** возвращение потока, а
+     * не мелькание. Замер на Pixel 4a (2026-08-30, узел `8.34.146.3:903`): туннель
+     * чередовал ~9 с тишины и ~5 с трафика, и одно живое окно между провалами
+     * обнуляло счётчик каждый раз. Из-за этого `maxUnhelpfulForces = 1` не работал
+     * вовсе: рукопожатие просили десять раз подряд, а до смены узла дело дошло только
+     * через две минуты — всё это время пользователь видел пропадающие пинги.
+     */
+    private var flowingSinceMs = 0L
+
     /** Сколько раз детектор срабатывал за жизнь текущего туннеля. */
     var triggerCount = 0
         private set
@@ -122,44 +163,87 @@ class TunnelStallDetector(
      * отрицательной или бессмысленно большой.
      */
     fun reset() {
-        previous = null
-        stalledMs = 0L
+        history.clear()
+        silenceStartedAtMs = 0L
+        flowingSinceMs = 0L
         mutedUntilUptimeMs = 0L
         triggerCount = 0
         unhelpfulForces = 0
         budgetExhaustionAnnounced = false
     }
 
+    /**
+     * Наблюдение начинается заново: разрыв в тиках, перезапуск счётчиков, новый
+     * туннель. Отсчёт непрерывного потока тоже обнуляется — до разрыва он относился
+     * к другой картине, и засчитывать его как «течёт уже полминуты» нельзя.
+     */
+    private fun restartFrom(sample: Sample) {
+        history.clear()
+        history.addLast(sample)
+        silenceStartedAtMs = 0L
+        flowingSinceMs = 0L
+    }
+
     fun observe(sample: Sample): Outcome {
-        val prev = previous
-        previous = sample
+        val prev = history.lastOrNull()
 
         if (prev == null) {
+            restartFrom(sample)
             return notIndicative(0L, "первый замер")
         }
 
-        val windowMs = sample.uptimeMs - prev.uptimeMs
-        if (windowMs <= 0L) {
-            stalledMs = 0L
-            return notIndicative(windowMs, "часы не двигались")
+        val tickMs = sample.uptimeMs - prev.uptimeMs
+        if (tickMs <= 0L) {
+            restartFrom(sample)
+            return notIndicative(tickMs, "часы не двигались")
         }
-        if (windowMs > MAX_GAP_MS) {
-            stalledMs = 0L
-            return notIndicative(windowMs, "перерыв в наблюдении ${windowMs / 1000} с")
+        if (tickMs > MAX_GAP_MS) {
+            restartFrom(sample)
+            return notIndicative(tickMs, "перерыв в наблюдении ${tickMs / 1000} с")
+        }
+        if (sample.txBytes < prev.txBytes || sample.rxBytes < prev.rxBytes) {
+            // Счётчики пира начались заново — это новый туннель, а не отказ старого.
+            restartFrom(sample)
+            return notIndicative(tickMs, "счётчики туннеля перезапущены")
         }
 
-        val deltaTx = sample.txBytes - prev.txBytes
-        val deltaRx = sample.rxBytes - prev.rxBytes
-        if (deltaTx < 0L || deltaRx < 0L) {
-            // Счётчики пира начались заново — это новый туннель, а не отказ старого.
-            stalledMs = 0L
-            return notIndicative(windowMs, "счётчики туннеля перезапущены")
+        history.addLast(sample)
+        // Оставляем ровно одну запись за границей окна: тогда `history.first()`
+        // даёт самое короткое окно из тех, что не короче порога.
+        while (history.size > 2 && sample.uptimeMs - history.elementAt(1).uptimeMs >= minWindowMs) {
+            history.removeFirst()
         }
+        while (history.size > MAX_HISTORY_SAMPLES) {
+            history.removeFirst()
+        }
+
+        val reference = history.first()
+        val windowMs = sample.uptimeMs - reference.uptimeMs
+        if (windowMs < minWindowMs) {
+            // Окно ещё не набралось. Тишину при этом не теряем и подозрение не
+            // снимаем: иначе учащённый шаг сам себя обнулял бы, а именно из-за
+            // этого детектор и не добирался до порога срабатывания.
+            return if (silenceStartedAtMs != 0L) {
+                Outcome(
+                    state = State.SUSPECTED,
+                    stalledForMs = sample.uptimeMs - silenceStartedAtMs,
+                    deltaTxBytes = sample.txBytes - reference.txBytes,
+                    deltaRxBytes = sample.rxBytes - reference.rxBytes,
+                    windowMs = windowMs,
+                    reason = "тишина ${sample.uptimeMs - silenceStartedAtMs} мс, окно ещё не набралось",
+                )
+            } else {
+                notIndicative(windowMs, "окно наблюдения ещё не набралось")
+            }
+        }
+
+        val deltaTx = sample.txBytes - reference.txBytes
+        val deltaRx = sample.rxBytes - reference.rxBytes
 
         if (deltaTx < minTxBytes) {
             // Мы почти ничего не отправляли: тишина в ответ ничего не доказывает.
             // Копить её нельзя — иначе спящий телефон обвинит здоровый узел.
-            stalledMs = 0L
+            silenceStartedAtMs = 0L
             return Outcome(
                 state = State.NOT_INDICATIVE,
                 stalledForMs = 0L,
@@ -171,10 +255,17 @@ class TunnelStallDetector(
         }
 
         if (deltaRx >= minRxBytes) {
-            stalledMs = 0L
-            // Поток вернулся — предыдущие форсирования засчитываем как
-            // сработавшие, бюджет открывается заново.
-            unhelpfulForces = 0
+            silenceStartedAtMs = 0L
+            if (flowingSinceMs == 0L) {
+                flowingSinceMs = reference.uptimeMs
+            }
+            // Бюджет форсирований открывает только **устойчивый** поток. Одно живое
+            // окно между двумя провалами — это не «рукопожатие помогло», а обычная
+            // картина мерцающего узла, и раньше именно она не давала детектору
+            // дойти до смены узла.
+            if (sample.uptimeMs - flowingSinceMs >= healthyFlowMs) {
+                unhelpfulForces = 0
+            }
             return Outcome(
                 state = State.FLOWING,
                 stalledForMs = 0L,
@@ -185,7 +276,11 @@ class TunnelStallDetector(
             )
         }
 
-        stalledMs += windowMs
+        flowingSinceMs = 0L
+        if (silenceStartedAtMs == 0L) {
+            silenceStartedAtMs = reference.uptimeMs
+        }
+        val stalledMs = sample.uptimeMs - silenceStartedAtMs
 
         // Порог не набран — только наблюдаем. Вызывающая сторона по этому
         // состоянию учащает опрос, чтобы поймать момент раньше своего же шага.
@@ -217,7 +312,7 @@ class TunnelStallDetector(
         mutedUntilUptimeMs = sample.uptimeMs + rearmMs
         triggerCount += 1
         val fired = stalledMs
-        stalledMs = 0L
+        silenceStartedAtMs = 0L
         val budgetLeft = unhelpfulForces < maxUnhelpfulForces
         // Об исчерпании бюджета говорим ровно один раз за туннель: повтор в
         // журнале читался бы как новый отказ, а это одно и то же состояние.
@@ -303,6 +398,23 @@ class TunnelStallDetector(
         const val MAX_GAP_MS = 30_000L
 
         /**
+         * Короче этого окно ничего не судит: пороги в байтах выведены для шага
+         * наблюдения 4,5 с, и на более коротком окне тот же трафик не набирает их
+         * просто из-за длины.
+         *
+         * Четыре секунды, а не четыре с половиной: неинтерактивный шаг равен ровно
+         * 4 000 мс, и при пороге 4 500 каждый второй замер спящего телефона
+         * оказывался бы «окно ещё не набралось».
+         */
+        const val MIN_WINDOW_MS = 4_000L
+
+        /**
+         * Потолок истории замеров. При шаге 1,5 с и окне 4 с нужно четыре записи;
+         * запас взят на случай ещё более частого опроса.
+         */
+        const val MAX_HISTORY_SAMPLES = 16
+
+        /**
          * Столько бесполезных форсирований подряд — и перестаём просить.
          *
          * Замер, из-за которого бюджет появился: узел `8.47.69.6:945` дал 83,5%
@@ -317,5 +429,16 @@ class TunnelStallDetector(
          * сидит без связи вместо перехода на живой узел.
          */
         const val MAX_UNHELPFUL_FORCES = 1
+
+        /**
+         * Столько подряд идущего обратного потока считается выздоровлением.
+         *
+         * Здоровое удержание в замерах — 1,05–1,4 с наихудшей тишины за двадцать
+         * секунд, то есть выздоровевший туннель течёт минутами. Мерцающий узел из
+         * замера 2026-08-30 давал ровно 5 с потока между девятисекундными провалами,
+         * и именно эти пять секунд обнуляли бюджет. Тридцать секунд лежат между этими
+         * двумя картинами с запасом в обе стороны.
+         */
+        const val HEALTHY_FLOW_MS = 30_000L
     }
 }

@@ -1,5 +1,6 @@
 package com.example.nova
 
+import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -7,6 +8,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Клиент API Proton VPN в объёме, которого хватает для выпуска собственных
@@ -31,16 +33,32 @@ object ProtonApi {
 
     private val JSON = "application/json".toMediaType()
 
+    /**
+     * Сроки для **прямых** хостов Proton — короткие намеренно.
+     *
+     * В России до них TCP 443 не открывается вовсе (P1): имя резолвится, ICMP
+     * отвечает, соединение не устанавливается никогда. На прежних 12/20/30 с каждый
+     * вызов честно ждал по тридцать секунд на каждом из двух хостов — минута
+     * впустую перед тем, как включится обход, и это была самая заметная часть
+     * ожидания на чистой установке. Хост, не открывший соединение за шесть секунд,
+     * не откроет его и за тридцать.
+     */
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(12, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .callTimeout(30, TimeUnit.SECONDS)
+            .connectTimeout(6, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .callTimeout(12, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
     }
 
     class ProtonApiException(message: String) : Exception(message)
+
+    /** Адрес, по которому можно попробовать запрос, вместе с клиентом для него. */
+    private class Target(val client: OkHttpClient, val base: String)
+
+    /** Адрес, который ответил, и его ответ: [call] обязан знать, кто выиграл. */
+    private class Winner(val base: String, val json: JSONObject)
 
     data class Session(val uid: String, val accessToken: String, val refreshToken: String)
 
@@ -66,6 +84,40 @@ object ProtonApi {
      */
     @Volatile
     private var alternativeHost: String? = null
+
+    /**
+     * Подсказать найденный ранее запасной узел и забрать текущий.
+     *
+     * Нужно, чтобы прогон **продолжался**, а не начинался с нуля: узел ищется через
+     * DoH, а именно DoH на чистой установке однажды и не ответил — сохранённый узел
+     * позволяет следующему заходу пропустить этот шаг целиком.
+     */
+    fun seedAlternativeHost(host: String?) {
+        val normalized = host?.trim().orEmpty()
+        if (normalized.isNotEmpty() && alternativeHost.isNullOrBlank()) {
+            alternativeHost = normalized
+            LogManager.log("Proton: помним запасной узел с прошлого раза — $normalized.")
+        }
+    }
+
+    fun currentAlternativeHost(): String = alternativeHost?.trim().orEmpty()
+
+    /**
+     * Прямой хост, который в этом процессе уже отвечал, — первым в следующий раз.
+     *
+     * Гонка спасает только идемпотентные вызовы; POST-ы ([HOSTS] по очереди) на
+     * российской сети платили по 12 с за `vpn-api.proton.me`, который на ней не
+     * открывает TCP 443 вовсе, — и так на каждом из трёх вызовов прогона. Какой
+     * именно хост закрыт, зависит от сети, поэтому порядок не прибит в [HOSTS], а
+     * выясняется первым же удавшимся вызовом.
+     *
+     * Живёт до конца процесса и не сохраняется на диск намеренно: при живом
+     * сертификате следующий прогон обходится вообще без POST-ов, а сеть к тому
+     * времени может смениться — запомненный на диске хост тогда стоил бы того же
+     * таймаута, только с уверенным видом.
+     */
+    @Volatile
+    private var preferredDirectHost: String? = null
 
     private fun buildRequest(
         base: String,
@@ -93,22 +145,22 @@ object ProtonApi {
     }
 
     /**
+     * @param abandoned выставляется **нами**, когда гонку уже выиграл сосед и
+     *        остальные вызовы обрываются. Только по этому признаку и можно молчать
+     *        об ошибке.
      * @return разобранный ответ, либо null с записанной причиной. Отличать
      *         «не достучались» от «ответили ошибкой» обязательно: на запасной
      *         маршрут имеет смысл уходить только в первом случае, а ошибку API
      *         он повторит слово в слово.
      */
-    private fun tryOnce(
-        client: OkHttpClient,
+    private fun execute(
+        call: Call,
         base: String,
-        path: String,
-        body: JSONObject?,
-        profile: ProtonDeviceProfile,
-        session: Session?,
+        abandoned: AtomicBoolean?,
         onError: (String, Boolean) -> Unit,
     ): JSONObject? {
         return try {
-            client.newCall(buildRequest(base, path, body, profile, session)).execute().use { response ->
+            call.execute().use { response ->
                 val text = response.body?.string().orEmpty()
                 if (text.isBlank()) {
                     onError("HTTP ${response.code}, пустой ответ", false)
@@ -122,9 +174,64 @@ object ProtonApi {
                 json
             }
         } catch (e: Exception) {
-            onError("${base.substringAfter("://")}: ${e.message}", true)
+            // Признак «оборвали мы сами» — наш собственный флаг, а **не**
+            // `call.isCanceled()`.
+            //
+            // Дефект, который это чинит: по истечении `callTimeout` OkHttp отменяет
+            // вызов сам, и `isCanceled()` после этого возвращает true. То есть на
+            // российской сети, где прямые хосты Proton не открывают TCP 443 вовсе,
+            // причина не записывалась **ни разу**: `lastError` оставался значением по
+            // умолчанию «нет ответа», `transportFailure` — false, и [call] бросал
+            // исключение, ни разу не сходив на запасные узлы. Снаружи это ровно
+            // «регистрация Proton висит и никуда не двигается»: весь прогон падал
+            // за 33 с, а штатный обход блокировки не включался никогда.
+            if (abandoned?.get() != true) onError("${base.substringAfter("://")}: ${e.message}", true)
             null
         }
+    }
+
+    /**
+     * Один заход по группе адресов.
+     *
+     * Идемпотентный запрос уходит на все адреса разом ([ProtonRace]) — на
+     * российской сети шесть запасных узлов по очереди стоили две с половиной
+     * минуты. Запрос **с телом** идёт строго по очереди: POST у Proton не
+     * идемпотентен, и `body != null` — единственный признак, который не забудут
+     * обновить, добавляя новый вызов.
+     */
+    private fun walk(
+        targets: List<Target>,
+        path: String,
+        body: JSONObject?,
+        profile: ProtonDeviceProfile,
+        session: Session?,
+        record: (String, Boolean) -> Unit,
+    ): Winner? {
+        if (targets.isEmpty()) return null
+        if (body != null) {
+            for (target in targets) {
+                val request = buildRequest(target.base, path, body, profile, session)
+                execute(target.client.newCall(request), target.base, null, record)
+                    ?.let { return Winner(target.base, it) }
+            }
+            return null
+        }
+        val calls = targets.map { it.client.newCall(buildRequest(it.base, path, null, profile, session)) }
+        val abandoned = AtomicBoolean(false)
+        return ProtonRace.firstSuccess(
+            attempts = targets.indices.map { index ->
+                {
+                    execute(calls[index], targets[index].base, abandoned, record)
+                        ?.let { Winner(targets[index].base, it) }
+                }
+            },
+            // Флаг поднимается **до** отмены: проигравший обязан увидеть его уже
+            // выставленным, иначе запишет свой обрыв как настоящую причину.
+            cancelAll = {
+                abandoned.set(true)
+                calls.forEach { runCatching { it.cancel() } }
+            },
+        )
     }
 
     private fun call(
@@ -133,45 +240,72 @@ object ProtonApi {
         profile: ProtonDeviceProfile,
         session: Session?,
     ): JSONObject {
+        // Гонка пишет причину из нескольких потоков сразу, поэтому под замком.
+        val lock = Any()
         var lastError = "нет ответа"
         var transportFailure = false
         val record: (String, Boolean) -> Unit = { message, isTransport ->
-            lastError = message
-            if (isTransport) transportFailure = true
+            synchronized(lock) {
+                lastError = message
+                if (isTransport) transportFailure = true
+            }
+        }
+        val label = path.substringBefore("?")
+        val startedAt = System.nanoTime()
+        val elapsedMs = { (System.nanoTime() - startedAt) / 1_000_000 }
+
+        val direct = HOSTS.sortedByDescending { it == preferredDirectHost }
+        val primary = ArrayList<Target>(direct.size + 1)
+        alternativeHost?.let { primary += Target(ProtonDoh.pinnedClient, "https://$it") }
+        direct.forEach { primary += Target(client, it) }
+        walk(primary, path, body, profile, session, record)?.let { winner ->
+            if (winner.base in HOSTS && preferredDirectHost != winner.base) {
+                preferredDirectHost = winner.base
+                LogManager.log("Proton: прямой хост ${winner.base.substringAfter("://")} отвечает — с него и начинаем дальше.")
+            }
+            return winner.json
         }
 
-        alternativeHost?.let { host ->
-            tryOnce(ProtonDoh.pinnedClient, "https://$host", path, body, profile, session, record)
-                ?.let { return it }
-        }
-
-        for (host in HOSTS) {
-            tryOnce(client, host, path, body, profile, session, record)?.let { return it }
+        // Прерывание — не отказ сети, и молчать о нём нельзя: с ним запасные узлы
+        // тоже не ответят, а причина «нет ответа» отправила бы искать поломку в
+        // сети вместо того, кто оборвал шаг.
+        if (Thread.currentThread().isInterrupted) {
+            LogManager.log("Proton $label: шаг прерван снаружи за ${elapsedMs()} мс, запасные узлы не опрашиваем.")
+            throw ProtonApiException("шаг прерван")
         }
 
         // Прямые хосты Proton в России закрыты на транспортном уровне: имя
         // резолвится и отвечает на ICMP, но TCP 443 не открывается. Штатный обход
         // самого Proton — запасные узлы из TXT-записи, см. [ProtonDoh].
-        if (transportFailure) {
-            for (candidate in ProtonDoh.resolveAlternativeHosts(HOSTS.first().substringAfter("://"))) {
-                val json = tryOnce(
-                    ProtonDoh.pinnedClient,
-                    "https://$candidate",
-                    path,
-                    body,
-                    profile,
-                    session,
-                    record,
-                )
-                if (json != null) {
-                    if (alternativeHost != candidate) {
-                        LogManager.log("Proton: работаем через запасной узел $candidate.")
-                        alternativeHost = candidate
-                    }
-                    return json
-                }
-            }
+        if (!transportFailure) {
+            LogManager.log(
+                "Proton $label: прямые хосты отказали за ${elapsedMs()} мс без транспортной ошибки " +
+                    "($lastError) — это ответ сервера, обход его повторит слово в слово."
+            )
+            throw ProtonApiException(lastError)
         }
+
+        // Без этой строки шаг молчал всё время обхода: на устройстве это две
+        // минуты без единой записи, неотличимые от зависания (I4).
+        LogManager.log(
+            "Proton $label: прямые хосты не ответили за ${elapsedMs()} мс ($lastError), " +
+                "идём через запасные узлы."
+        )
+        val candidates = ProtonDoh.resolveAlternativeHosts(HOSTS.first().substringAfter("://"))
+            .map { Target(ProtonDoh.pinnedClient, "https://$it") }
+        walk(candidates, path, body, profile, session, record)?.let { winner ->
+            val host = winner.base.substringAfter("://")
+            if (alternativeHost != host) {
+                LogManager.log("Proton: работаем через запасной узел $host.")
+                alternativeHost = host
+            }
+            LogManager.log("Proton $label: ответ через запасной узел за ${elapsedMs()} мс.")
+            return winner.json
+        }
+        LogManager.log(
+            "Proton $label: не ответил ни один из ${candidates.size} запасных узлов, " +
+                "весь шаг занял ${elapsedMs()} мс."
+        )
         throw ProtonApiException(lastError)
     }
 

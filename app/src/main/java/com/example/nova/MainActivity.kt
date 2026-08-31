@@ -35,6 +35,9 @@ import java.net.Proxy
 import java.net.Socket
 import java.net.URL
 import java.util.Locale
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutorCompletionService
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import android.net.ConnectivityManager
 import android.net.Network
@@ -57,11 +60,45 @@ class MainActivity : AppCompatActivity() {
         /** Сколько ждать прогресс от новой фазы, прежде чем доверять состоянию сервиса. */
         private const val PROGRESS_PHASE_SWITCH_QUIET_MS = 1_500L
 
-        /** Сколько ждать уже работающее обновление IP, прежде чем считать его зависшим. */
-        private const val IP_REFRESH_RUNNING_STALE_MS = 8_000L
+        /**
+         * Сколько ждать уже работающее обновление IP, прежде чем считать его зависшим.
+         *
+         * Порог обязан быть **больше** худшего срока самого [fetchIpSnapshot], иначе
+         * сторож обрывает не зависшую работу, а просто медленную, и заводит вместо неё
+         * такую же. Ровно это и было: через туннель Proton снимок стоил ~8,4 с при
+         * пороге 8 с, и весь сеанс раз в 8,4 с в лог шло «прерываем зависший IP
+         * refresh», а следом — за 20-120 мс — успех той самой «зависшей» задачи.
+         * Худший срок снимка ограничен сверху и равен ~7,8 с: 1,8 с литеральный вход
+         * по 80 порту плюс [TRACE_STAGE_CAP_MS] на все входы HTTPS.
+         */
+        private const val IP_REFRESH_RUNNING_STALE_MS = 12_000L
 
         /** Сколько ждать обновление IP, ещё не получившее поток из пула. */
-        private const val IP_REFRESH_QUEUED_STALE_MS = 12_000L
+        private const val IP_REFRESH_QUEUED_STALE_MS = 16_000L
+
+        /**
+         * Сколько ждать остальные входы Cloudflare после первого ответа.
+         *
+         * Отсчитывается **от первого ответа**, а не от начала: до него ждать нечего,
+         * а после — вопрос лишь в том, успеет ли второе семейство адресов заполнить
+         * своё поле экрана. Живой вход отвечает за доли секунды, мёртвый досидел бы
+         * свои 4 с и задал бы цену всему снимку.
+         */
+        private const val TRACE_ENTRY_GRACE_MS = 700L
+
+        /**
+         * Общий предел опроса входов, даже когда не ответил никто.
+         *
+         * Своих сроков у запросов недостаточно: `HttpURLConnection` отмеряет
+         * `connectTimeout` и `readTimeout`, но **не** разрешение имени, а именной вход
+         * идёт через DNS туннеля. Замерено на Mi A1: когда у WARP пропадает обратный
+         * поток («получено 0 Б при отправленных 1504 Б»), снимок занимал поток пула
+         * 12-16 с — дольше, чем [IP_REFRESH_RUNNING_STALE_MS], то есть сторож снова
+         * обрывал бы работу, которая просто не может успеть. Лучше вернуть «трассы
+         * нет» за шесть секунд: экран покажет прошлое наблюдение и попробует снова
+         * через две секунды.
+         */
+        private const val TRACE_STAGE_CAP_MS = 6_000L
 
         private const val STATE_PENDING_STATUS_TEXT = "pending_status_text"
         private const val STATE_START_FLOW_ACTIVE = "start_flow_active"
@@ -96,6 +133,15 @@ class MainActivity : AppCompatActivity() {
          * заменён длиной: для сверки формата этого достаточно, а ключ наружу не уходит.
          */
         private const val ACTION_ADB_DUMP_MASQUE_CONFIG = "DUMP_MASQUE_CONFIG"
+
+        /**
+         * Снять контрольный замер рукопожатия, не гоняя выпуск профилей Proton.
+         *
+         * Внутри прогона он идёт при поднятом туннеле и потому не может проверить
+         * голый путь: сокет «без protect» уходит внутрь туннеля. Отсюда — отдельная
+         * точка входа, чтобы снять тот же замер при снятом туннеле.
+         */
+        private const val ACTION_ADB_PROBE_CONTROL_HANDSHAKE = "PROBE_CONTROL_HANDSHAKE"
         private const val ACTION_ADB_DOUBLE_ENROLL_MASQUE = "DOUBLE_ENROLL_MASQUE"
 
         /** Просит службу прогнать пробу MASQUE изнутри процесса `:vpn`. */
@@ -137,6 +183,13 @@ class MainActivity : AppCompatActivity() {
         val ipv6: String,
         val country: String,
         val colo: String,
+        /**
+         * Снят ли ответ живой трассой сейчас, или подставлен из прошлого наблюдения.
+         * Подставленный показать можно, а записывать обратно нельзя: иначе прошлое
+         * наблюдение получает свежую отметку времени, становится «измеренным» и
+         * дальше подставляется само себе бесконечно.
+         */
+        val measured: Boolean = true,
     )
 
     private enum class BackdropState {
@@ -237,6 +290,26 @@ class MainActivity : AppCompatActivity() {
             .callTimeout(6, TimeUnit.SECONDS)
             .build()
     }
+    /**
+     * Пул для одновременного опроса входов Cloudflare.
+     *
+     * Отдельный от [ipExecutor] намеренно. В том три потока, и задача обновления IP
+     * работает как раз в нём: разложи она свои ветки по тому же пулу — ожидающие
+     * задачи заняли бы все потоки, а ветки, которых они ждут, встали бы в очередь
+     * за ними. Демонский cached-пул стоит здесь дёшево: потоки освобождаются сами
+     * после минуты простоя, а на снимок их нужно три.
+     *
+     * Здесь идёт только внешний веер — три входа, и результат нужен от всех трёх.
+     * Запасные адреса внутри входа гоняет [ProtonRace] на своём пуле, поэтому
+     * ожидающая задача никогда не ждёт задачу этого же пула.
+     */
+    private val lazyTraceExecutor = lazy {
+        Executors.newCachedThreadPool { runnable ->
+            Thread(runnable, "nova-trace").apply { isDaemon = true }
+        }
+    }
+    private val traceExecutor: ExecutorService by lazyTraceExecutor
+
     private val ipRefreshInFlight = AtomicBoolean(false)
     private val ipRefreshGeneration = AtomicInteger(0)
     private val latencyRefreshInFlight = AtomicBoolean(false)
@@ -546,17 +619,33 @@ class MainActivity : AppCompatActivity() {
                 startManualTransportStep(nextChainStep)
                 return@setOnClickListener
             }
-            val configs = clientData.getWarpVerifiedMergedConfigs()
-                .filter { config ->
-                    !config.manual &&
-                        if (importedOnly) {
-                            config.userImported
-                        } else {
-                            !config.userImported && clientData.isBundledSeed(config)
-                        }
-                }
+            // В режиме Proton перебирается список Proton, а не встроенные семена.
+            //
+            // `getWarpVerifiedMergedConfigs` знает только семена и импорт из настроек:
+            // профили Proton лежат в своём файле и подмешиваются к очереди внутри
+            // службы. Кнопка поэтому называла узел Cloudflare, служба его не брала —
+            // очередь Proton строит другая ветка — и переподнимала тот же профиль.
+            // Снаружи это ровно «нажал следующий, а IP в браузере тот же».
+            val protonConfigs = clientData.getProtonVerifiedConfigs()
+            val configs = if (protonConfigs.isNotEmpty()) {
+                protonConfigs
+            } else {
+                clientData.getWarpVerifiedMergedConfigs()
+                    .filter { config ->
+                        !config.manual &&
+                            if (importedOnly) {
+                                config.userImported
+                            } else {
+                                !config.userImported && clientData.isBundledSeed(config)
+                            }
+                    }
+            }
                 .let { filteredConfigs ->
-                    if (importedOnly) {
+                    // Список Proton пересортировке не подлежит: он уже в том порядке,
+                    // в котором его строит служба (`seedOrder` = позиция в файле).
+                    // Компаратор встроенных семян дал бы другой порядок, и стороны
+                    // считали бы «следующим» разные узлы.
+                    if (importedOnly || protonConfigs.isNotEmpty()) {
                         filteredConfigs
                     } else {
                         filteredConfigs.sortedWith(
@@ -724,6 +813,12 @@ class MainActivity : AppCompatActivity() {
                         this,
                         Intent(this, NovaVpnService::class.java).apply {
                             action = NovaVpnService.ACTION_REAPPLY_CURRENT_SESSION
+                            // Свежие настройки едут и здесь. Это единственный путь
+                            // подключения, который собирал интент руками, — и служба
+                            // оставалась со своей кэшированной копией региона. При
+                            // выбранном Proton она строила очередь встроенных семян,
+                            // а экран продолжал показывать Proton.
+                            applyCurrentPreferenceExtras(this)
                             putExtra(NovaVpnService.EXTRA_ATTEMPT_ORDINAL, nextOrdinal)
                             putExtra(NovaVpnService.EXTRA_ATTEMPT_TOTAL, nextTotal)
                             putExtra(NovaVpnService.EXTRA_MANUAL_WARP_PROFILE_MODE, nextConfig.mode)
@@ -1048,6 +1143,7 @@ class MainActivity : AppCompatActivity() {
         // текущий шаг, и вернувшийся на экран пользователь видит происходящее, а не
         // ждёт следующего.
         ProtonProfileManager.addListener(protonProgressListener)
+        resumeProtonPreparationIfPending()
         refreshWarpDiscoverySnapshotFromStorage()
         statusHandler.post(statusRunnable)
         refreshInstallUpdateButton()
@@ -1137,6 +1233,9 @@ class MainActivity : AppCompatActivity() {
         startFlowExecutor.shutdown()
         ipExecutor.shutdown()
         latencyExecutor.shutdown()
+        // Пул ленивый: трогаем его только если он вообще создавался, иначе закрытие
+        // экрана само же его и поднимет.
+        if (lazyTraceExecutor.isInitialized()) traceExecutor.shutdown()
     }
 
     private fun getPersistedServiceState(): String = clientData.getServiceState()
@@ -1738,7 +1837,19 @@ class MainActivity : AppCompatActivity() {
             if (!ipRefreshInFlight.compareAndSet(false, true)) {
                 return
             }
-            LogManager.log("UI checkCurrentIp: прерываем зависший IP refresh и запускаем новый для живого туннеля.")
+            // С числами, а не «зависший».
+            //
+            // На Mi A1 эта строка идёт каждые ~8,4 с всю сессию, а следом за ней —
+            // «snapshot получен» за 30-200 мс: то есть новая задача успевает, а флаг
+            // к следующему тику снова занят, и предыдущая его не отпустила. Без
+            // деления «работала N мс» / «стояла в очереди N мс» это одинаково
+            // выглядит и как незавершённая задача, и как несовпадение поколений в
+            // `finally` — диагнозы разные, лечение разное (G11).
+            LogManager.log(
+                "UI checkCurrentIp: прерываем зависший IP refresh и запускаем новый для живого туннеля " +
+                    if (startedAt > 0L) "(работала ${now - startedAt} мс)."
+                    else "(стояла в очереди ${now - ipRefreshQueuedAtMs} мс)."
+            )
         }
         ipRefreshStartedAtMs = 0L
         ipRefreshQueuedAtMs = now
@@ -1842,7 +1953,9 @@ class MainActivity : AppCompatActivity() {
                     // окажется на бейдже, и его отсутствие в этой строке однажды уже
                     // спрятало расхождение «в туннеле MASQUE, на экране WARP».
                     LogManager.log(
-                        "UI checkCurrentIp: snapshot получен, ip=${primaryIp.ifBlank { "-" }}, " +
+                        "UI checkCurrentIp: " +
+                            (if (effectiveSnapshot.measured) "snapshot получен" else "показано прошлое наблюдение") +
+                            ", ip=${primaryIp.ifBlank { "-" }}, " +
                             "country=${effectiveSnapshot.country.ifBlank { "-" }}, backend=$resolvedBackend, " +
                             "transport=${clientData.getServiceTransport().ifBlank { "-" }}"
                     )
@@ -1851,6 +1964,10 @@ class MainActivity : AppCompatActivity() {
                 if (
                     tunnelNetwork != null &&
                     primaryIp.isNotBlank() &&
+                    // Подставленное наблюдение обратно не пишется: запись обновила бы
+                    // ему отметку времени, прошлый выход стал бы «свежим» и дальше
+                    // подставлялся бы сам себе без конца.
+                    effectiveSnapshot.measured &&
                     // Для VLESS экран лишь пересказывает наблюдение службы. Записывать
                     // его обратно нельзя: любое своё измерение здесь идёт мимо узла и
                     // затирало бы честное наблюдение адресом провайдера.
@@ -1935,6 +2052,9 @@ class MainActivity : AppCompatActivity() {
                             ipv6 = currentIpv6,
                             country = currentCountry,
                             backend = resolvedBackend,
+                            // Транспорт — то единственное, что отличает сессию Proton от
+                            // сессии встроенного WARP: бэкенд у них один и тот же.
+                            transport = observedTransport,
                         )
                     } else {
                         clientData.saveDirectUiSnapshot(
@@ -1962,28 +2082,53 @@ class MainActivity : AppCompatActivity() {
         resolvedBackend: String,
     ): IpSnapshot? {
         if (tunnelNetwork == null) return null
+        // Бэкенд не опознаёт сессию: `WARP` — общая метка для встроенных семян,
+        // MASQUE, импортированного AWG и Proton. А Proton перед выпуском профилей сам
+        // поднимает обычный WARP с российским выходом — снимок той сессии проходил
+        // проверку по бэкенду и показывался поверх живого узла US/NL. Отсюда «страна
+        // RU вместо US». Привязываемся к транспорту, как уже сделано для полей
+        // экрана (G55).
+        val activeTransport = clientData.getServiceTransport().ifBlank { resolvedBackend }
+        if (activeTransport != lastObservedIpTransport) {
+            LogManager.log(
+                "UI checkCurrentIp: трасса не дошла, но транспорт сменился " +
+                    "($lastObservedIpTransport -> $activeTransport) — прошлое наблюдение не подставляем."
+            )
+            return null
+        }
         val tunnelSnapshot = clientData.getTunnelUiSnapshot()
         if (
             tunnelSnapshot != null &&
             (tunnelSnapshot.ipv4.isNotBlank() || tunnelSnapshot.ipv6.isNotBlank() || tunnelSnapshot.country.isNotBlank()) &&
             tunnelSnapshot.backend.trim().equals(resolvedBackend.trim(), ignoreCase = true)
         ) {
+            LogManager.log(
+                "UI checkCurrentIp: трасса не дошла, показываем прошлый снимок туннеля — не свежее измерение."
+            )
             return IpSnapshot(
                 ipv4 = tunnelSnapshot.ipv4,
                 ipv6 = tunnelSnapshot.ipv6,
                 country = tunnelSnapshot.country,
                 colo = clientData.getLastExitColo(),
+                measured = false,
             )
         }
 
-        val lastExitIp = clientData.getLastExitIp().trim()
-        val lastExitCountry = clientData.getLastExitCountry().trim()
+        // Тройка берётся одним куском: адрес и страна обязаны быть из одного ответа
+        // трассы (I10), а раздельное чтение смешивало наблюдения разных сессий.
+        val lastExit = clientData.getLastExitObservation()
+        val lastExitIp = lastExit.ip.trim()
+        val lastExitCountry = lastExit.country.trim()
         if (lastExitIp.isBlank() && lastExitCountry.isBlank()) return null
+        LogManager.log(
+            "UI checkCurrentIp: трасса не дошла, показываем прошлое наблюдение — не свежее измерение."
+        )
         return IpSnapshot(
             ipv4 = if (isIpv4Address(lastExitIp)) lastExitIp else "",
             ipv6 = if (lastExitIp.contains(':')) lastExitIp else "",
             country = lastExitCountry,
-            colo = clientData.getLastExitColo(),
+            colo = lastExit.colo,
+            measured = false,
         )
     }
 
@@ -2090,6 +2235,16 @@ class MainActivity : AppCompatActivity() {
                     ),
                 )
                 LogManager.log("ADB debug: запросили у службы двойной выпуск ключа MASQUE.")
+                finish()
+                return true
+            }
+            ACTION_ADB_PROBE_CONTROL_HANDSHAKE -> {
+                ContextCompat.startForegroundService(
+                    this,
+                    Intent(this, NovaVpnService::class.java)
+                        .setAction(NovaVpnService.ACTION_PROBE_CONTROL_HANDSHAKE),
+                )
+                LogManager.log("ADB debug: запросили у службы контрольный замер рукопожатия.")
                 finish()
                 return true
             }
@@ -2256,10 +2411,30 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Снимок внешнего адреса и страны.
+     *
+     * Входы Cloudflare независимы и идемпотентны, поэтому опрашиваются **разом**, а
+     * не по очереди. Последовательный обход платит полным сроком за каждый
+     * неответивший вход (G74): через туннель Proton один снимок стоил ~8,4 с — это
+     * больше [IP_REFRESH_RUNNING_STALE_MS], так что сторож в `checkCurrentIp` обрывал
+     * каждое обновление за доли секунды до его же успеха и заводил такое же, раз в
+     * 8,4 с весь сеанс, с записью «зависший IP refresh» — хотя не зависало ничего.
+     *
+     * Мёртвый вход не запоминается, а **не дожидается** ([pollTraceEntries]). Памятка
+     * «этот вход тут молчал» здесь уже была и оказалась хуже болезни: она сужала опрос
+     * до входов, ответивших однажды, то есть уничтожала ровно ту избыточность, ради
+     * которой входов несколько. На WARP это выглядело так — один неудачный такт
+     * приговаривал три входа из четырёх, оставшийся через несколько секунд икал, и
+     * снимок проваливался целиком: «не ответил ни один вход» → сброс → полный опрос →
+     * снова сужение, цикл каждые 6-10 с, и каждый его виток стоил экрану свежего
+     * адреса. Ограничение ожидания даёт тот же выигрыш во времени, но спрашивает
+     * всегда всех.
+     */
     private fun fetchIpSnapshot(network: Network?): IpSnapshot? {
         val fastTrace = fetchTraceInfoViaSocket(
             network,
-            listOf("1.1.1.1", "1.0.0.1"),
+            CloudflareTrace.IPV4_HOSTS,
             timeoutMs = if (network != null) 1200 else 1800,
         )
         if (fastTrace != null) {
@@ -2274,9 +2449,16 @@ class MainActivity : AppCompatActivity() {
             return null
         }
 
-        val ipv4Trace = fetchTraceInfoFromUrls(network, CloudflareTrace.IPV4_URLS)
-        val ipv6Trace = fetchTraceInfoFromUrls(network, CloudflareTrace.IPV6_URLS)
-        val genericTrace = fetchTraceInfoFromUrls(network, CloudflareTrace.HOSTNAME_URLS)
+        val traces = pollTraceEntries(
+            listOf(
+                { fetchTraceInfoFromUrls(network, CloudflareTrace.IPV4_URLS) },
+                { fetchTraceInfoFromUrls(network, CloudflareTrace.IPV6_URLS) },
+                { fetchTraceInfoFromUrls(network, CloudflareTrace.HOSTNAME_URLS) },
+            )
+        )
+        val ipv4Trace = traces[0]
+        val ipv6Trace = traces[1]
+        val genericTrace = traces[2]
 
         // Только Cloudflare: адрес и страна приходят одним ответом и разойтись не
         // могут, а сторонних определителей адреса здесь больше нет ([CloudflareTrace]).
@@ -2296,22 +2478,54 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    /**
+     * Спрашивает все входы разом и возвращает их ответы в том же порядке.
+     *
+     * Ждать всех нельзя: цена снимка тогда равна самому медленному входу, а мёртвый
+     * вход досиживает свой полный таймаут — через туннель Proton это 4 с на пустом
+     * месте при живом ответе за 0,3 с. Ждать одного тоже нельзя: IPv4 и IPv6 — разные
+     * поля экрана, и второй приходит позже первого.
+     *
+     * Поэтому два срока. Пока нет **ни одного** ответа, ждём до [TRACE_STAGE_CAP_MS]
+     * — на медленной сети живой вход должен успеть, а зависший не должен держать
+     * поток пула дольше, чем сторож считает работу здоровой. Как только ответ есть,
+     * остальным даётся всего [TRACE_ENTRY_GRACE_MS]: их дело — дозаполнить второе
+     * поле экрана, а не задавать цену снимку. Опоздавшие досиживают свой таймаут на
+     * демонских потоках пула, никого не держа.
+     */
+    private fun pollTraceEntries(tasks: List<() -> TraceInfo?>): List<TraceInfo?> {
+        val completion = ExecutorCompletionService<Pair<Int, TraceInfo?>>(traceExecutor)
+        tasks.forEachIndexed { index, task ->
+            completion.submit(Callable { index to runCatching(task).getOrNull() })
+        }
+        val results = arrayOfNulls<TraceInfo>(tasks.size)
+        val capDeadlineMs = SystemClock.elapsedRealtime() + TRACE_STAGE_CAP_MS
+        var graceDeadlineMs = 0L
+        var pending = tasks.size
+        while (pending > 0) {
+            val deadlineMs = if (graceDeadlineMs == 0L) capDeadlineMs else minOf(graceDeadlineMs, capDeadlineMs)
+            val leftMs = deadlineMs - SystemClock.elapsedRealtime()
+            if (leftMs <= 0L) break
+            val future = completion.poll(leftMs, TimeUnit.MILLISECONDS) ?: break
+            pending--
+            val (index, trace) = runCatching { future.get() }.getOrNull() ?: continue
+            if (trace == null) continue
+            results[index] = trace
+            if (graceDeadlineMs == 0L) {
+                graceDeadlineMs = SystemClock.elapsedRealtime() + TRACE_ENTRY_GRACE_MS
+            }
+        }
+        return results.toList()
+    }
+
     private fun fetchTraceInfoViaSocket(
         network: Network?,
         hosts: List<String>,
         timeoutMs: Int = 4000,
     ): TraceInfo? {
-        for (host in hosts) {
-            val body = readTraceViaSocket(network, host, timeoutMs) ?: continue
-            val lines = body.lineSequence().toList()
-            val traceIp = lines.firstOrNull { it.startsWith("ip=") }?.substringAfter("=")?.trim().orEmpty()
-            val traceCountry = lines.firstOrNull { it.startsWith("loc=") }?.substringAfter("=")?.trim().orEmpty()
-            val traceColo = lines.firstOrNull { it.startsWith("colo=") }?.substringAfter("=")?.trim().orEmpty()
-            if (traceIp.isNotBlank()) {
-                return TraceInfo(traceIp, traceCountry, traceColo)
-            }
+        return firstTrace(hosts) { host ->
+            readTraceViaSocket(network, host, timeoutMs)?.let(::parseTraceInfo)
         }
-        return null
     }
 
     private fun readTraceViaSocket(network: Network?, host: String, timeoutMs: Int = 4000): String? {
@@ -2413,17 +2627,34 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun fetchTraceInfoFromUrls(network: Network?, urls: List<String>): TraceInfo? {
-        for (url in urls) {
-            val body = readTextFromUrl(network, url) ?: continue
-            val lines = body.lineSequence().toList()
-            val traceIp = lines.firstOrNull { it.startsWith("ip=") }?.substringAfter("=")?.trim().orEmpty()
-            val traceCountry = lines.firstOrNull { it.startsWith("loc=") }?.substringAfter("=")?.trim().orEmpty()
-            val traceColo = lines.firstOrNull { it.startsWith("colo=") }?.substringAfter("=")?.trim().orEmpty()
-            if (traceIp.isNotBlank()) {
-                return TraceInfo(traceIp, traceCountry, traceColo)
-            }
+        return firstTrace(urls) { url ->
+            readTextFromUrl(network, url)?.let(::parseTraceInfo)
         }
-        return null
+    }
+
+    /**
+     * Опрашивает запасные адреса одного входа **одновременно** и возвращает первый
+     * пришедший ответ, не дожидаясь остальных.
+     *
+     * Адреса внутри входа — альтернативы друг другу, а не шаги, поэтому очередь
+     * здесь стоит суммы их сроков: через туннель Proton молчали оба литеральных
+     * адреса подряд, и только это давало 3,6 с из тех 8,4 (G74).
+     *
+     * Именно **первый пришедший**, а не первый по списку. Дожидаться всех ради
+     * порядка нельзя: тогда живой ответ за 200 мс ждал бы соседа, который на этой
+     * сети молчит весь свой таймаут, — то есть возвращалась бы та самая плата за
+     * мёртвый адрес, ради которой всё и переписывалось. Разнобоя в показаниях это
+     * не даёт: `/cdn-cgi/trace` у любого входа Cloudflare сообщает **наш** адрес и
+     * страну, так что все адреса семейства отвечают одним и тем же.
+     *
+     * Гонку ведёт [ProtonRace.firstSuccess] — примитив тот же, и второй его копии
+     * здесь заводить нечего. `cancelAll` пустой: у `HttpURLConnection` и `Socket`
+     * ручки для обрыва нет, проигравшие досиживают свой таймаут на демонских
+     * потоках. Это стоит потоков, но не времени вызывающего.
+     */
+    private fun firstTrace(entries: List<String>, read: (String) -> TraceInfo?): TraceInfo? {
+        val attempts: List<() -> TraceInfo?> = entries.map { entry -> { read(entry) } }
+        return ProtonRace.firstSuccess(attempts, cancelAll = {})
     }
 
     private fun fetchTraceInfoFromUrlsViaProxy(proxy: Proxy, urls: List<String>): TraceInfo? {
@@ -2621,6 +2852,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateIpDisplay() {
+        // Пока выпускаются профили Proton, ни адреса, ни страна показу не подлежат:
+        // сеанс, с которого они сняты, — не тот транспорт, который выбрал
+        // пользователь. Выходим до восстановления значений из снимка, иначе прочерки
+        // тут же затираются последним известным выходом (и бейдж пишет «WARP: RU»
+        // ровно тогда, когда идёт регистрация Proton).
+        if (clientData.isProtonPreparationRequested()) {
+            currentIpv4 = "..."
+            currentIpv6 = "..."
+            currentCountry = "--"
+            tunnelIpResolved = false
+            tvIpAddress.text = "—" + System.lineSeparator() + "—"
+            tvCountryBadge.visibility = android.view.View.GONE
+            return
+        }
         hydrateConnectedUiFromPersistenceIfNeeded()
         val persistedTunnelSnapshot =
             if (isTunnelConnected()) clientData.getTunnelUiSnapshot() else null
@@ -2876,14 +3121,37 @@ class MainActivity : AppCompatActivity() {
         statusHandler.postDelayed(primaryActionUnlockRunnable, durationMs)
     }
 
+    /**
+     * Идёт ли регистрация, ради которой нажимать «подключить» бессмысленно.
+     *
+     * Два признака, оба в файлах (I2): выпуск профилей Proton и ступень регистрации
+     * MASQUE. Оба означают одно — приложение уже занято подготовкой выбранного
+     * протокола, и повторное «подключить» посреди неё либо ничего не делает, либо
+     * роняет тот самый туннель, через который выдаётся ключ.
+     *
+     * Фоновой подготовки это не касается: она ни одного из признаков не ставит и
+     * пользователю не видна вовсе.
+     */
+    private fun isRegistrationInProgress(): Boolean =
+        clientData.isProtonPreparationRequested() || clientData.isDeviceRegistrationInProgress()
+
     private fun applyPrimaryActionInterlock() {
         if (!::btnConnect.isInitialized) return
         btnConnect.isEnabled = SystemClock.elapsedRealtime() >= primaryActionLockedUntilMs
+        // Пока идёт регистрация, единственное доступное действие — прервать её.
+        // Подпись поэтому «ОТКЛЮЧИТЬ» при любом состоянии туннеля: «подключить»
+        // нажать нечем, а остановиться — есть чем. Без этого регистрация без
+        // поднятого туннеля показывала «ПОДКЛЮЧИТЬ», нажатие заводило второй
+        // connect-flow поверх идущей подготовки, а прервать её было нечем совсем.
+        if (!primaryActionPreviewActive && isRegistrationInProgress()) {
+            btnConnect.text = "ОТКЛЮЧИТЬ"
+        }
     }
 
     private fun shouldTreatPrimaryActionAsStop(): Boolean {
         return isWarpDiscoveryActive() ||
             isStartFlowActive ||
+            isRegistrationInProgress() ||
             isTunnelConnected() ||
             clientData.getServiceState() != NovaVpnService.STATE_STOPPED
     }
@@ -2922,6 +3190,9 @@ class MainActivity : AppCompatActivity() {
         } else {
             currentPrimaryStopActionLabel()
         }
+        // Отмена касания не должна возвращать «ПОДКЛЮЧИТЬ» посреди регистрации:
+        // подпись там задаёт блокировка, а не состояние туннеля.
+        applyPrimaryActionInterlock()
     }
 
     private fun isAdaptationMessage(message: String): Boolean {
@@ -2970,8 +3241,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Замер считается **по удавшейся пробе**, а не от начала перебора.
+     *
+     * Дефект, который это чинит: отсчёт вёлся от `startedAt` первой пробы, а
+     * возвращался после той, которая наконец ответила. Каждая неудачная попытка —
+     * это полный её срок (до 3 с), и он целиком приплюсовывался к результату:
+     * на живом канале с честными 280 мс экран показывал 800+ мс. Число при этом
+     * выглядело правдоподобно, поэтому читалось не как ошибка замера, а как
+     * «приложение тормозит канал».
+     */
     private fun measureLatencyViaOperaProxy(timeoutMs: Int): Int {
-        val startedAt = System.currentTimeMillis()
         // Оба набора — Cloudflare, просто разные входы: чередование нужно, чтобы не
         // долбить один адрес, а не для того, чтобы опрашивать разных поставщиков.
         val probes = if (usePrimaryLatencyServer) {
@@ -2986,6 +3266,7 @@ class MainActivity : AppCompatActivity() {
             )
         }
         for ((host, path) in probes) {
+            val startedAt = System.currentTimeMillis()
             val body = readTextViaOperaProxySocket(host, path, timeoutMs = timeoutMs)
             if (!body.isNullOrBlank()) {
                 return (System.currentTimeMillis() - startedAt).toInt()
@@ -2999,6 +3280,7 @@ class MainActivity : AppCompatActivity() {
                 CloudflareTrace.IPV4_URLS.reversed()
             }
             for (url in fallbackUrls) {
+                val startedAt = System.currentTimeMillis()
                 if (!readTextFromUrlViaProxy(proxy, url, timeoutMs).isNullOrBlank()) {
                     return (System.currentTimeMillis() - startedAt).toInt()
                 }
@@ -3490,6 +3772,7 @@ class MainActivity : AppCompatActivity() {
         clientData.clearTransientConnectingPending()
         clientData.clearRestartSession()
         LogManager.log("Остановка запрошена пользователем.")
+        cancelRegistrationOnUserStop()
         if (hadOnlyLocalStartFlow) {
             markServiceStoppedLocally()
             updateUiByState(NovaVpnService.STATE_STOPPED)
@@ -3504,6 +3787,21 @@ class MainActivity : AppCompatActivity() {
             markServiceStoppedLocally()
             updateUiByState(NovaVpnService.STATE_STOPPED)
         }
+    }
+
+    /**
+     * Отключение останавливает и регистрацию — иначе останавливать её нечем.
+     *
+     * Сам прогон в сети не обрывается: он уже в середине запроса, и рвать его посреди
+     * регистрации ключа незачем. Снимается **применение** итога — ровно как при выборе
+     * другого транспорта: регион и подключение остаются за последним явным действием
+     * пользователя, а этим действием только что было «отключить».
+     */
+    private fun cancelRegistrationOnUserStop() {
+        if (!clientData.isProtonPreparationRequested()) return
+        LogManager.log("Proton: пользователь нажал отключение — подготовку прекращаем.")
+        ProtonProfileManager.cancelPreparation()
+        clientData.setProtonPreparationRequested(false)
     }
 
     private fun stopWarpDiscoveryFromMain() {
@@ -3668,6 +3966,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Слой поверх любого состояния: пока идёт выпуск профилей Proton, ни зелёное
+        // «АКТИВНО», ни красное «НЕ ПОДКЛЮЧЕНО» правды не говорят — работа идёт, но
+        // не та, что показывает бейдж. Накладывается последним, чтобы не спорить с
+        // остальной отрисовкой: кнопки и фон остаются от реального состояния.
+        applyProtonPreparationOverlay()
+
         lastRenderedDiscoveryRunning = discoveryRunning
         requestQuickTileRefresh(vpnState)
         refreshKeepScreenAwake()
@@ -3815,7 +4119,12 @@ class MainActivity : AppCompatActivity() {
             setBackdropConnectedInstant()
         }
         connectedUiAwaitingProof = false
-        if (!applyDeviceRegistrationStatusIfActive()) {
+        // Пока выпускаются профили Proton, зелёного «АКТИВНО» здесь быть не может:
+        // сеанс поднят не на том транспорте, который выбрал пользователь. Показываем
+        // жёлтую «РЕГИСТРАЦИЯ PROTON», а адреса и страну — прочерками, чтобы бейдж
+        // чужого выхода не выдавался за выбранный.
+        val protonPreparing = clientData.isProtonPreparationRequested()
+        if (!protonPreparing && !applyDeviceRegistrationStatusIfActive()) {
             applyStatusStyle(
                 text = "АКТИВНО : РАБОТАЕТ",
                 textColor = Color.parseColor("#13A10E"),
@@ -3824,12 +4133,38 @@ class MainActivity : AppCompatActivity() {
         }
         updateAttemptProgressDisplay()
         btnConnect.text = "ОТКЛЮЧИТЬ"
-        btnNextProfile.visibility = View.VISIBLE
+        applyNextProfileButtonVisibility()
         requestVpnNetwork()
         updateIpDisplay()
-        checkCurrentIp()
-        measureLatency()
+        if (!protonPreparing) {
+            checkCurrentIp()
+            measureLatency()
+        }
         applyPrimaryActionInterlock()
+    }
+
+    /**
+     * Регионы, где кнопка «следующий профиль» показу не подлежит.
+     *
+     * Кнопка ведёт по **цепочке транспортов**, а не по списку узлов выбранного: с
+     * активной Opera EU следующий шаг — Opera US, с MASQUE — Opera EU. Когда регион
+     * выбран явно, это прямое нарушение I1, и наблюдалось оно ровно так: на выбранном
+     * EU нажатие уводило на US, тот не поднялся, экран почти полторы минуты показывал
+     * «НЕ ПОДКЛЮЧЕНО», после чего служба сама вернулась на EU — снаружи «нажал
+     * переключение, а оно отключило и потом подключилось само».
+     *
+     * У WARP, Proton и VLESS кнопка перебирает **свой** список узлов и остаётся.
+     */
+    private val NEXT_PROFILE_HIDDEN_REGIONS = setOf("eu", "us", "masque")
+
+    private fun applyNextProfileButtonVisibility() {
+        if (!::btnNextProfile.isInitialized) return
+        val region = clientData.getExitRegionPreference().trim().lowercase(Locale.ROOT)
+        btnNextProfile.visibility = if (region in NEXT_PROFILE_HIDDEN_REGIONS) {
+            View.GONE
+        } else {
+            View.VISIBLE
+        }
     }
 
     private fun renderStoppedState() {
@@ -3970,7 +4305,12 @@ class MainActivity : AppCompatActivity() {
         // происходит, — а выпуск занимает до минуты (сессия, список серверов,
         // регистрация ключа, замер 50-60 кандидатов). Место под статусом уже
         // занято счётчиком перебора, и это тот же самый вопрос «что сейчас идёт».
-        if (ProtonProfileManager.isRunning()) {
+        //
+        // Признак подготовки проверяется наравне с самим прогоном: после отмены
+        // (отключение или выбор другого транспорта) прогон в сети ещё доигрывает свой
+        // шаг, но его итог уже никуда не применяется. Строка «Proton: проверка 45/51»
+        // над красным «НЕ ПОДКЛЮЧЕНО» читалась бы как «отключение не сработало».
+        if (ProtonProfileManager.isRunning() && clientData.isProtonPreparationRequested()) {
             val step = protonProgressText.ifBlank { ProtonProfileManager.currentStatus() }
             if (step.isNotBlank()) {
                 tvAttemptProgress.text = step
@@ -4347,6 +4687,88 @@ class MainActivity : AppCompatActivity() {
      * пользователь успевал решить, что зависло, и нажать отключение или сменить
      * протокол, уронив ровно тот туннель, через который выдаётся ключ.
      */
+    /**
+     * Пока идут регистрация и выпуск профилей Proton, экран говорит именно это.
+     *
+     * Без этого пользователь видел зелёное «АКТИВНО : РАБОТАЕТ» и бейдж «WARP: RU»:
+     * выпуск шёл поверх обычного сеанса, и снаружи это читалось как «выбрал Proton,
+     * а подключился WARP». Состояние промежуточное, значит и цвет промежуточный —
+     * тот же жёлтый, что у регистрации устройства.
+     */
+    /**
+     * Доводит прерванный выпуск профилей Proton до конца.
+     *
+     * Признак лежит в файле, поэтому переживает и уход из приложения, и смерть
+     * процесса: вернувшись, человек продолжает с того места, где остановился, а не
+     * начинает всё заново. Сам [ProtonProfileManager.ensureProfiles] уже устроен как
+     * продолжение — живая личность и сертификат переиспользуются, заново делается
+     * только недостающее.
+     */
+    private fun resumeProtonPreparationIfPending() {
+        if (!clientData.isProtonPreparationRequested()) return
+        if (ProtonProfileManager.isRunning()) return
+        LogManager.log("Proton: выпуск профилей не был закончен — продолжаем.")
+        ProtonProfileManager.markPreparationRequested()
+        ProtonProfileManager.ensureProfiles(this) { outcome ->
+            clientData.setProtonPreparationRequested(false)
+            ProtonProfileManager.cancelPreparation()
+            if (outcome.ready) {
+                clientData.setExitRegionPreference("proton")
+                LogManager.log("Proton: выпуск доведён до конца, профилей ${outcome.profiles.size}.")
+            } else {
+                LogManager.log("Proton: продолжить выпуск не удалось — ${outcome.message}")
+            }
+            runOnUiThread { updateUiByState(null) }
+        }
+    }
+
+    /** Шаг бегущего многоточия у «РЕГИСТРАЦИЯ PROTON». */
+    private val PROTON_ELLIPSIS_PERIOD_MS = 450L
+
+    private var protonEllipsisStep = 0
+
+    private val protonEllipsisRunnable = object : Runnable {
+        override fun run() {
+            if (!isActivityResumed || !clientData.isProtonPreparationRequested()) return
+            protonEllipsisStep += 1
+            applyProtonPreparationOverlay()
+            statusHandler.postDelayed(this, PROTON_ELLIPSIS_PERIOD_MS)
+        }
+    }
+
+    /**
+     * Накладывает состояние «идёт регистрация Proton» поверх любого другого.
+     *
+     * Отдельным слоем, а не веткой в каждом рендере: выпуск идёт и когда туннеля
+     * нет вовсе, и поверх живого сеанса. Пока проверка стояла только в
+     * `renderConnectedState`, без туннеля экран показывал красное «НЕ ПОДКЛЮЧЕНО» —
+     * то есть ровно в тот момент, когда работа и идёт, пользователь видел, что всё
+     * стоит. Многоточие бежит, потому что неподвижный текст на минутной операции
+     * неотличим от зависшего.
+     *
+     * @return true, если слой применён
+     */
+    private fun applyProtonPreparationOverlay(): Boolean {
+        if (!clientData.isProtonPreparationRequested()) {
+            statusHandler.removeCallbacks(protonEllipsisRunnable)
+            return false
+        }
+        val dots = ".".repeat(1 + (protonEllipsisStep % 3))
+        applyStatusStyle(
+            text = "РЕГИСТРАЦИЯ PROTON$dots",
+            textColor = Color.parseColor("#C99514"),
+            textGlowColor = Color.parseColor("#F1C64A"),
+        )
+        // Бейдж и адреса — прочерками: показывать чужой выход как свой нельзя (I10).
+        currentIpv4 = "..."
+        currentIpv6 = "..."
+        currentCountry = "--"
+        updateIpDisplay()
+        statusHandler.removeCallbacks(protonEllipsisRunnable)
+        statusHandler.postDelayed(protonEllipsisRunnable, PROTON_ELLIPSIS_PERIOD_MS)
+        return true
+    }
+
     private fun applyDeviceRegistrationStatusIfActive(): Boolean {
         if (!clientData.isDeviceRegistrationInProgress()) return false
         applyStatusStyle(

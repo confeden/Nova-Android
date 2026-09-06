@@ -65,6 +65,50 @@ data class TunnelUiSnapshot(
 )
 
 /**
+ * Счётчики обхода по доменам, снятые с Go-ядра в процессе `:vpn`.
+ *
+ * Экран живёт в процессе интерфейса, где свой экземпляр ядра с пустым состоянием,
+ * и спросить счётчики напрямую не может. Поэтому служба выкладывает их файлом, а
+ * экран читает — тем же способом, что и состояние службы.
+ *
+ * @param learned сколько адресов сейчас в выученном наборе.
+ * @param relayed сколько потоков ушло наружу мимо туннеля.
+ * @param installed сколько локальных адресов заведено в netstack. Число не
+ * уменьшается никогда: `ensureLocalAddressLocked` в netstack умеет только
+ * добавлять, и вытеснение адреса из набора его оттуда не убирает. Именно это
+ * число и упирается в потолок 256.
+ * @param dropped сколько адресов вытеснено по достижении потолка.
+ * @param quicSkipped сколько UDP-потоков (QUIC) ушло через туннель: в первой
+ * версии ретранслируется только TCP.
+ * @param transportSupported видит ли Go-ядро пакеты на текущем транспорте. На
+ * Opera и VLESS дескриптор TUN уходит в tun2proxy, и обход по зонам не работает.
+ * @param dnsInterceptEnabled включён ли перехват DNS. Без него учить адреса не из
+ * чего, и зоны не сработают, сколько их ни отметь.
+ */
+data class DomainBypassCoreStats(
+    val learned: Int = 0,
+    val relayed: Long = 0L,
+    val installed: Int = 0,
+    val listeners: Int = 0,
+    val dropped: Long = 0L,
+    val quicSkipped: Long = 0L,
+    val enabled: Boolean = false,
+    val transportSupported: Boolean = true,
+    val dnsInterceptEnabled: Boolean = false,
+    val backend: String = "",
+    val updatedAt: Long = 0L,
+    /**
+     * Состояние релея в ядре: `0` — не поднимался, `1` — работает, `2` — сдался.
+     *
+     * Третье значение нужно затем, что релей умеет отказать сам: если запись в
+     * TUN перестала проходить, он снимает перехват и возвращает трафик в
+     * туннель. Без отдельного признака это выглядело бы как «включено, но
+     * трафика не было», а на деле обход не действует (I4).
+     */
+    val relayState: Int = 0,
+)
+
+/**
  * Подписка VLESS: адрес, валидаторы условного запроса и снимок состава.
  *
  * @param knownIdentities состав подписки на момент прошлой загрузки. Нужен, чтобы
@@ -291,6 +335,14 @@ class ClientData(context: Context) {
     private val vlessProfilesFile = AtomicFile(File(appContext.filesDir, "vless_profiles.json"))
     private val importedSourceFile = AtomicFile(File(appContext.filesDir, "imported_source.json"))
     private val sniStatsFile = AtomicFile(File(appContext.filesDir, "sni_stats.json"))
+
+    /**
+     * Счётчики обхода по доменам. Пишет `:vpn`, читает экран.
+     *
+     * Файлом, а не `SharedPreferences`: у каждого процесса свой кэш настроек, и
+     * запись из службы экрану просто не видна.
+     */
+    private val domainBypassStatsFile = AtomicFile(File(appContext.filesDir, "domain_bypass_stats.json"))
     private val pinnedProfilesFile = AtomicFile(File(appContext.filesDir, "pinned_profiles.json"))
     private val awgI1File = AtomicFile(File(appContext.filesDir, "awg_i1_overrides.json"))
 
@@ -1369,7 +1421,17 @@ class ClientData(context: Context) {
     fun setExitRegionPreference(value: String) {
         val normalized = normalizeRegionPreference(value)
         synchronized(exitRegionLock) {
-            writeAtomicRaw(exitRegionFile, JSONObject().put("region", normalized).toString())
+            // Читаем-меняем-пишем, а не пишем заново: в том же файле теперь живут
+            // подрегион Opera и предпочтённая страна Proton, и запись одного поля
+            // целым объектом стирала бы два других.
+            val state = readExitRegionState().put("region", normalized)
+            if (normalized == "eu" || normalized == "us") {
+                // Выбор EU/US — это и есть выбор подрегиона Opera. Запоминаем его
+                // здесь же, иначе строка под селектором показывала бы EU сразу
+                // после того, как пользователь нажал US.
+                state.put(KEY_OPERA_SUB_REGION, normalized)
+            }
+            writeAtomicRaw(exitRegionFile, state.toString())
         }
         // Зеркала в настройках здесь больше нет.
         //
@@ -1404,6 +1466,62 @@ class ClientData(context: Context) {
         )
     }
 
+    /**
+     * Подрегион встроенной Opera — `eu` или `us`.
+     *
+     * Кнопка в селекторе одна и называется OPERA (так попросил владелец), а
+     * словарь службы по-прежнему знает два значения. Выбор живёт в том же файле,
+     * что и регион: `SharedPreferences` здесь потеряли бы запись между процессами
+     * (I2, G2/G16/G70).
+     *
+     * Умолчание — EU. Пользователь, стоявший на `us` до появления этой строки,
+     * получает `us`: значение выводится из самого региона, пока отдельного ключа
+     * в файле нет.
+     */
+    fun getOperaSubRegionPreference(): String {
+        val state = readExitRegionState()
+        val explicit = state.optString(KEY_OPERA_SUB_REGION)
+        if (explicit.isNotBlank()) return ConnectionSelectorPolicy.normalizeOperaSubRegion(explicit)
+        val region = normalizeRegionPreference(state.optString("region"))
+        if (region == "eu" || region == "us") return region
+        return ConnectionSelectorPolicy.DEFAULT_OPERA_SUB_REGION
+    }
+
+    fun setOperaSubRegionPreference(value: String) {
+        val normalized = ConnectionSelectorPolicy.normalizeOperaSubRegion(value)
+        synchronized(exitRegionLock) {
+            writeAtomicRaw(
+                exitRegionFile,
+                readExitRegionState().put(KEY_OPERA_SUB_REGION, normalized).toString(),
+            )
+        }
+    }
+
+    /**
+     * Предпочтённая страна выхода Proton — двухбуквенный код или пусто.
+     *
+     * Пусто означает «любая»: на свежей установке выпущенных профилей нет, и
+     * записать сюда страну, которой в списке не окажется, значило бы отдать
+     * службе пустую очередь.
+     */
+    fun getProtonCountryPreference(): String =
+        readExitRegionState().optString(KEY_PROTON_COUNTRY).trim().uppercase(Locale.US)
+            .takeIf { it.length == 2 } ?: ""
+
+    fun setProtonCountryPreference(value: String) {
+        val normalized = value.trim().uppercase(Locale.US).takeIf { it.length == 2 }.orEmpty()
+        synchronized(exitRegionLock) {
+            writeAtomicRaw(
+                exitRegionFile,
+                readExitRegionState().put(KEY_PROTON_COUNTRY, normalized).toString(),
+            )
+        }
+    }
+
+    /** Страны, которые реально есть в выпущенных профилях Proton. */
+    fun getProtonAvailableCountries(): List<String> =
+        CountryDisplayOrder.order(ProtonProfileStore(appContext).readProfiles().map { it.country })
+
     private fun readExitRegionState(): JSONObject {
         readAtomicJson(exitRegionFile)?.let { return it }
         // Перенос из prefs ровно один раз, пока файла нет. Если файл есть, но не
@@ -1427,7 +1545,7 @@ class ClientData(context: Context) {
         // импортированная попытка не выполнялась.
         if (isImportedConfigSourceActive()) return true
         return when (getExitRegionPreference()) {
-            "eu", "us" -> false
+            "eu", "us", "tor" -> false
             else -> true
         }
     }
@@ -1441,6 +1559,47 @@ class ClientData(context: Context) {
      */
     fun isProtonSourceActive(): Boolean =
         normalizeRegionPreference(getExitRegionPreference()) == "proton"
+
+    /**
+     * Пользоваться ли собственными выпущенными профилями WARP.
+     *
+     * Отдельным переключателем, а не регионом: это не другой выход, а **другой
+     * источник тех же профилей WARP** — своя личность вместо общей прошивочной.
+     * Заводить под него седьмое значение региона значило бы, что каждый список
+     * известных регионов в приложении должен узнать о нём заново, а такие списки
+     * уже расходились (G49, G51).
+     *
+     * Хранится **файлом**, а не в `SharedPreferences` (I2): ставит его экран, а
+     * читает `:vpn`, и живущая служба чужую запись в настройки не видит. Проверено
+     * на устройстве: пока флаг лежал в настройках, «обход московского узла»
+     * включался, экран писал об этом в журнал, а служба продолжала считать его
+     * выключенным и ни разу не проверила узел.
+     */
+    fun isGeneratedWarpEnabled(): Boolean = WarpGeneratedStore(appContext).readOptions().useGenerated
+
+    fun setGeneratedWarpEnabled(enabled: Boolean) {
+        val store = WarpGeneratedStore(appContext)
+        store.writeOptions(store.readOptions().copy(useGenerated = enabled))
+    }
+
+    /**
+     * Уводить ли сессию с нежелательного узла Cloudflare (по умолчанию московского).
+     *
+     * Настройка про **узел**, а не про страну выхода: страну Cloudflare выбирает по
+     * адресу клиента, и из российской сети она останется российской при любой точке
+     * входа. Обещать здесь зарубежный выход значило бы обещать невыполнимое —
+     * см. `ExitColoPolicy`.
+     *
+     * По умолчанию выключено: каждое переключение стоит переподключения с обрывом
+     * соединений, а выигрыш нужен не всем. Хранится файлом по той же причине, что и
+     * соседний флаг.
+     */
+    fun isAvoidedColoSwitchEnabled(): Boolean = WarpGeneratedStore(appContext).readOptions().avoidColo
+
+    fun setAvoidedColoSwitchEnabled(enabled: Boolean) {
+        val store = WarpGeneratedStore(appContext)
+        store.writeOptions(store.readOptions().copy(avoidColo = enabled))
+    }
 
     /**
      * Профили VLESS и выбранная ссылка лежат в файле, а не в `SharedPreferences`.
@@ -2187,26 +2346,43 @@ class ClientData(context: Context) {
      */
     fun isVlessOnlyTransportMode(): Boolean = isVlessExplicitlyChosen()
 
-    fun shouldAllowOperaTransport(): Boolean {
-        return when (normalizeRegionPreference(getExitRegionPreference())) {
-            // Proton — явный выбор пользователя, и подменять его встроенной Opera
-            // нельзя: снаружи это читалось бы как «Proton работает».
-            "ru", "proton" -> false
-            else -> true
-        }
-    }
+    /**
+     * Правило теперь одно — [RegionTransportPolicy.allowsOperaTransport].
+     *
+     * Здесь лежала вторая, уже разъехавшаяся копия: она знала только `ru` и
+     * `proton`, поэтому `masque` и `vless` считались «Opera разрешена», а политика
+     * отвечала обратное. Интерфейс из-за этого подписывал явно выбранный MASQUE
+     * как Opera. Список запрещённых значений на месте — это тот самый способ,
+     * которым случился G51.
+     */
+    fun shouldAllowOperaTransport(): Boolean =
+        RegionTransportPolicy.allowsOperaTransport(getExitRegionPreference())
+
     fun getPreferredOperaCountry(): String {
         return getOperaFallbackSequence().firstOrNull()?.first ?: "EU"
     }
     fun getPreferredOperaLabel(): String {
         return getOperaFallbackSequence().firstOrNull()?.second ?: "EU"
     }
+
+    /**
+     * Порядок регионов встроенной Opera.
+     *
+     * В «Авто» первым идёт **запомненный** подрегион, а не всегда EU: кнопка в
+     * селекторе одна, подрегион выбирается строкой под ней, и выбор пользователя
+     * обязан пережить возврат в «Авто» (I1).
+     */
     fun getOperaFallbackSequence(): List<Pair<String, String>> {
+        val preferred = ConnectionSelectorPolicy.normalizeOperaSubRegion(getOperaSubRegionPreference())
         return when (normalizeRegionPreference(getExitRegionPreference())) {
             "eu" -> listOf("EU" to "EU")
             "us" -> listOf("AM" to "US")
-            "ru", "proton" -> emptyList()
-            else -> listOf("EU" to "EU", "AM" to "US")
+            "ru", "proton", "masque", "vless", "tor" -> emptyList()
+            else -> if (preferred == "us") {
+                listOf("AM" to "US", "EU" to "EU")
+            } else {
+                listOf("EU" to "EU", "AM" to "US")
+            }
         }
     }
 
@@ -2344,6 +2520,8 @@ class ClientData(context: Context) {
         white = TrafficMaskCatalog.getWhiteHosts(appContext),
         russia = TrafficMaskCatalog.getRussiaHosts(appContext).take(SNI_RUSSIA_POOL_LIMIT),
         global = TrafficMaskCatalog.getGlobalHosts(appContext),
+        provenRussia = TrafficMaskCatalog.getProvenRussiaHosts(appContext),
+        provenGlobal = TrafficMaskCatalog.getProvenGlobalHosts(appContext),
     )
 
     /**
@@ -3219,6 +3397,158 @@ class ClientData(context: Context) {
         }
         return shouldResume
     }
+    /**
+     * Показывать ли в уведомлении скорость и транспорт.
+     *
+     * По умолчанию включено: уведомление всё равно висит, пока туннель поднят, и
+     * пустая строка «Nova VPN» в нём не сообщала ничего.
+     */
+    fun isNotificationDetailsEnabled(): Boolean = prefs.getBoolean("notification_details_enabled", true)
+    fun setNotificationDetailsEnabled(value: Boolean) {
+        prefs.edit().putBoolean("notification_details_enabled", value).commit()
+    }
+
+    /**
+     * Российские приложения — всегда мимо туннеля.
+     *
+     * По умолчанию включено: банк, госуслуги и карты либо не работают из-за
+     * зарубежного адреса вовсе, либо считают сеанс подозрительным. Список
+     * закрытый и живёт в [RussianDirectApps] — сюда попадают только опознанные
+     * издатели, а не всё, что нашлось на устройстве.
+     */
+    fun isRussianDirectAppsEnabled(): Boolean = prefs.getBoolean("russian_direct_apps_enabled", true)
+    fun setRussianDirectAppsEnabled(value: Boolean) {
+        prefs.edit().putBoolean("russian_direct_apps_enabled", value).commit()
+    }
+
+    /**
+     * Свои приложения пользователя — всегда мимо туннеля.
+     *
+     * Дополняют закрытый список [RussianDirectApps], а не заменяют его: тот
+     * закрыт по составу, и добавить туда своё приложение пользователь не может.
+     *
+     * От [isRussianDirectAppsEnabled] намеренно **не** зависят. Выключение
+     * российского списка — отказ от чужого выбора, а не от своего; отменять им
+     * пакет, названный руками, значило бы терять настройку молча.
+     */
+    // Копии с обеих сторон — требование самого `SharedPreferences`.
+    //
+    // `getStringSet` отдаёт множество, которое менять запрещено (изменения ушли бы
+    // в кэш настроек, минуя запись), а `putStringSet` сохраняет **ссылку**: если
+    // передать сюда живое изменяемое множество экрана, следующее нажатие галочки
+    // молча переписало бы уже сохранённое значение.
+    fun getDirectApps(): Set<String> =
+        prefs.getStringSet("direct_apps", emptySet())?.toSet() ?: emptySet()
+    fun setDirectApps(apps: Set<String>) {
+        prefs.edit().putStringSet("direct_apps", apps.toSet()).commit()
+    }
+
+    /**
+     * Что человек снял с закрытого списка вручную.
+     *
+     * Хранится вычитанием, а не копией всего списка: список правится с
+     * обновлениями приложения, и сохранённая копия «что включено» после
+     * обновления молча теряла бы новые пакеты. Здесь наоборот — новое из списка
+     * работает сразу, а снятое остаётся снятым.
+     */
+    fun getDirectAppsExcluded(): Set<String> =
+        prefs.getStringSet("direct_apps_excluded", emptySet())?.toSet() ?: emptySet()
+    fun setDirectAppsExcluded(apps: Set<String>) {
+        prefs.edit().putStringSet("direct_apps_excluded", apps.toSet()).commit()
+    }
+
+    /**
+     * Показывать ли системные приложения в списке раздельного туннелирования.
+     *
+     * По умолчанию нет: их полторы сотни, они называются как попало, и в поиске
+     * нужного приложения они только мешают.
+     */
+    fun isShowSystemAppsEnabled(): Boolean = prefs.getBoolean("show_system_apps", false)
+    fun setShowSystemAppsEnabled(value: Boolean) {
+        prefs.edit().putBoolean("show_system_apps", value).commit()
+    }
+
+    /** Обход туннеля по доменным зонам и своим доменам. По умолчанию выключен. */
+    fun isDomainBypassEnabled(): Boolean = prefs.getBoolean("domain_bypass_enabled", false)
+    fun setDomainBypassEnabled(value: Boolean) {
+        prefs.edit().putBoolean("domain_bypass_enabled", value).commit()
+    }
+
+    /** Выбранные зоны, через запятую. Пусто — набор по умолчанию из [DomainBypassRules]. */
+    fun getDomainBypassZonesRaw(): String =
+        prefs.getString("domain_bypass_zones", "").orEmpty()
+    fun setDomainBypassZonesRaw(value: String?) {
+        prefs.edit().putString("domain_bypass_zones", value?.trim().orEmpty()).commit()
+    }
+
+    /**
+     * Свои домены, по одному в строке — сырой текст поля.
+     *
+     * Каждое имя применяется **буквально**: при подключении оно резолвится мимо
+     * VPN, и полученные адреса уходят в вырез маршрута. Поддомен покрывается
+     * только если ведёт на тот же адрес; иначе его надо выписать отдельно.
+     */
+    fun getDomainBypassCustomRaw(): String =
+        prefs.getString("domain_bypass_custom", "").orEmpty()
+    fun setDomainBypassCustomRaw(value: String?) {
+        prefs.edit().putString("domain_bypass_custom", value?.trim().orEmpty()).commit()
+    }
+
+    /** Кладёт снятые с ядра счётчики обхода туда, где их увидит экран. */
+    fun saveDomainBypassStats(
+        learned: Int,
+        relayed: Long,
+        installed: Int,
+        listeners: Int,
+        dropped: Long,
+        quicSkipped: Long,
+        enabled: Boolean,
+        transportSupported: Boolean,
+        dnsInterceptEnabled: Boolean,
+        backend: String,
+        relayState: Int,
+    ) {
+        val payload = JSONObject().apply {
+            put("relay_state", relayState)
+            put("learned", learned)
+            put("relayed", relayed)
+            put("installed", installed)
+            put("listeners", listeners)
+            put("dropped", dropped)
+            put("quic_skipped", quicSkipped)
+            put("enabled", enabled)
+            put("transport_supported", transportSupported)
+            put("dns_intercept", dnsInterceptEnabled)
+            put("backend", backend)
+            put("updated_at", System.currentTimeMillis())
+        }
+        writeAtomicRaw(domainBypassStatsFile, payload.toString())
+    }
+
+    /**
+     * Счётчики обхода по доменам или `null`, если служба ещё ничего не выкладывала.
+     *
+     * `null` и «все нули» — разные вещи: первое значит «не знаем», второе —
+     * «знаем, что ничего не выучено». Экран обязан говорить о них по-разному.
+     */
+    fun getDomainBypassStats(): DomainBypassCoreStats? {
+        val json = readAtomicJson(domainBypassStatsFile) ?: return null
+        return DomainBypassCoreStats(
+            learned = json.optInt("learned", 0),
+            relayed = json.optLong("relayed", 0L),
+            installed = json.optInt("installed", 0),
+            listeners = json.optInt("listeners", 0),
+            dropped = json.optLong("dropped", 0L),
+            quicSkipped = json.optLong("quic_skipped", 0L),
+            enabled = json.optBoolean("enabled", false),
+            transportSupported = json.optBoolean("transport_supported", true),
+            dnsInterceptEnabled = json.optBoolean("dns_intercept", false),
+            backend = json.optString("backend", ""),
+            updatedAt = json.optLong("updated_at", 0L),
+            relayState = json.optInt("relay_state", 0),
+        )
+    }
+
     fun isUpdateRepairInProgress(): Boolean = prefs.getBoolean("app_update_repair_active", false)
     fun getUpdateRepairVersion(): String = prefs.getString("app_update_repair_version", "").orEmpty()
     fun getUpdateRepairDownloadedBytes(): Long = prefs.getLong("app_update_repair_downloaded_bytes", 0L)
@@ -4961,7 +5291,11 @@ class ClientData(context: Context) {
         if (!isProtonSourceActive()) return emptyList()
         val store = ProtonProfileStore(appContext)
         val account = store.readAccount() ?: return emptyList()
-        return ProtonProfileStore.toVerifiedConfigs(store.readProfiles(), account.wireGuardPrivateKey)
+        return ProtonProfileStore.toVerifiedConfigs(
+            ProtonProfileStore.orderByCountry(store.readProfiles(), getProtonCountryPreference()),
+            account.wireGuardPrivateKey,
+            getProtonCountryPreference(),
+        )
     }
 
     fun getWarpVerifiedMergedConfigs(scope: String? = null): List<WarpVerifiedConfig> {
@@ -8211,6 +8545,13 @@ class ClientData(context: Context) {
         if (!isAllowedVerifiedWarpEndpoint(engine, host, manual, userImported, endpointSource)) return false
         if (manual || userImported) return true
         if (isOwnIssuedMasqueEndpointSource(engine, endpointSource)) return true
+        // Личные профили Cloudflare сюда намеренно **не** попадают: их отметки
+        // живут в `warp_generated.json`, рядом с самими профилями.
+        //
+        // Идентификатор записи здесь — `mode|host|port`, а личные профили несут
+        // тот же режим `warp-awg-exact`, что и все пятьдесят прошивочных семян.
+        // То есть общий адрес означал бы общую запись — притом что ключи у них
+        // разные, и удача одного ничего не говорит об удаче другого.
         return endpointSource.equals("bundled-seed", ignoreCase = true)
     }
 
@@ -8622,23 +8963,14 @@ class ClientData(context: Context) {
         }
     }
 
-    private fun normalizeRegionPreference(value: String?): String {
-        return when (value?.trim()?.lowercase()) {
-            "eu" -> "eu"
-            "us" -> "us"
-            "ru" -> "ru"
-            // MASQUE стоит в общей цепочке между WARP и Opera, но его можно выбрать
-            // и отдельно — тогда перебор начинается сразу с него.
-            "masque" -> "masque"
-            // VLESS в общую цепочку не входит: узел задаёт пользователь, и подбирать
-            // его перебором не из чего. Выбирается только явно.
-            "vless" -> "vless"
-            // AWG Proton — собственные сгенерированные профили. Как и VLESS, только
-            // явно: встроенную цепочку они не дополняют, а заменяют.
-            "proton" -> "proton"
-            else -> "auto"
-        }
-    }
+    /**
+     * Словарь выходов — один на всё приложение, в [RegionTransportPolicy].
+     *
+     * Разъезжаться ему нельзя: копия в `NovaVpnService` однажды отстала на два
+     * значения (`masque`, `vless`), и служба разжаловала явный выбор в «Авто».
+     */
+    private fun normalizeRegionPreference(value: String?): String =
+        RegionTransportPolicy.normalizeKnown(value)
 
     private fun operaPinnedEndpointsKey(country: String): String {
         val normalizedCountry = normalizeOperaRegionCode(country).ifBlank { "EU" }
@@ -8987,6 +9319,23 @@ class ClientData(context: Context) {
         private const val DEFAULT_TRAFFIC_MASK_HOST = "ads.max.ru"
         private const val UNSET_SENTINEL = "\u0000"
         private const val TRAFFIC_MASK_STATS_PREFIX = "traffic_mask_stats|"
+
+        /**
+         * Ключи в `exit_region.json` рядом с самим регионом.
+         *
+         * Один файл, а не три: регион, подрегион Opera и страна Proton меняются
+         * одним и тем же жестом пользователя, и разъехаться им нельзя.
+         */
+        private const val KEY_OPERA_SUB_REGION = "opera_sub_region"
+        private const val KEY_PROTON_COUNTRY = "proton_country"
+
+        /** Память сводки DNS: секунда, только чтобы снять чтение файла с набора текста. */
+        private const val DNS_SUMMARY_CACHE_MS = 1_000L
+        private val dnsSummaryLock = Any()
+        private var cachedDnsRuleSetValue: DnsRuleSet? = null
+        private var cachedDnsRuleSetAtMs: Long = 0L
+        private var cachedDnsRuleSetRevision: Long = -1L
+
         const val SNI_SCOPE_MASQUE = "masque"
         const val SNI_SCOPE_OPERA = "opera"
 
@@ -9292,7 +9641,69 @@ class ClientData(context: Context) {
         prefs.edit().putString("dns_settings_json", raw).apply()
     }
 
+    /**
+     * Строка под пунктом «Настройки DNS».
+     *
+     * Считается по **хранилищу правил**, а не по унаследованному
+     * `dns_settings_json`: список резолверов теперь живёт там, а старый блоб
+     * остался только под блоком «для приложения». Пока сводка читала старые
+     * поля, она описывала то, что пользователь когда-то напечатал в удалённых
+     * полях, и ни словом не упоминала действующий список.
+     */
+    private fun cachedDnsRuleSet(): DnsRuleSet {
+        val now = System.currentTimeMillis()
+        val revision = DnsRulesStore.revision
+        synchronized(dnsSummaryLock) {
+            val cached = cachedDnsRuleSetValue
+            // Срок **и** номер записи: срок ограничивает чужие изменения, номер
+            // снимает свои сразу. Без номера правка списка внутри той же секунды
+            // оставляла бы в шапке прошлый состав.
+            if (cached != null &&
+                cachedDnsRuleSetRevision == revision &&
+                now - cachedDnsRuleSetAtMs < DNS_SUMMARY_CACHE_MS
+            ) {
+                return cached
+            }
+        }
+        val loaded = DnsRulesStore.load(appContext)
+        synchronized(dnsSummaryLock) {
+            cachedDnsRuleSetValue = loaded
+            cachedDnsRuleSetRevision = revision
+            cachedDnsRuleSetAtMs = System.currentTimeMillis()
+        }
+        return loaded
+    }
+
     fun getDnsSettingsSummary(): String {
+        // Сводка зовётся из главного потока на **каждое нажатие клавиши** в поле
+        // адреса, а `DnsRulesStore.load` читает файл. Короткая память снимает
+        // блокирующий ввод-вывод с набора текста, оставаясь достаточно свежей: за
+        // секунду список правил из другого процесса не меняется, а сам экран
+        // после своей записи зовёт сводку заново уже с новым содержимым файла.
+        val ruleSet = cachedDnsRuleSet()
+        val activeRules = ruleSet.rules.filter { it.enabled }
+        val routeWord = when (ruleSet.routeMode) {
+            DnsRouteMode.DIRECT -> "напрямую"
+            DnsRouteMode.TUNNEL -> "через VPN"
+            DnsRouteMode.AUTO -> "автовыбор пути"
+        }
+        val appOverrideForRules = getConfiguredAppDnsOverride()
+        if (ruleSet.enabled && activeRules.isNotEmpty()) {
+            val first = activeRules.first()
+            val head = when (first.kind) {
+                DnsRule.Kind.DOH -> runCatching { java.net.URI(first.value).host }.getOrNull().orEmpty()
+                DnsRule.Kind.DOT -> first.value.removePrefix("tls://").substringBefore(':')
+                DnsRule.Kind.AUTO -> first.value
+                DnsRule.Kind.PLAIN -> first.value
+                DnsRule.Kind.PROVIDER -> "резолвер провайдера"
+            }.ifBlank { first.value }
+            val tail = if (activeRules.size > 1) " + ещё ${activeRules.size - 1}" else ""
+            val appTail = appOverrideForRules?.let {
+                " • app ${it.appLabel.ifBlank { it.packageName }}"
+            }.orEmpty()
+            return "DNS: $head$tail, $routeWord$appTail"
+        }
+
         val config = getDnsSettingsConfig()
         val globalServers = resolveDnsChain(config.globalPrimaryDns, config.globalSecondaryDns)
         val encryptedResolvers = resolveEncryptedResolverList(config.globalEncryptedFallback)

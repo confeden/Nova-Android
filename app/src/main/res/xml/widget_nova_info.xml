@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Размеры объявлены по реальному содержимому, а не по формуле «две ячейки».
+
+    Рамка с кнопками занимает 144x76dp (12dp отступа + 52dp + 16dp зазор + 52dp +
+    12dp, и 12+52+12 по высоте). Прежние `minWidth="110dp"` и `minHeight="40dp"`
+    были меньше этого, и лаунчер выделял ячейку, в которую содержимое не влезало,
+    — виджет добавлялся обрезанным. Объявленные здесь 160x90dp дают тот же запас
+    поверх содержимого, что и системные отступы хоста на targetSdk 34.
+
+    `targetCellWidth`/`targetCellHeight` — с Android 12 лаунчер выбирает размер по
+    ним, а `minWidth`/`minHeight` остаются для более старых. 2x1 — та самая
+    горизонтальная ячейка, о которой шла речь.
+
+    `previewLayout` показывает в списке виджетов сам виджет; `previewImage`
+    оставлен запасным путём для Android 7-11, где `previewLayout` не существует.
+
+    `updatePeriodMillis` = 0: виджет обновляет себя сам, по широковещанию
+    состояния VPN. Системный период всё равно не бывает чаще получаса и разбудил
+    бы приложение впустую.
+-->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:initialLayout="@layout/widget_nova"
+    android:maxResizeHeight="180dp"
+    android:maxResizeWidth="320dp"
+    android:minHeight="90dp"
+    android:minResizeHeight="90dp"
+    android:minResizeWidth="160dp"
+    android:minWidth="160dp"
+    android:previewImage="@mipmap/ic_launcher"
+    android:previewLayout="@layout/widget_nova"
+    android:resizeMode="horizontal"
+    android:targetCellHeight="1"
+    android:targetCellWidth="2"
+    android:updatePeriodMillis="0"
+    android:widgetCategory="home_screen"
+    tools:targetApi="31" />

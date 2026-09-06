@@ -5,7 +5,7 @@ go 1.26.3
 require (
 	github.com/Diniboy1123/connect-ip-go v0.0.0-20251011145655-7be32d5976d9
 	github.com/Diniboy1123/usque v0.0.0
-	github.com/amnezia-vpn/amneziawg-go v0.0.0
+	github.com/amnezia-vpn/amneziawg-go/v3 v3.1.20260828
 	github.com/bepass-org/warp-plus v1.2.6
 	github.com/quic-go/quic-go v0.61.0
 	github.com/refraction-networking/utls v1.8.2
@@ -21,7 +21,7 @@ replace github.com/Diniboy1123/connect-ip-go => ../tools/connect-ip-go
 
 replace github.com/Diniboy1123/usque => ../build/deps/usque
 
-replace github.com/amnezia-vpn/amneziawg-go => ../tools/amneziawg-go
+replace github.com/amnezia-vpn/amneziawg-go/v3 => ../tools/amneziawg-go
 
 replace github.com/bepass-org/warp-plus => ../tools/warp-plus
 
@@ -34,7 +34,6 @@ require golang.org/x/sync v0.22.0 // indirect
 require (
 	github.com/andybalholm/brotli v1.1.1 // indirect
 	github.com/avast/retry-go v3.0.0+incompatible // indirect
-	github.com/cloudflare/circl v1.6.1 // indirect
 	github.com/dunglas/httpsfv v1.1.0 // indirect
 	github.com/flynn/noise v1.1.0 // indirect
 	github.com/google/btree v1.1.3 // indirect

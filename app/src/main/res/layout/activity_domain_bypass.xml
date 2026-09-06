@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true"
+    android:padding="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <!-- Заголовок экрана -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Обход по доменам"
+            android:textColor="#50C878"
+            android:textSize="24sp"
+            android:textStyle="bold" />
+
+        <!-- Главный переключатель: включает/выключает всю функцию обхода -->
+        <Switch
+            android:id="@+id/sw_domain_bypass"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_settings_item"
+            android:backgroundTint="#20FFFFFF"
+            android:padding="12dp"
+            android:text="Пускать выбранные домены мимо VPN"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp" />
+
+        <!--
+            Блок зон: ru, su, кириллические — объединены одним визуальным контейнером.
+            Чекбоксы включаются вместе с мастер-переключателем: зоны действуют.
+        -->
+        <LinearLayout
+            android:id="@+id/ll_zones_block"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_settings_item"
+            android:backgroundTint="#20FFFFFF"
+            android:orientation="vertical"
+            android:padding="12dp">
+
+            <CheckBox
+                android:id="@+id/cb_zone_ru"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:buttonTint="#13A10E"
+                android:text=".ru"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp" />
+
+            <CheckBox
+                android:id="@+id/cb_zone_su"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:buttonTint="#13A10E"
+                android:text=".su"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp" />
+
+            <CheckBox
+                android:id="@+id/cb_zone_cyrillic"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:buttonTint="#13A10E"
+                android:text="Кириллические зоны (.рф и другие)"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp" />
+
+        </LinearLayout>
+
+        <!-- Метка над полем ввода собственных доменов -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Свои домены, по одному в строке"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp" />
+
+        <!-- Поле ввода доменов: каждый домен на отдельной строке -->
+        <EditText
+            android:id="@+id/et_domain_bypass_custom"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_settings_item"
+            android:backgroundTint="#20FFFFFF"
+            android:gravity="top"
+            android:hint="ozon.ru&#10;example.com"
+            android:inputType="textMultiLine|textNoSuggestions"
+            android:minLines="4"
+            android:padding="12dp"
+            android:textColor="#FFFFFF"
+            android:textColorHint="#7788AA"
+            android:textSize="14sp" />
+
+        <!-- Живая сводка: обновляется при каждом изменении текста и чекбоксов -->
+        <TextView
+            android:id="@+id/tv_domain_bypass_summary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textColor="#AAAAAA"
+            android:textSize="13sp" />
+
+        <!--
+            Подсказка о механике. Написана буквально про то, что происходит:
+            обещать больше, чем умеет маршрутизация, здесь нельзя.
+        -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Свои домены выводятся двумя путями сразу. Первый — вырезом маршрута: при подключении имя разрешается в адреса, и они выводятся из туннеля. Нужен Android 13 и новее, и вырез считается один раз, в момент подключения, — правки списка на идущем сеансе подействуют только после переподключения. Второй — тем же ядром, что и зоны: имя сверяется с перехваченными DNS-ответами. Он работает на любой версии Android, но только на WARP и MASQUE, только для TCP на портах 80 и 443 и только при включённом шифрованном DNS. Правило действует на всё имя целиком и на его поддомены — ozon.ru покрывает market.ozon.ru, но не 67ozon.ru.&#10;&#10;Зоны: адреса узнаются из перехваченных DNS-ответов, и совпавшие соединения уходят наружу мимо туннеля. Работает только на WARP и MASQUE (на Opera и VLESS трафик обрабатывает tun2proxy, и ядро его не видит) и только для TCP на портах 80 и 443. QUIC (HTTP/3) идёт через туннель и доходит — то есть на него обход не действует вовсе, отката на TCP не будет. Одновременно помнится не больше 256 адресов, самые старые вытесняются. Нужен включённый шифрованный DNS: без перехвата адреса зон узнать неоткуда.&#10;&#10;О чём стоит знать: обойдённая зона — это доверие всей зоне. Хозяин любого имени в ней может направить его на какой угодно адрес, и этот адрес пойдёт мимо VPN. Адреса берутся только из ответов на запросы к именам из ваших правил, чужие записи в том же ответе отбрасываются, — но само правило «пускать зону целиком» шире, чем список доменов. И обход идёт по адресу: если на выученном адресе живут другие имена (общая CDN, anycast), их трафик тоже пойдёт мимо туннеля."
+            android:textColor="#7FA9C4"
+            android:textSize="12sp" />
+
+    </LinearLayout>
+
+</ScrollView>

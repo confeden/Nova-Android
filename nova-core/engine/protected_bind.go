@@ -1,6 +1,6 @@
 package nova
 
-import wgconn "github.com/amnezia-vpn/amneziawg-go/conn"
+import wgconn "github.com/amnezia-vpn/amneziawg-go/v3/conn"
 
 // ProtectedBind wraps the default warp-plus bind and protects the opened
 // sockets with Android's VpnService.protect(fd), while keeping the standard

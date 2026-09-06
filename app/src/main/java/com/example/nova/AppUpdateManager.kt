@@ -40,6 +40,7 @@ import java.net.URL
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.random.Random
 
 data class ApkUpdateMetadata(
@@ -62,6 +63,7 @@ data class UpdateDownloadProgress(
         DOWNLOADING,
         PAUSED,
         READY,
+        INSTALLING,
         FAILED,
     }
 
@@ -70,6 +72,19 @@ data class UpdateDownloadProgress(
 
     val isIndeterminate: Boolean
         get() = state == State.CHECKING || (state == State.DOWNLOADING && totalBytes <= 0L)
+
+    /**
+     * Идёт ли уже то действие, которое человек мог бы запустить нажатием.
+     *
+     * Ровно этим экран и глушит повторные нажатия: пока действие в работе,
+     * единственная кнопка — «ОСТАНОВИТЬ», а во время установки нажимать нечего
+     * вовсе.
+     */
+    val isBusy: Boolean
+        get() = state == State.CHECKING ||
+            state == State.DOWNLOADING ||
+            state == State.PAUSED ||
+            state == State.INSTALLING
 }
 
 data class ManualUpdateCheckResult(
@@ -107,6 +122,15 @@ object AppUpdateManager {
     private const val NOTIFICATION_UPDATED_ID = 2203
     private val updateCheckInProgress = AtomicBoolean(false)
     private val installSessionInProgress = AtomicBoolean(false)
+
+    /**
+     * Сколько процентов APK уже переложено в сессию установщика.
+     *
+     * Живёт в памяти, а не в [ClientData]: сессия установки не переживает
+     * перезапуск процесса, и сохранённый процент после него означал бы установку,
+     * которой уже нет. `-1` — установка не идёт.
+     */
+    private val installProgressPercent = AtomicInteger(-1)
 
     const val ACTION_UPDATE_STATE_CHANGED = "com.example.nova.action.UPDATE_STATE_CHANGED"
     const val ACTION_DOWNLOAD_UPDATE = "com.example.nova.action.DOWNLOAD_UPDATE"
@@ -391,9 +415,79 @@ object AppUpdateManager {
         }
     }
 
+    /**
+     * Останавливает загрузку обновления по нажатию «ОСТАНОВИТЬ».
+     *
+     * Снимается всё, что может её продолжить: задание `DownloadManager`, работа
+     * восстановления и недокачанный файл. Продолжить с этого места нельзя —
+     * `DownloadManager` не даёт приложению паузы, только снятие, — поэтому
+     * состояние возвращается ровно в «обновление доступно, скачать заново», и
+     * следующее нажатие начинает загрузку с нуля. Сама по себе загрузка
+     * обрывов сети не боится: их `DownloadManager` переживает своим
+     * `STATUS_PAUSED`, не спрашивая человека.
+     */
+    fun cancelUserDownload(context: Context): Boolean {
+        if (!isUpdaterEnabled) return false
+        val appContext = context.applicationContext
+        val clientData = ClientData(appContext)
+        var cancelled = false
+
+        val downloadId = clientData.getUpdateDownloadId()
+        if (downloadId > 0L) {
+            runCatching {
+                appContext.getSystemService(DownloadManager::class.java)?.remove(downloadId)
+            }.onFailure { error ->
+                LogManager.log("Не удалось снять загрузку обновления $downloadId: ${error.message}")
+            }
+            clientData.setUpdateDownloadId(-1L)
+            cancelled = true
+        }
+
+        if (clientData.isUpdateRepairInProgress()) {
+            runCatching { WorkManager.getInstance(appContext).cancelUniqueWork(REPAIR_WORK_NAME) }
+            cancelled = true
+        }
+        clientData.clearUpdateRepairState()
+
+        // Недокачанный файл удаляем сами: `DownloadManager.remove` убирает свой,
+        // но после снятой работы восстановления остаётся наш собственный.
+        val path = clientData.getDownloadedApkPath()
+        if (path.isNotBlank()) {
+            val file = File(path)
+            if (file.exists() && getReadyDownloadedUpdate(appContext, clientData) == null) {
+                runCatching { file.delete() }
+                clientData.setDownloadedApkPath("")
+                clientData.setDownloadedApkVersion("")
+            }
+        }
+
+        if (cancelled) {
+            LogManager.log("Загрузка обновления остановлена человеком.")
+            NotificationManagerCompat.from(appContext).cancel(NOTIFICATION_READY_ID)
+            broadcastUpdateStateChanged(appContext)
+        }
+        return cancelled
+    }
+
     fun getDownloadProgress(context: Context): UpdateDownloadProgress {
         val appContext = context.applicationContext
         val clientData = ClientData(appContext)
+        // Установка идёт поверх скачанного файла, поэтому её проверяем раньше
+        // готовности: иначе экран во время установки продолжал бы предлагать
+        // «Обновить» — то самое действие, которое уже выполняется.
+        if (installSessionInProgress.get()) {
+            val percent = installProgressPercent.get().coerceIn(0, 100)
+            val version = getReadyDownloadedVersion(appContext)
+                .ifBlank { clientData.getDownloadedApkVersion() }
+            return UpdateDownloadProgress(
+                state = UpdateDownloadProgress.State.INSTALLING,
+                version = version,
+                progressPercent = percent,
+                downloadedBytes = 0L,
+                totalBytes = 0L,
+                statusLabel = "Устанавливаем обновление: $percent%",
+            )
+        }
         val ready = getReadyDownloadedUpdate(appContext, clientData)
         if (ready != null) {
             return UpdateDownloadProgress(
@@ -812,14 +906,19 @@ object AppUpdateManager {
         val dismissIntent = Intent(context, UpdateActionReceiver::class.java).apply {
             action = ACTION_DISMISS_UPDATE
         }
+        val customView = buildGradientUpdateRemoteViews(
+            context = context,
+            title = "Доступна Nova ${metadata.version}",
+            subtitle = "Нажми, чтобы открыть приложение и скачать",
+            clickPendingIntent = openAppIntent,
+        )
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_qs_nova)
             .setContentTitle("Доступна новая версия Nova")
             .setContentText("Версия ${metadata.version}. По мобильной сети загрузка только вручную.")
-            .setStyle(
-                NotificationCompat.BigTextStyle()
-                    .bigText("Версия ${metadata.version}. По мобильной сети загрузка только вручную.")
-            )
+            .setStyle(NotificationCompat.DecoratedCustomViewStyle())
+            .setCustomContentView(customView)
+            .setCustomBigContentView(customView)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setAutoCancel(true)
             .setContentIntent(openAppIntent)
@@ -852,7 +951,7 @@ object AppUpdateManager {
         NotificationManagerCompat.from(context).cancel(NOTIFICATION_AVAILABLE_ID)
         val openAppIntent = buildOpenAppPendingIntent(context, 5007)
         val installIntent = buildInstallPendingIntent(context, 5003)
-        val customView = buildReadyUpdateRemoteViews(context, version, installIntent, openAppIntent)
+        val customView = buildReadyUpdateRemoteViews(context, version, installIntent)
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_qs_nova)
             .setContentTitle("Обновление Nova загружено")
@@ -949,7 +1048,7 @@ object AppUpdateManager {
 
         if (readyVersion.isNotBlank()) {
             val installIntent = buildInstallPendingIntent(context, 5004)
-            val customView = buildReadyUpdateRemoteViews(context, readyVersion, installIntent, openAppIntent)
+            val customView = buildReadyUpdateRemoteViews(context, readyVersion, installIntent)
             return builder
                 .setContentTitle("Nova")
                 .setContentText("Обновление $readyVersion готово к установке")
@@ -1044,7 +1143,7 @@ object AppUpdateManager {
                 LogManager.log("Не удалось передать APK в PackageInstaller.Session: ${error.message}")
             }.getOrDefault(false)
             if (!success) {
-                installSessionInProgress.set(false)
+                finishInstallSession()
             }
         }.start()
     }
@@ -1065,7 +1164,7 @@ object AppUpdateManager {
             packageInstaller.openSession(sessionId).use { session ->
                 apkFile.inputStream().use { input ->
                     session.openWrite("base.apk", 0, apkFile.length()).use { output ->
-                        input.copyTo(output)
+                        copyApkReportingProgress(context, input, output, apkFile.length())
                         session.fsync(output)
                     }
                 }
@@ -1090,6 +1189,59 @@ object AppUpdateManager {
         }
     }
 
+    /**
+     * Перекладывает APK в сессию установщика, отчитываясь о проценте.
+     *
+     * Копия локальная и быстрая, поэтому вещаем не на каждый буфер, а на каждый
+     * целый процент: широковещательное намерение на каждый мегабайт разбудило бы
+     * главный поток десятки раз подряд ради одной и той же надписи.
+     *
+     * Прогресс — это именно копирование, а не установка целиком: дальше APK
+     * забирает система, и сколько времени займёт её часть, приложению не видно.
+     * Поэтому сотня процентов здесь означает «передали системе», после чего
+     * экран показывает установку до самого перезапуска процесса.
+     */
+    private fun copyApkReportingProgress(
+        context: Context,
+        input: java.io.InputStream,
+        output: java.io.OutputStream,
+        totalBytes: Long,
+    ) {
+        val buffer = ByteArray(256 * 1024)
+        var copied = 0L
+        var lastPercent = -1
+        setInstallProgress(context, 0)
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            output.write(buffer, 0, read)
+            copied += read
+            if (totalBytes <= 0L) continue
+            val percent = ((copied * 100L) / totalBytes).toInt().coerceIn(0, 100)
+            if (percent != lastPercent) {
+                lastPercent = percent
+                setInstallProgress(context, percent)
+            }
+        }
+        setInstallProgress(context, 100)
+    }
+
+    private fun setInstallProgress(context: Context, percent: Int) {
+        installProgressPercent.set(percent)
+        broadcastUpdateStateChanged(context)
+    }
+
+    /**
+     * Снимает признак идущей установки — вместе с процентом.
+     *
+     * Одной функцией, потому что забытый процент оставил бы на экране «УСТАНОВКА
+     * 100%» после неудачи, и кнопка «Обновить» больше не вернулась бы.
+     */
+    private fun finishInstallSession() {
+        installSessionInProgress.set(false)
+        installProgressPercent.set(-1)
+    }
+
     private fun handleInstallCommitStatus(context: Context, intent: Intent) {
         val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)
         val statusMessage = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE).orEmpty()
@@ -1100,7 +1252,7 @@ object AppUpdateManager {
             PackageInstaller.STATUS_PENDING_USER_ACTION -> {
                 val confirmationIntent = getPackageInstallerConfirmationIntent(intent)
                 if (confirmationIntent == null) {
-                    installSessionInProgress.set(false)
+                    finishInstallSession()
                     LogManager.log(
                         "PackageInstaller.Session ${formatSessionId(sessionId)} требует подтверждение, но не передал intent."
                     )
@@ -1116,7 +1268,7 @@ object AppUpdateManager {
                         )
                     }
                     .onFailure { error ->
-                        installSessionInProgress.set(false)
+                        finishInstallSession()
                         LogManager.log(
                             "Не удалось открыть системный установщик для ${
                                 if (version.isNotBlank()) version else "обновления"
@@ -1125,7 +1277,7 @@ object AppUpdateManager {
                     }
             }
             PackageInstaller.STATUS_SUCCESS -> {
-                installSessionInProgress.set(false)
+                finishInstallSession()
                 ClientData(context).setResumeInstallAfterPermissionGrant(false)
                 val clientData = ClientData(context)
                 clientData.clearDownloadedUpdateState()
@@ -1145,7 +1297,7 @@ object AppUpdateManager {
                 )
             }
             else -> {
-                installSessionInProgress.set(false)
+                finishInstallSession()
                 LogManager.log(
                     "PackageInstaller.Session ${formatSessionId(sessionId)} завершился ошибкой: status=$status, message=$statusMessage"
                 )
@@ -1349,19 +1501,37 @@ object AppUpdateManager {
         )
     }
 
+    /**
+     * Карточка уведомления об обновлении: градиент, заголовок, подпись.
+     *
+     * Действие одно на всю карточку. Отдельной кнопки «Обновить» больше нет —
+     * она была системным `btn_default_small`, светло-серым прямоугольником из
+     * времён Android 4, и в современной ленте выглядела чужой. Разделять было и
+     * нечего: кнопка вела туда же, куда нажатие на саму карточку.
+     */
+    private fun buildGradientUpdateRemoteViews(
+        context: Context,
+        title: String,
+        subtitle: String,
+        clickPendingIntent: PendingIntent,
+    ): RemoteViews {
+        return RemoteViews(context.packageName, R.layout.notification_update_ready).apply {
+            setTextViewText(R.id.tv_update_title, title)
+            setTextViewText(R.id.tv_update_subtitle, subtitle)
+            setOnClickPendingIntent(R.id.notification_root, clickPendingIntent)
+        }
+    }
+
     private fun buildReadyUpdateRemoteViews(
         context: Context,
         version: String,
         installPendingIntent: PendingIntent,
-        rootPendingIntent: PendingIntent,
-    ): RemoteViews {
-        return RemoteViews(context.packageName, R.layout.notification_update_ready).apply {
-            setTextViewText(R.id.tv_update_title, "Nova $version готова")
-            setTextViewText(R.id.tv_update_subtitle, "Нажми, чтобы установить обновление")
-            setOnClickPendingIntent(R.id.btn_update_install, installPendingIntent)
-            setOnClickPendingIntent(R.id.notification_root, rootPendingIntent)
-        }
-    }
+    ): RemoteViews = buildGradientUpdateRemoteViews(
+        context = context,
+        title = "Nova $version готова",
+        subtitle = "Нажми, чтобы установить обновление",
+        clickPendingIntent = installPendingIntent,
+    )
 
     private fun getReadyDownloadedUpdate(
         context: Context,

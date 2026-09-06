@@ -1,4 +1,55 @@
 # Live-tested on restricted mobile "white list" access (Pixel 4A, 2026-04-01)
+# CDN / static — самый ценный класс: объёмная непрозрачная загрузка на таком
+# хосте выглядит штатно, а семейства из десятков братьев ломают связку
+# «один IP — одно имя». Источник: анализ белых списков ТСПУ, сентябрь 2026.
+yastatic.net
+avatars.mds.yandex.net
+strm.yandex.net
+yandex.net
+sun9-40.userapi.com
+sun9-41.userapi.com
+sun9-42.userapi.com
+st.okcdn.ru
+cloud.cdn.yandex.net
+00.img.avito.st
+17.img.avito.st
+42.img.avito.st
+st.max.ru
+i.max.ru
+download.max.ru
+s3.yandex.net
+st-ok.cdn-vk.ru
+imgsmail.ru
+tile0.maps.2gis.com
+tile1.maps.2gis.com
+tile2.maps.2gis.com
+i0.photo.2gis.com
+i5.photo.2gis.com
+static.rutube.ru
+pic.rutubelist.ru
+filekeeper-vod.2gis.com
+st.ozone.ru
+ir.ozone.ru
+st.avito.ru
+cs.avito.ru
+cdn.tbank.ru
+imgproxy.cdn-tinkoff.ru
+gu-st.ru
+cdn.lemanapro.ru
+static.lemanapro.ru
+api.vk.ru
+push.vk.ru
+api.max.ru
+botapi.max.ru
+m.vk.ru
+api.ok.ru
+yabs.yandex.ru
+top-fwz1.mail.ru
+a.wb.ru
+msk.t2.ru
+mp.rzd.ru
+suggest.dzen.ru
+a.res-nsdi.ru
 # Government / finance
 www.gosuslugi.ru
 zakupki.gov.ru
@@ -27,7 +78,6 @@ id.magnit.ru
 hr.magnit.ru
 
 # Transport / navigation
-mp.rzd.ru
 gzd.rzd.ru
 ozd.rzd.ru
 m.tutu.ru
@@ -66,9 +116,7 @@ contract.gosuslugi.ru
 esa-res.online.sberbank.ru
 esia.gosuslugi.ru
 gosuslugi.ru
-gu-st.ru
 hrc.tbank.ru
-imgproxy.cdn-tinkoff.ru
 le.tbank.ru
 lk.gosuslugi.ru
 map.gosuslugi.ru

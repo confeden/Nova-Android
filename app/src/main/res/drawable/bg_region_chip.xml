@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Обводка выбранной кнопки протокола/региона.
+
+    Цвета и радиус — те же, что у бейджа страны (`bg_country_badge.xml`), и это
+    не совпадение: владелец попросил обводить выбранный пункт «так же, как
+    обводится зелёной линией бейдж». Отдельный файл, а не состояния внутри
+    бейджа: тот же ресурс используется в списке конфигураций
+    (`item_warp_config.xml`), и состояния изменили бы заодно и его.
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item android:state_checked="true">
+        <shape android:shape="rectangle">
+            <solid android:color="#3D0E3A1E" />
+            <stroke
+                android:width="1dp"
+                android:color="#8050C878" />
+            <!-- Половина высоты кнопки (36dp) — то есть настоящий овал, а не
+                 скруглённый прямоугольник. -->
+            <corners android:radius="18dp" />
+        </shape>
+    </item>
+
+    <!--
+        Невыбранная кнопка тоже обведена, только едва заметно: без рамки строка
+        рассыпается на слова, и понять, где кончается одна кнопка и начинается
+        соседняя, нельзя.
+    -->
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#14FFFFFF" />
+            <stroke
+                android:width="1dp"
+                android:color="#2EFFFFFF" />
+            <!-- Половина высоты кнопки (36dp) — то есть настоящий овал, а не
+                 скруглённый прямоугольник. -->
+            <corners android:radius="18dp" />
+        </shape>
+    </item>
+</selector>

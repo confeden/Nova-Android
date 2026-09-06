@@ -23,6 +23,8 @@ import android.os.SystemClock
 import android.service.quicksettings.TileService
 import android.util.Log
 import android.widget.Button
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -60,6 +62,22 @@ class MainActivity : AppCompatActivity() {
         /** Сколько ждать прогресс от новой фазы, прежде чем доверять состоянию сервиса. */
         private const val PROGRESS_PHASE_SWITCH_QUIET_MS = 1_500L
 
+        /** Как часто опрашивать прогресс обновления, пока он вообще меняется. */
+        private const val UPDATE_CHIP_TICK_MS = 1_000L
+
+        /** Действие, пришедшее с виджета рабочего стола. */
+        const val EXTRA_WIDGET_ACTION = "extra_widget_action"
+        const val WIDGET_ACTION_NEXT_PROFILE = "next_profile"
+
+        /** Плашка в покое: приглушённый зелёный, тот же, что у остальных подсказок. */
+        private const val UPDATE_CHIP_IDLE_COLOR = 0xFFA9F2BF.toInt()
+
+        /** Работа идёт: жёлтый. Он же отличает «происходит сейчас» от «можно нажать». */
+        private const val UPDATE_CHIP_BUSY_COLOR = 0xFFFFD166.toInt()
+
+        /** Сорвалось: тот же красный, что у неподключённого состояния. */
+        private const val UPDATE_CHIP_FAILED_COLOR = 0xFFFF8A8A.toInt()
+
         /**
          * Сколько ждать уже работающее обновление IP, прежде чем считать его зависшим.
          *
@@ -77,14 +95,19 @@ class MainActivity : AppCompatActivity() {
         private const val IP_REFRESH_QUEUED_STALE_MS = 16_000L
 
         /**
-         * Сколько ждать остальные входы Cloudflare после первого ответа.
+         * Сколько ещё ждать **основной** источник, когда ответил запасной.
          *
-         * Отсчитывается **от первого ответа**, а не от начала: до него ждать нечего,
-         * а после — вопрос лишь в том, успеет ли второе семейство адресов заполнить
-         * своё поле экрана. Живой вход отвечает за доли секунды, мёртвый досидел бы
-         * свои 4 с и задал бы цену всему снимку.
+         * Отсчитывается от ответа запасного: до него ждать нечего. Прежние 700 мс
+         * были рассчитаны на другую задачу — дозаполнить второе семейство адреса, —
+         * и для выбора между источниками они малы: запасной вход анекастовый и с
+         * прогретым именем, основной — один далёкий адрес, чьё редкое имя ещё надо
+         * разрешить через DoH туннеля, и разрыв больше 700 мс обычен. С коротким
+         * сроком экран брал бы запасной ответ при **живом** основном и писал бы в
+         * журнал, что основной молчит, — то есть врал бы (I4).
+         *
+         * Обратный случай ничего не стоит: ответ основного обрывает опрос сразу.
          */
-        private const val TRACE_ENTRY_GRACE_MS = 700L
+        private const val TRACE_ENTRY_GRACE_MS = 2_500L
 
         /**
          * Общий предел опроса входов, даже когда не ответил никто.
@@ -99,6 +122,40 @@ class MainActivity : AppCompatActivity() {
          * через две секунды.
          */
         private const val TRACE_STAGE_CAP_MS = 6_000L
+
+        /**
+         * Рядов селектора, под которые считается высота кнопки.
+         *
+         * Три смысловые полосы плюс строка подрегиона. Владелец попросил, чтобы
+         * все четыре аккуратно помещались между кнопкой подключения и
+         * «Настройками» — на маленьком экране 36 dp × 4 туда не влезают, и
+         * четвёртая полоса уезжала под кнопку.
+         */
+        private const val SELECTOR_ROWS = 4
+
+        /** Обычная высота кнопки селектора: столько же, сколько у бейджа. */
+        private const val MAX_CHIP_HEIGHT_DP = 36f
+
+        /** Ниже этого кнопка перестаёт быть нажимаемой пальцем. */
+        private const val MIN_CHIP_HEIGHT_DP = 22f
+
+        /**
+         * Запас между последней полосой и «Настройками».
+         *
+         * Не украшение: `wrap_content` в `ConstraintLayout` границы не соблюдает,
+         * и стоит расчёту ошибиться на пару пикселей — строка подрегиона рисуется
+         * поверх кнопки. Запас держит эту ошибку в стороне от нуля.
+         */
+        private const val SELECTOR_BOTTOM_RESERVE_DP = 10f
+
+        /** Отступ между полосами. Совпадает с `layout_marginBottom` в стиле кнопки. */
+        private const val CHIP_ROW_GAP_DP = 5f
+
+        /** Меньше этого полосы сливаются в сплошную стену. */
+        private const val MIN_CHIP_ROW_GAP_DP = 2f
+
+        /** Какую долю шага полосы занимает отступ, пока места хватает. */
+        private const val CHIP_ROW_GAP_SHARE = 0.14f
 
         private const val STATE_PENDING_STATUS_TEXT = "pending_status_text"
         private const val STATE_START_FLOW_ACTIVE = "start_flow_active"
@@ -208,6 +265,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnNextProfile: GlowPillButton
     private lateinit var btnInstallUpdate: com.example.nova.UpdateChipView
     private lateinit var tvUpdateCaption: TextView
+    private lateinit var tvUpdateProgress: TextView
+    private var updateChipState = UpdateDownloadProgress.State.IDLE
+
+    /**
+     * Что сейчас написано под статусом. Нужно, чтобы [refreshTransportNotice]
+     * можно было звать с тика, не трогая разметку на каждом вызове.
+     */
+    private var displayedTransportNotice: String? = null
+    private val updateChipTicker = Runnable { refreshInstallUpdateButton() }
     private lateinit var latencyGraph: LatencyGraphView
     private lateinit var ivBackgroundArt: BackdropRevealImageView
     private lateinit var networkBackground: NovaNetworkBackgroundView
@@ -381,6 +447,9 @@ class MainActivity : AppCompatActivity() {
                 }
                 syncUiFromPersistedServiceState()
                 validateConnectedTunnelState()
+                // Выпуск личных профилей идёт в `:vpn` и сообщает о себе файлом:
+                // тик экрана — единственное место, где его вообще можно заметить.
+                refreshProfileIssueProgress()
                 if (vpnState != NovaVpnService.STATE_CONNECTING) {
                     checkCurrentIp()
                     measureLatency()
@@ -562,6 +631,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         LogManager.setAppContext(this)
+        NovaRelay.attach(this)
         clientData = ClientData(this)
         // Обновление приложения не должно приносить в новую версию выученное старой:
         // проверка стоит до первого чтения состояния, иначе снимок успел бы взять
@@ -588,7 +658,9 @@ class MainActivity : AppCompatActivity() {
         tvStatus = findViewById(R.id.tvStatus)
         btnConnect = findViewById(R.id.btnConnect)
         btnNextProfile = findViewById(R.id.btnNextProfile)
-        btnNextProfile.visibility = View.GONE
+        nextProfileCaption = findViewById(R.id.tv_next_profile_caption)
+        tvProfileIssueProgress = findViewById(R.id.tv_profile_issue_progress)
+        setNextProfileVisible(false)
         btnNextProfile.setOnClickListener {
             // Кнопка одна на все протоколы, а списки у них разные. При выбранном VLESS
             // машинерия WARP не подходит вовсе: там профиль опознаётся парой
@@ -843,6 +915,7 @@ class MainActivity : AppCompatActivity() {
         }
         btnInstallUpdate = findViewById(R.id.btn_install_update)
         tvUpdateCaption = findViewById(R.id.tv_update_caption)
+        tvUpdateProgress = findViewById(R.id.tv_update_progress)
         latencyGraph = findViewById(R.id.graph_latency)
         tvVersion = findViewById(R.id.tv_version)
         tvIpAddress.setSaveEnabled(false)
@@ -939,17 +1012,43 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnInstallUpdate.setOnClickListener {
-            if (AppUpdateManager.getReadyDownloadedVersion(this).isNotBlank()) {
-                AppUpdateManager.installReadyUpdate(this)
-                return@setOnClickListener
+            // Что сделает нажатие, решает состояние, а не то, что было на экране в
+            // момент касания: между отрисовкой и нажатием загрузка могла и
+            // закончиться, и оборваться.
+            val progress = AppUpdateManager.getDownloadProgress(this)
+            when (progress.state) {
+                UpdateDownloadProgress.State.DOWNLOADING,
+                UpdateDownloadProgress.State.PAUSED -> {
+                    if (AppUpdateManager.cancelUserDownload(this)) {
+                        Toast.makeText(this, "Загрузка обновления остановлена", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                UpdateDownloadProgress.State.READY -> {
+                    // Плашка гаснет сразу же, ещё до первого процента: сессия
+                    // установки поднимается в своём потоке, и без этого между
+                    // нажатием и первым отчётом оставалось окно, в котором
+                    // «Обновить» нажималось второй раз.
+                    showUpdateChip(
+                        caption = "УСТАНОВКА ОБНОВЛЕНИЯ",
+                        captionColor = UPDATE_CHIP_BUSY_COLOR,
+                        progressLine = "0%",
+                        clickable = false,
+                    )
+                    AppUpdateManager.installReadyUpdate(this)
+                }
+                UpdateDownloadProgress.State.INSTALLING,
+                UpdateDownloadProgress.State.CHECKING -> Unit
+                UpdateDownloadProgress.State.IDLE,
+                UpdateDownloadProgress.State.FAILED -> {
+                    // Загрузку начинает это нажатие — и только оно.
+                    if (AppUpdateManager.startUserRequestedDownload(this)) {
+                        Toast.makeText(this, "Скачиваем обновление", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this, "Не удалось начать загрузку обновления", Toast.LENGTH_SHORT).show()
+                    }
+                }
             }
-            // Загрузку начинает это нажатие — и только оно.
-            if (AppUpdateManager.startUserRequestedDownload(this)) {
-                Toast.makeText(this, "Скачиваем обновление", Toast.LENGTH_SHORT).show()
-                refreshInstallUpdateButton()
-            } else {
-                Toast.makeText(this, "Не удалось начать загрузку обновления", Toast.LENGTH_SHORT).show()
-            }
+            refreshInstallUpdateButton()
         }
         // Экран рисуется под системными панелями, а плашка прижата к верхнему краю:
         // без отступа она уезжала под часы и заряд и читалась как мусор поверх статус-бара.
@@ -970,11 +1069,18 @@ class MainActivity : AppCompatActivity() {
         btnSettings.setOnClickListener {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
+        bindMainRegionSelector()
         TvFocusHelper.install(
             this,
             btnConnect,
             btnInstallUpdate,
             btnSettings,
+        )
+        // Кнопки селектора тоже обязаны попасть в обход фокуса: на телевизоре без
+        // пульта до них иначе не добраться вовсе.
+        TvFocusHelper.install(
+            this,
+            *(mainRegionButtons.toTypedArray()),
         )
 
         val initialState = clientData.getServiceState()
@@ -987,6 +1093,7 @@ class MainActivity : AppCompatActivity() {
         updateUiByState(startupState)
         setupIpInteractions()
         maybeHandleAutomationIntent(intent)
+        maybeHandleWidgetIntent(intent)
         
         if (isFirstAppLaunch) {
             clientData.setIsFirstLaunch(false)
@@ -1144,6 +1251,9 @@ class MainActivity : AppCompatActivity() {
         // ждёт следующего.
         ProtonProfileManager.addListener(protonProgressListener)
         resumeProtonPreparationIfPending()
+        // Регион мог смениться в настройках, пока экран был свёрнут.
+        refreshMainRegionSelector()
+        refreshProtonAvailableCountries()
         refreshWarpDiscoverySnapshotFromStorage()
         statusHandler.post(statusRunnable)
         refreshInstallUpdateButton()
@@ -1187,6 +1297,7 @@ class MainActivity : AppCompatActivity() {
         refreshKeepScreenAwake()
         statusHandler.removeCallbacks(statusRunnable)
         statusHandler.removeCallbacks(deferredNotificationPermissionRunnable)
+        statusHandler.removeCallbacks(updateChipTicker)
     }
 
     override fun onStart() {
@@ -1242,27 +1353,140 @@ class MainActivity : AppCompatActivity() {
 
     private fun getPersistedServiceBackend(): String = clientData.getServiceBackend()
 
+    /**
+     * Плашка обновления: одно состояние — одно действие.
+     *
+     * Нажать на действие, которое уже идёт, отсюда нельзя по построению: пока
+     * обновление качается, единственное, что делает нажатие, — останавливает
+     * загрузку; пока оно устанавливается, плашка не нажимается вовсе. Раньше
+     * подпись зависела только от «скачано / доступно», и повторные нажатия на
+     * «Скачать» уходили в [AppUpdateManager], где их гасил уже он — молча, без
+     * следа на экране.
+     *
+     * Опрос вместо подписки — потому что процент загрузки живёт в
+     * `DownloadManager`, а он о своём прогрессе не вещает. Тикер работает только
+     * пока состояние деятельное, см. [syncUpdateChipTicker].
+     */
     private fun refreshInstallUpdateButton() {
-        val readyVersion = AppUpdateManager.getReadyDownloadedVersion(this)
-        if (readyVersion.isNotBlank()) {
-            // Версию показываем ту, что реально лежит на диске: подпись — это обещание,
-            // и оно должно совпадать с тем, что установится по нажатию.
-            tvUpdateCaption.text = "Обновить до ${formatVersionLabel(readyVersion)}"
-            btnInstallUpdate.visibility = View.VISIBLE
-            return
+        val progress = AppUpdateManager.getDownloadProgress(this)
+        updateChipState = progress.state
+        syncUpdateChipTicker()
+        when (progress.state) {
+            UpdateDownloadProgress.State.DOWNLOADING,
+            UpdateDownloadProgress.State.PAUSED -> {
+                showUpdateChip(
+                    caption = "СКАЧИВАНИЕ ОБНОВЛЕНИЯ",
+                    captionColor = UPDATE_CHIP_BUSY_COLOR,
+                    // Проценты и единственное доступное действие в одной строке:
+                    // человек видит, сколько уже скачано, и чем это прервать.
+                    progressLine = if (progress.isIndeterminate) {
+                        "ОСТАНОВИТЬ"
+                    } else {
+                        "${progress.progressPercent}%   ОСТАНОВИТЬ"
+                    },
+                    clickable = true,
+                )
+            }
+            UpdateDownloadProgress.State.INSTALLING -> {
+                showUpdateChip(
+                    caption = "УСТАНОВКА ОБНОВЛЕНИЯ",
+                    captionColor = UPDATE_CHIP_BUSY_COLOR,
+                    progressLine = "${progress.progressPercent}%",
+                    // Установку не отменяют: APK уже уходит в системный
+                    // установщик, и прерывать его на середине нечем.
+                    clickable = false,
+                )
+            }
+            UpdateDownloadProgress.State.CHECKING -> {
+                showUpdateChip(
+                    caption = "ПРОВЕРКА ОБНОВЛЕНИЯ",
+                    captionColor = UPDATE_CHIP_BUSY_COLOR,
+                    progressLine = "",
+                    clickable = false,
+                )
+            }
+            UpdateDownloadProgress.State.READY -> {
+                // Версию показываем ту, что реально лежит на диске: подпись — это
+                // обещание, и оно должно совпадать с тем, что установится по нажатию.
+                val readyVersion = progress.version
+                    .ifBlank { AppUpdateManager.getReadyDownloadedVersion(this) }
+                showUpdateChip(
+                    caption = "Обновить до ${formatVersionLabel(readyVersion)}",
+                    captionColor = UPDATE_CHIP_IDLE_COLOR,
+                    progressLine = "",
+                    clickable = true,
+                )
+            }
+            UpdateDownloadProgress.State.FAILED -> {
+                showUpdateChip(
+                    caption = "ЗАГРУЗКА НЕ УДАЛАСЬ",
+                    captionColor = UPDATE_CHIP_FAILED_COLOR,
+                    progressLine = "ПОВТОРИТЬ",
+                    clickable = true,
+                )
+            }
+            UpdateDownloadProgress.State.IDLE -> {
+                // Обновление вышло, но ещё не скачано — плашка всё равно нужна.
+                //
+                // Пока приложение качало APK само, плашка появлялась только на
+                // скачанное и этого хватало. Автозагрузку убрали, и без этой ветки
+                // единственным сигналом осталось бы уведомление — а оно не
+                // показывается вовсе, если человек запретил уведомления.
+                val availableVersion = AppUpdateManager.getAvailableUpdateVersion(this)
+                if (availableVersion.isNotBlank()) {
+                    showUpdateChip(
+                        caption = "Скачать ${formatVersionLabel(availableVersion)}",
+                        captionColor = UPDATE_CHIP_IDLE_COLOR,
+                        progressLine = "",
+                        clickable = true,
+                    )
+                } else {
+                    btnInstallUpdate.visibility = View.GONE
+                }
+            }
         }
-        // Обновление вышло, но ещё не скачано — плашка всё равно нужна.
-        //
-        // Пока приложение качало APK само, плашка появлялась только на скачанное и
-        // этого хватало. Автозагрузку убрали, и без этой ветки единственным сигналом
-        // осталось бы уведомление — а оно не показывается вовсе, если человек
-        // запретил уведомления. Подпись честно называет, что сделает нажатие.
-        val availableVersion = AppUpdateManager.getAvailableUpdateVersion(this)
-        if (availableVersion.isNotBlank()) {
-            tvUpdateCaption.text = "Скачать ${formatVersionLabel(availableVersion)}"
-            btnInstallUpdate.visibility = View.VISIBLE
+    }
+
+    private fun showUpdateChip(
+        caption: String,
+        captionColor: Int,
+        progressLine: String,
+        clickable: Boolean,
+    ) {
+        tvUpdateCaption.text = caption
+        tvUpdateCaption.setTextColor(captionColor)
+        if (progressLine.isBlank()) {
+            tvUpdateProgress.visibility = View.GONE
         } else {
-            btnInstallUpdate.visibility = View.GONE
+            tvUpdateProgress.text = progressLine
+            tvUpdateProgress.visibility = View.VISIBLE
+        }
+        // `isClickable` мало: нажатие по неактивной плашке всё равно съедалось бы
+        // ею молча. Гасим и её саму — тогда нажатие проходит насквозь, а вид
+        // выглядит ровно тем, чем стал: сообщением, а не кнопкой.
+        btnInstallUpdate.isEnabled = clickable
+        btnInstallUpdate.isClickable = clickable
+        btnInstallUpdate.alpha = if (clickable) 1f else 0.85f
+        btnInstallUpdate.visibility = View.VISIBLE
+    }
+
+    /**
+     * Держит опрос прогресса включённым ровно пока есть что опрашивать.
+     *
+     * Тикер будит главный поток раз в секунду; на экране, который и так рисует
+     * фон, кольца и график задержки, оставлять его в покое нельзя.
+     */
+    private fun syncUpdateChipTicker() {
+        val shouldTick = isActivityResumed && when (updateChipState) {
+            UpdateDownloadProgress.State.DOWNLOADING,
+            UpdateDownloadProgress.State.PAUSED,
+            UpdateDownloadProgress.State.CHECKING,
+            UpdateDownloadProgress.State.INSTALLING -> true
+            else -> false
+        }
+        statusHandler.removeCallbacks(updateChipTicker)
+        if (shouldTick) {
+            statusHandler.postDelayed(updateChipTicker, UPDATE_CHIP_TICK_MS)
         }
     }
 
@@ -1451,41 +1675,667 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+
+    // -- селектор протокола/региона на главном экране ------------------------
+
+    private var mainRegionScroll: View? = null
+    private var mainRegionGroup: RadioGroup? = null
+    private var mainRegionButtons: List<RadioButton> = emptyList()
+    private var mainRegionNotice: TextView? = null
+
+    // -- четвёртая строка: подрегион выбранного транспорта --------------------
+
+    private var mainSubRegionRow: View? = null
+    private var mainSubRegionLabel: TextView? = null
+    private var mainSubRegionGroup: FlowRadioGroup? = null
+
+    /**
+     * Что сейчас нарисовано в строке подрегионов.
+     *
+     * Перерисовка селектора случается на каждом кадре состояния, а кнопок в этой
+     * строке переменное число, и пересобирать их несколько раз в секунду значило
+     * бы каждый раз снимать отметку у пользователя под пальцем. Подпись хранит
+     * состав, и группа пересобирается только когда состав правда изменился.
+     */
+    private var mainSubRegionSignature: String = ""
+
+    /** Тот же заслон, что у основного селектора: программная отметка — не нажатие. */
+    private var suppressMainSubRegionCallback = false
+
+    /**
+     * Страны, которые есть в выпущенных профилях Proton.
+     *
+     * Кэш, а не чтение по месту: список живёт в `proton_profiles.json`, а
+     * перерисовка селектора приходит на каждом кадре состояния — чтение файла
+     * оттуда было бы блокирующим вводом-выводом в главном потоке (I13).
+     * Обновляется с диска в [refreshProtonAvailableCountries].
+     */
+    private var protonAvailableCountries: List<String> = emptyList()
+
+    // -- выпуск личных профилей Cloudflare: строка под зелёным статусом --------
+
+    private var tvProfileIssueProgress: TextView? = null
+
+    /** Идёт ли чтение файла состояния — чтобы не заводить второе на каждом тике. */
+    private val profileIssueReadInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * Сколько показывать итог прогона после его конца.
+     *
+     * В файле состояние `done`/`failed` остаётся навсегда, и без срока строка
+     * «WARP: 50 профилей, лучший 75 мс» висела бы под статусом до следующего
+     * выпуска — то есть месяцами.
+     */
+    private val profileIssueTerminalTtlMs = 30_000L
+
+    /**
+     * Строка выпуска личных профилей Cloudflare.
+     *
+     * Читается **из файла**, а не из синглтона: прогон всегда идёт в процессе
+     * `:vpn`, и `WarpProfileGenerator.isRunning()` в интерфейсе всегда false (I2).
+     * Чтение уходит с главного потока — файл пишет чужой процесс, и ставить кадры
+     * экрана в зависимость от чужой записи нельзя (I13).
+     */
+    private fun refreshProfileIssueProgress() {
+        val view = tvProfileIssueProgress ?: return
+        if (!profileIssueReadInFlight.compareAndSet(false, true)) return
+        Thread({
+            val progress = runCatching { WarpProfileGenerator.readProgress(this) }
+                .getOrNull()
+            runOnUiThread {
+                profileIssueReadInFlight.set(false)
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                val running = progress?.state == WarpProfileGenerator.STATE_RUNNING
+                val terminalFresh = progress != null &&
+                    progress.state != WarpProfileGenerator.STATE_IDLE &&
+                    progress.atMs > 0L &&
+                    System.currentTimeMillis() - progress.atMs < profileIssueTerminalTtlMs
+                val message = progress?.message.orEmpty()
+                if ((running || terminalFresh) && message.isNotBlank()) {
+                    view.visibility = View.VISIBLE
+                    view.text = message
+                } else {
+                    view.visibility = View.GONE
+                }
+            }
+        }, "NovaProfileIssueProgress").apply { isDaemon = true; start() }
+    }
+
+    /** Перечитывает страны Proton с диска и перерисовывает четвёртую строку. */
+    private fun refreshProtonAvailableCountries() {
+        Thread({
+            val countries = runCatching { clientData.getProtonAvailableCountries() }.getOrDefault(emptyList())
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (countries == protonAvailableCountries) return@runOnUiThread
+                protonAvailableCountries = countries
+                // Состав изменился — подпись строки устарела, пересобираем.
+                mainSubRegionSignature = ""
+                refreshMainRegionSelector()
+            }
+        }, "NovaProtonCountries").apply { isDaemon = true; start() }
+    }
+
+    /**
+     * Пока идёт программная простановка отметки, обработчик молчит.
+     *
+     * `RadioGroup.check` неотличим от нажатия пользователя, а перенастройка
+     * случается на каждом кадре состояния — без этого заслона каждая перерисовка
+     * запускала бы применение региона.
+     */
+    private var suppressMainRegionCallback = false
+
+    /** Высота кнопки селектора в пикселях, посчитанная под четыре ряда. */
+    private var regionChipHeightPx = 0
+
+    /** Отступ между полосами, посчитанный там же. */
+    private var regionChipGapPx = 0
+
+    /**
+     * Считает высоту кнопок селектора под четыре ряда.
+     *
+     * Промежуток между кнопкой подключения и «Настройками» задан не селектором:
+     * кнопка подключения центрирована по экрану, «Настройки» привязаны к строке
+     * адресов снизу. Значит, высоту кнопок можно подгонять под этот промежуток, не
+     * рискуя циклом раскладки — от неё он не зависит.
+     *
+     * До первой раскладки координаты нулевые: тогда ничего не делаем, а
+     * перерисовка селектора приходит несколько раз в секунду и посчитает потом.
+     */
+    private fun applyRegionChipHeights() {
+        if (mainRegionButtons.isEmpty()) return
+        val settingsTop = findViewById<View>(R.id.btn_settings)?.top ?: 0
+        val connectBottom = if (::btnConnect.isInitialized) btnConnect.bottom else 0
+        if (settingsTop <= 0 || connectBottom <= 0 || settingsTop <= connectBottom) return
+        val density = resources.displayMetrics.density
+        val topMargin = (mainRegionScroll?.layoutParams as? ViewGroup.MarginLayoutParams)?.topMargin ?: 0
+        val usable = settingsTop - connectBottom - topMargin - (SELECTOR_BOTTOM_RESERVE_DP * density).toInt()
+        if (usable <= 0) return
+        // Сжимается **и** отступ между полосами, а не только сама кнопка.
+        //
+        // На Mi A1 (1080×1920) промежутка хватает на 4 ряда по 27,7 dp, а нижняя
+        // граница высоты кнопки была 28 dp: расчёт упирался в неё, четыре ряда не
+        // помещались, и — поскольку `wrap_content` в `ConstraintLayout` границы
+        // не соблюдает — строка подрегиона рисовалась поверх «Настроек».
+        // Проверено на устройстве.
+        val pitch = usable / SELECTOR_ROWS
+        val gap = (pitch * CHIP_ROW_GAP_SHARE).toInt().coerceIn(
+            (MIN_CHIP_ROW_GAP_DP * density).toInt(),
+            (CHIP_ROW_GAP_DP * density).toInt(),
+        )
+        val height = (pitch - gap).coerceIn(
+            (MIN_CHIP_HEIGHT_DP * density).toInt(),
+            (MAX_CHIP_HEIGHT_DP * density).toInt(),
+        )
+        if (height == regionChipHeightPx && gap == regionChipGapPx) return
+        regionChipHeightPx = height
+        regionChipGapPx = gap
+        mainRegionButtons.forEach { button -> applyChipMetrics(button, height, gap) }
+        mainSubRegionGroup?.let { group ->
+            for (index in 0 until group.childCount) applyChipMetrics(group.getChildAt(index), height, gap)
+        }
+    }
+
+    private fun applyChipMetrics(view: View?, height: Int, gap: Int) {
+        val params = view?.layoutParams ?: return
+        val margins = params as? ViewGroup.MarginLayoutParams
+        if (params.height == height && (margins == null || margins.bottomMargin == gap)) return
+        params.height = height
+        margins?.bottomMargin = gap
+        view.layoutParams = params
+    }
+
+    private fun bindMainRegionSelector() {
+        mainRegionScroll = findViewById(R.id.sv_exit_region_main)
+        mainRegionGroup = findViewById(R.id.rg_exit_region)
+        mainRegionNotice = findViewById(R.id.tv_exit_last)
+        mainSubRegionRow = findViewById(R.id.ll_exit_sub_region)
+        mainSubRegionLabel = findViewById(R.id.tv_exit_sub_region_label)
+        mainSubRegionGroup = findViewById(R.id.rg_exit_sub_region)
+        // Список, порядок и разбиение на строки — из [ConnectionSelectorPolicy],
+        // общей с настройками. Пятая копия порядка здесь была бы ровно тем
+        // способом, которым случается G49: один список узнаёт о новом значении,
+        // остальные молчат.
+        (mainRegionGroup as? FlowRadioGroup)?.let { group ->
+            group.rowPlan = ConnectionSelectorPolicy.ROWS
+            // Владелец попросил левый край и ровные ряды: у центрированных полос
+            // 3/2/1 левый край «лесенкой», а при одной ширине кнопок колонки
+            // соседних строк встают друг под друга.
+            group.alignRowsToStart = true
+            group.uniformItemWidth = true
+        }
+        (mainSubRegionGroup as? FlowRadioGroup)?.let { group ->
+            group.alignRowsToStart = true
+            group.uniformItemWidth = true
+        }
+        mainRegionButtons = ConnectionSelectorPolicy.BUTTON_IDS.mapNotNull { findViewById<RadioButton>(it) }
+        if (mainRegionButtons.size < ConnectionSelectorPolicy.SIZE) {
+            LogManager.log(
+                "Главный экран: селектор не собран — найдено ${mainRegionButtons.size} " +
+                    "кнопок из ${ConnectionSelectorPolicy.SIZE}."
+            )
+            mainRegionScroll?.visibility = View.GONE
+            return
+        }
+        // Обработчик подрегионов — тоже один раз и на группу, а не на кнопки:
+        // кнопки в ней пересобираются, а обработчик группы это переживает.
+        mainSubRegionGroup?.setOnCheckedChangeListener { group, checkedId ->
+            if (suppressMainSubRegionCallback) return@setOnCheckedChangeListener
+            val value = group.findViewById<RadioButton>(checkedId)?.tag as? String
+                ?: return@setOnCheckedChangeListener
+            applySubRegionFromMainScreen(value)
+        }
+        // Обработчик ставится **один раз**, а не на каждой перерисовке.
+        //
+        // Дефект, который это чинит, был виден на устройстве: `updateUiByState`
+        // зовёт перерисовку на каждом кадре состояния, то есть несколько раз в
+        // секунду, а перерисовка снимала обработчик, ставила отметку и вешала его
+        // обратно. Нажатие, попавшее в это окно, меняло кружок и не делало
+        // ничего, а следующая перерисовка возвращала отметку назад — снаружи
+        // «кнопка не нажимается». Заслон теперь один: [suppressMainRegionCallback].
+        mainRegionGroup?.setOnCheckedChangeListener { _, checkedId ->
+            if (suppressMainRegionCallback) return@setOnCheckedChangeListener
+            val position = mainRegionButtons.indexOfFirst { it.id == checkedId }
+            if (position < 0) return@setOnCheckedChangeListener
+            applyChipFromMainScreen(ConnectionSelectorPolicy.valueAt(position))
+        }
+        refreshMainRegionSelector()
+    }
+
+    /**
+     * Нажата кнопка селектора. Переводит её значение в то, что ляжет в настройку.
+     *
+     * OPERA — одна кнопка на два значения службы (`eu`/`us`), и выбирается тот
+     * подрегион, который пользователь выбирал в прошлый раз. TOR — не смена
+     * региона вовсе: транспорта ещё нет, и записать `tor` значило бы отправить
+     * службу перебирать пустоту. Вместо этого запускается сбор мостов, а строка
+     * под селектором честно говорит, что именно происходит (I4).
+     */
+    private fun applyChipFromMainScreen(chipValue: String) {
+        if (chipValue == ConnectionSelectorPolicy.CHIP_TOR) {
+            LogManager.log("Главный экран: выбран TOR — транспорта ещё нет, запускаем обновление мостов.")
+            // Решение и чтение файла — с рабочего потока, надпись — с главного.
+            // Текст обязан описывать то, что произошло: сбор мог и не начаться
+            // (список свежий или прогон уже идёт), а регион здесь не меняется
+            // вовсе, и обещать «выбор сохранён» было бы неправдой.
+            Thread({
+                val started = TorBridgeManager.refreshInBackground(
+                    this,
+                    reason = "выбор TOR на главном экране",
+                )
+                val known = TorBridgeManager.snapshot(this).bridges.size
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    Toast.makeText(
+                        this,
+                        ConnectionSelectorPolicy.torNoticeFor(started, known),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }, "NovaTorChipTap").apply { isDaemon = true; start() }
+            // Отметка возвращается на прежнюю кнопку: регион не менялся.
+            refreshMainRegionSelector()
+            return
+        }
+        applyRegionFromMainScreen(
+            ConnectionSelectorPolicy.storedValueForChip(
+                chipValue,
+                clientData.getOperaSubRegionPreference(),
+            )
+        )
+    }
+
+    /**
+     * Нажат подрегион в четвёртой строке.
+     *
+     * Для Opera это `eu`/`us` — то же самое, что раньше делали две отдельные
+     * кнопки, поэтому путь тот же [applyRegionFromMainScreen]: живой сеанс он
+     * переподключает безопасным `stop-then-start` (G3).
+     * Для Proton это страна выхода. Транспорт она не меняет — только фильтрует
+     * очередь профилей, — но живой сеанс всё равно надо переподнять: очередь
+     * строится один раз, при подключении.
+     *
+     * Раньше сессия здесь не перезапускалась вовсе, и это читалось как поломка
+     * ровно так, как её и описал владелец: «US не подключается». Предпочтение
+     * записывалось (`exit_region.json` честно показывал `US`), кнопка US
+     * загоралась, профили US на устройстве были — а бейдж до конца сеанса
+     * показывал прежний `AWG PROTON: NL`, и адрес не менялся. Это тот же
+     * рассинхрон, ради которого переподключение уже сделано у самой кнопки
+     * PROTON и в настройках.
+     */
+    private fun applySubRegionFromMainScreen(value: String) {
+        val chip = ConnectionSelectorPolicy.valueAt(
+            ConnectionSelectorPolicy.selectedIndex(
+                storedRegion = clientData.getExitRegionPreference(),
+                protonPreparationRequested = clientData.isProtonPreparationRequested(),
+            )
+        )
+        if (chip == "proton") {
+            val previous = clientData.getProtonCountryPreference().trim()
+            clientData.setProtonCountryPreference(value)
+            val label = value.ifBlank { "AUTO" }
+            // Переподключаем только на смене страны: повторное нажатие на уже
+            // выбранную кнопку не должно ронять живой туннель.
+            val changed = !previous.equals(value.trim(), ignoreCase = true)
+            val reconnecting = changed &&
+                SessionReapply.isSessionLikelyActive(this, clientData) &&
+                SessionReapply.applyToLiveSession(this, clientData)
+            LogManager.log(
+                "Главный экран: страна выхода Proton — $label, смена=$changed, переподключение=$reconnecting."
+            )
+            Toast.makeText(
+                this,
+                if (reconnecting) "Страна Proton: $label, переподключаемся" else "Страна Proton: $label",
+                Toast.LENGTH_SHORT,
+            ).show()
+            if (reconnecting) {
+                updateUiByState(NovaVpnService.STATE_CONNECTING)
+            }
+            refreshMainRegionSelector()
+            return
+        }
+        clientData.setOperaSubRegionPreference(value)
+        applyRegionFromMainScreen(value)
+    }
+
+    /**
+     * Перерисовывает селектор по текущему состоянию.
+     *
+     * Зовётся из каждого пути отрисовки, а не только из одного: регион теперь
+     * меняется, не уходя с экрана, и отметка, поставленная один раз при старте,
+     * устаревала бы при первом же переключении.
+     */
+    private fun refreshMainRegionSelector() {
+        val group = mainRegionGroup ?: return
+        val buttons = mainRegionButtons
+        if (buttons.size < ConnectionSelectorPolicy.SIZE) return
+        val notice = mainRegionNotice
+
+        // В режиме импортированных профилей выбор делают не регионы, а семейства
+        // протоколов, и те же шесть кнопок в настройках перекрашиваются и
+        // переименовываются под них. Показать здесь подписи регионов над
+        // импортированной семантикой значило бы соврать, поэтому селектор
+        // прячется, а вход в «Конфигурации» остаётся — там выбор и живёт.
+        if (clientData.isImportedConfigSourceActive()) {
+            mainRegionScroll?.visibility = View.GONE
+            notice?.visibility = View.VISIBLE
+            notice?.text =
+                "Активны импортированные конфигурации — протокол выбирается в «Настройках» → «Конфигурации»"
+            return
+        }
+        mainRegionScroll?.visibility = View.VISIBLE
+
+        // Предпочтение читается **один раз** за проход: это чтение `AtomicFile`, а
+        // проход приходит несколько раз в секунду, и до этого оно стояло здесь
+        // трижды подряд с гарантированно одинаковым ответом (I13).
+        val storedRegion = clientData.getExitRegionPreference()
+        val availability = ConnectionSelectorPolicy.availability(
+            operaSupported = OperaProxyManager.isSupportedOnDevice(this),
+            deviceRegistrationInProgress = clientData.isDeviceRegistrationInProgress(),
+            storedRegion = storedRegion,
+        )
+        buttons.forEachIndexed { index, button ->
+            // Подпись ставится только когда она правда другая: `TextView` при
+            // `wrap_content` уходит в `requestLayout` даже на том же тексте, а
+            // это полный обход measure/layout окна на каждом тике.
+            val label = ConnectionSelectorPolicy.LABELS.getOrNull(index).orEmpty()
+            if (button.text?.toString() != label) button.text = label
+            val allowed = availability.enabled.getOrNull(index) ?: true
+            if (button.isEnabled != allowed) button.isEnabled = allowed
+            val alpha = if (allowed) 1f else ConnectionSelectorPolicy.DISABLED_ALPHA
+            if (button.alpha != alpha) button.alpha = alpha
+        }
+        // Переписывание недостижимого выбора делает экран настроек: оно показывает
+        // всплывающее сообщение, и два экрана показали бы его дважды. Здесь только
+        // гасим кнопки.
+
+        val index = ConnectionSelectorPolicy.selectedIndex(
+            storedRegion = storedRegion,
+            protonPreparationRequested = clientData.isProtonPreparationRequested(),
+        )
+        val wanted = buttons.getOrNull(index)
+        if (wanted != null && group.checkedRadioButtonId != wanted.id) {
+            // Отметка двигается только когда она и правда не та. Лишний `check`
+            // на каждом кадре означал бы лишнее подавленное срабатывание.
+            suppressMainRegionCallback = true
+            group.check(wanted.id)
+            suppressMainRegionCallback = false
+        }
+
+        refreshMainSubRegionRow(ConnectionSelectorPolicy.valueAt(index))
+        // Высота считается здесь, а не один раз при сборке: до первой раскладки
+        // координат ещё нет, а перерисовка приходит несколько раз в секунду.
+        // Повторный счёт стоит два сравнения — менять что-либо она будет только
+        // когда результат правда изменился.
+        applyRegionChipHeights()
+
+        // Запрет держится выключенными кнопками, а не снятым обработчиком:
+        // выключенную кнопку нажать нельзя, и снимать обработчик — значит терять
+        // нажатия в окне между снятием и возвратом.
+        if (availability.lockReason.isNotBlank()) {
+            notice?.visibility = View.VISIBLE
+            notice?.text = availability.lockReason
+            return
+        }
+        notice?.visibility = View.GONE
+    }
+
+    /**
+     * Четвёртая строка — подрегион выбранного транспорта.
+     *
+     * Для OPERA это «Регион: EU US», для PROTON — страны выпущенных профилей в
+     * порядке [CountryDisplayOrder]. Для остальных кнопок строки нет: подрегиона
+     * у них не существует, а пустая строка отнимала бы место у кнопки подключения.
+     *
+     * Состав кнопок пересобирается **только когда он изменился**: перерисовка
+     * приходит несколько раз в секунду, и сборка на каждом кадре снимала бы
+     * отметку прямо под пальцем (тот же класс дефекта, что G95).
+     */
+    private fun refreshMainSubRegionRow(chipValue: String) {
+        val row = mainSubRegionRow ?: return
+        val group = mainSubRegionGroup ?: return
+        val entries = ConnectionSelectorPolicy.subRegionsFor(
+            chipValue,
+            if (chipValue == "proton") protonAvailableCountries else emptyList(),
+        )
+        if (entries.isEmpty()) {
+            row.visibility = View.GONE
+            mainSubRegionSignature = ""
+            // `removeAllViews` зовёт `requestLayout` даже на пустой группе, а для
+            // AUTO/WARP/MASQUE/TOR пустая — это состояние по умолчанию, и сюда
+            // заходят несколько раз в секунду.
+            if (group.childCount > 0) group.removeAllViews()
+            return
+        }
+        row.visibility = View.VISIBLE
+        mainSubRegionLabel?.text = ConnectionSelectorPolicy.SUB_REGION_PREFIX.trimEnd()
+        // Подрегион — всегда **одна** строка, сколько бы стран ни выпустил Proton.
+        // Без плана перенос считается по ширине, а внутри `HorizontalScrollView`
+        // ширина приходит спецификацией `UNSPECIFIED`, то есть нулём: строка
+        // рассыпалась на несколько. План выключает перенос вовсе — лишнее уезжает
+        // вбок и прокручивается пальцем, как и три основные полосы.
+        (mainSubRegionGroup as? FlowRadioGroup)?.rowPlan = listOf(entries.size)
+        val signature = chipValue + "|" + entries.joinToString(",") { it.first }
+        if (signature != mainSubRegionSignature) {
+            mainSubRegionSignature = signature
+            suppressMainSubRegionCallback = true
+            group.removeAllViews()
+            val themed = android.view.ContextThemeWrapper(this, R.style.NovaSubRegionChip)
+            val density = resources.displayMetrics.density
+            entries.forEach { (value, label) ->
+                val chip = RadioButton(themed, null, 0)
+                chip.id = View.generateViewId()
+                chip.tag = value
+                chip.text = label
+                // Нажимаемость задаётся явно, и это не перестраховка.
+                //
+                // Третий аргумент конструктора — `defStyleAttr = 0`: он нужен,
+                // чтобы наш стиль-тема не был перебит штатным `radioButtonStyle`,
+                // но вместе с ним теряется и всё, что этот стиль даёт по части
+                // поведения. На устройстве это выглядело так: строка «Регион: EU US»
+                // рисуется, отметка стоит, а нажатия не делают ничего —
+                // `uiautomator` показывал у обеих кнопок `clickable="false"`.
+                chip.isClickable = true
+                chip.isFocusable = true
+                chip.isSaveEnabled = false
+                // Отступы задаются кодом, а не стилем.
+                //
+                // `ContextThemeWrapper` применяет стиль как **тему**: атрибуты
+                // самого вида (фон, поля, размер текста) она разрешает, а
+                // `layout_*` читает родитель из `AttributeSet` — здесь он `null`,
+                // и `RadioGroup` подставляет свои умолчания с нулевыми полями. То
+                // есть объявленные в стиле `layout_marginEnd`/`layout_marginBottom`
+                // молча не действовали, и обводки соседних кнопок соприкасались.
+                // Высота — тоже здесь, и по той же причине, что и отступы: это
+                // `layout_*`, родитель читает её из `AttributeSet`, а он `null`.
+                // Владелец попросил одинаковые кнопки, а из стиля-темы высота не
+                // применяется вовсе, и подкнопки выходили вдвое ниже основных.
+                val params = RadioGroup.LayoutParams(
+                    RadioGroup.LayoutParams.WRAP_CONTENT,
+                    regionChipHeightPx.takeIf { it > 0 } ?: (MAX_CHIP_HEIGHT_DP * density).toInt(),
+                )
+                params.marginEnd = (6 * density).toInt()
+                // Отступ тот же, что у основных полос: строка подрегиона — такой
+                // же ряд, и в расчёт четырёх рядов она входит наравне.
+                params.bottomMargin = regionChipGapPx.takeIf { it > 0 }
+                    ?: (CHIP_ROW_GAP_DP * density).toInt()
+                group.addView(chip, params)
+                NovaFontHelper.apply(chip)
+            }
+            suppressMainSubRegionCallback = false
+        }
+        val wantedValue = when (chipValue) {
+            // Пустое предпочтение — это кнопка «AUTO», а не первая страна списка.
+            "proton" -> clientData.getProtonCountryPreference()
+            else -> ConnectionSelectorPolicy.normalizeOperaSubRegion(clientData.getOperaSubRegionPreference())
+        }
+        val wanted = (0 until group.childCount)
+            .mapNotNull { group.getChildAt(it) as? RadioButton }
+            .firstOrNull { it.tag == wantedValue }
+        if (wanted != null && group.checkedRadioButtonId != wanted.id) {
+            suppressMainSubRegionCallback = true
+            group.check(wanted.id)
+            suppressMainSubRegionCallback = false
+        }
+    }
+
+    /**
+     * Применяет выбор, сделанный на главном экране.
+     *
+     * Три случая, и они честно разные.
+     *
+     * * **PROTON** — это не смена региона, а запуск выпуска профилей: предпочтение
+     *   до успеха не записывается, иначе служба пошла бы перебирать пустой список
+     *   и погасла бы ровно тогда, когда туннель нужен для самого выпуска.
+     * * **Живой сеанс** — переподключается сразу, тем же порядком, что и в
+     *   настройках: [SessionReapply] сам выбирает между мягким реаплаем и
+     *   безопасным `stop-then-start`, который нужен Opera (G3).
+     * * **Выключенный VPN** — предпочтение записывается и применится при
+     *   следующем подключении; экран говорит об этом словами (I4).
+     */
+    private fun applyRegionFromMainScreen(value: String) {
+        if (value == "proton") {
+            LogManager.log("Главный экран: выбран PROTON — запускаем выпуск профилей.")
+            clientData.setProtonPreparationRequested(true)
+            ProtonProfileManager.markPreparationRequested()
+            // Итог обязан быть обработан, иначе прогон некому закончить.
+            //
+            // Без этого замыкания признак `proton_preparation.json` не снимался
+            // никем: `ProtonProfileManager` его не пишет, а он один и решает,
+            // рисовать ли жёлтую «РЕГИСТРАЦИЯ PROTON» поверх экрана. То есть после
+            // успешного выпуска надпись висела навсегда, адрес и страна были
+            // погашены, а сам регион оставался прежним — кнопка показывала PROTON,
+            // подключение шло старым транспортом. Это и есть молчаливая подмена
+            // явного выбора (I1); та же обработка стоит в настройках и в
+            // продолжении брошенного выпуска.
+            val started = ProtonProfileManager.ensureProfiles(this, background = false) { outcome ->
+                // Итог применяется, **только если пользователь всё ещё хочет Proton**.
+                //
+                // Прогон идёт десятки секунд, и за это время можно нажать WARP:
+                // тогда ветка ниже уже отменила подготовку и записала свой регион.
+                // Безусловная запись «proton» поверх него — это молчаливая подмена
+                // явного выбора (I1), да ещё на живой чужой сессии. Тот же заслон
+                // стоит в настройках.
+                val stillWanted = ProtonProfileManager.isPreparationRequested()
+                if (!stillWanted) {
+                    LogManager.log(
+                        "Главный экран: выпуск Proton закончился, но пользователь уже выбрал другой " +
+                            "транспорт — итог не применяем."
+                    )
+                    return@ensureProfiles
+                }
+                clientData.setProtonPreparationRequested(false)
+                ProtonProfileManager.cancelPreparation()
+                var reconnecting = false
+                if (outcome.ready) {
+                    clientData.setExitRegionPreference("proton")
+                    // Записанный регион сам по себе туннель не меняет.
+                    //
+                    // Без этого шага PROTON был единственной кнопкой селектора,
+                    // которая живой сеанс не переподключала: предпочтение стало
+                    // `proton`, кнопка горит PROTON, а под зелёным «АКТИВНО» до
+                    // конца сеанса идёт прежний транспорт. Ровно тот рассинхрон,
+                    // ради которого немедленное переподключение и делалось; в
+                    // настройках этот же путь давно идёт через реаплай.
+                    reconnecting = SessionReapply.isSessionLikelyActive(this, clientData) &&
+                        SessionReapply.applyToLiveSession(this, clientData)
+                    LogManager.log(
+                        "Главный экран: выпуск Proton закончен, профилей ${outcome.profiles.size} — " +
+                            "регион записан, переподключение=$reconnecting."
+                    )
+                } else {
+                    LogManager.log("Главный экран: выпуск Proton не удался — ${outcome.message}")
+                }
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    Toast.makeText(this, outcome.message, Toast.LENGTH_LONG).show()
+                    refreshProtonAvailableCountries()
+                    if (reconnecting) {
+                        updateUiByState(NovaVpnService.STATE_CONNECTING)
+                    } else {
+                        updateUiByState(null)
+                    }
+                }
+            }
+            if (!started) {
+                // Прогон уже идёт — и признаки принадлежат **ему**, а не этому
+                // нажатию. Снимать их здесь нельзя: обработчик итога того прогона
+                // читает `isPreparationRequested()` и по снятому признаку решает,
+                // что пользователь передумал, — то есть выпуск доходил до конца
+                // успешно, а регион не записывался и переподключения не было.
+                // Воспроизводилось тремя нажатиями подряд: PROTON → WARP → PROTON.
+                //
+                // Поэтому признаки **переподвешиваются** на идущий прогон, ровно
+                // как в настройках, а отметка остаётся на PROTON. Молчать при этом
+                // всё равно нельзя (I4) — говорим словами, что выпуск уже идёт.
+                LogManager.log("Главный экран: выпуск Proton уже идёт — подписываемся на его итог.")
+                ProtonProfileManager.addListener(object : ProtonProfileManager.StatusListener {
+                    override fun onStatus(text: String) {
+                        if (ProtonProfileManager.isRunning()) return
+                        ProtonProfileManager.removeListener(this)
+                        // Свой обработчик у того прогона уже снял бы признаки сам;
+                        // снимаем только то, что могло остаться от нашего вызова.
+                        if (!ProtonProfileManager.isPreparationRequested()) {
+                            clientData.setProtonPreparationRequested(false)
+                        }
+                    }
+                })
+                Toast.makeText(this, "Выпуск профилей Proton уже идёт", Toast.LENGTH_SHORT).show()
+                refreshMainRegionSelector()
+                return
+            }
+            Toast.makeText(this, "Готовим профили Proton...", Toast.LENGTH_SHORT).show()
+            refreshMainRegionSelector()
+            return
+        }
+        val previous = clientData.getExitRegionPreference()
+        // Выбор другого транспорта отменяет выпуск Proton — и в синглтоне, и в
+        // файле: иначе главный экран продолжал бы рисовать «РЕГИСТРАЦИЯ PROTON»
+        // поверх нового выбора, а брошенный выпуск заводился бы заново.
+        ProtonProfileManager.cancelPreparation()
+        clientData.setProtonPreparationRequested(false)
+        clientData.setExitRegionPreference(value)
+        LogManager.log("Главный экран: протокол/регион изменён на $value (было $previous).")
+
+        val label = ConnectionSelectorPolicy.LABELS
+            .getOrNull(ConnectionSelectorPolicy.indexOf(value))
+            .orEmpty()
+        if (!SessionReapply.isSessionLikelyActive(this, clientData)) {
+            Toast.makeText(this, "Выбрано: $label", Toast.LENGTH_SHORT).show()
+            refreshMainRegionSelector()
+            return
+        }
+        // Живой сеанс переподключается **сразу** — тем же порядком, которым это
+        // делают настройки. Раньше здесь стояла усечённая копия: живая Opera не
+        // переключалась вовсе, а обычный реаплай шёл без записи состояния и без
+        // признака мягкого применения, и экран успевал показать «НЕ ПОДКЛЮЧЕНО».
+        // Выбор пути (обычный реаплай или безопасный stop-then-start для Opera)
+        // принимает [SessionReapply]: он один знает про exit(-1) в tun2proxy (G3).
+        val started = SessionReapply.applyToLiveSession(this, clientData)
+        if (started) {
+            Toast.makeText(this, "Переключаем VPN на $label...", Toast.LENGTH_SHORT).show()
+            updateUiByState(NovaVpnService.STATE_CONNECTING)
+        } else {
+            // Отказ запуска молчать не должен (I4): предпочтение уже записано, и
+            // без слов это выглядит как «кнопка не сработала».
+            Toast.makeText(
+                this,
+                "Не удалось переключить на $label — выбор сохранён, примените переподключением.",
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+        refreshMainRegionSelector()
+    }
+
+    /**
+     * Дополнительные поля реаплая — из [SessionReapply], а не своим списком.
+     *
+     * Список полей был выписан здесь второй копией, и пропущенное в одной из них
+     * поле означает молча применённое старое значение. Теперь копия одна, а этот
+     * метод только переносит её в чужое намерение.
+     */
     private fun applyCurrentPreferenceExtras(intent: Intent) {
-        intent.putExtra(NovaVpnService.EXTRA_EXIT_REGION, clientData.getExitRegionPreference())
-        intent.putExtra(
-            NovaVpnService.EXTRA_IMPORTED_CONFIG_SOURCE_ENABLED,
-            clientData.isImportedWarpOnlyModeEnabled(),
-        )
-        intent.putExtra(
-            NovaVpnService.EXTRA_IMPORTED_PROTOCOL_PREFERENCE,
-            clientData.getImportedProtocolPreference(),
-        )
-        intent.putExtra(NovaVpnService.EXTRA_REAPPLY_SPLIT_MODE, clientData.getSplitMode())
-        intent.putStringArrayListExtra(
-            NovaVpnService.EXTRA_REAPPLY_SPLIT_APPS,
-            ArrayList(clientData.getSplitApps()),
-        )
-        intent.putExtra(
-            NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_ENABLED,
-            clientData.getTrafficMaskEnabled(),
-        )
-        intent.putExtra(
-            NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_MODE,
-            clientData.getTrafficMaskMode(),
-        )
-        intent.putExtra(
-            NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_HOST,
-            clientData.getTrafficMaskHost(),
-        )
-        intent.putExtra(
-            NovaVpnService.EXTRA_REAPPLY_SNI_MASK_MODE,
-            clientData.getSniMaskMode(),
-        )
-        intent.putExtra(
-            NovaVpnService.EXTRA_REAPPLY_SNI_MASK_LIST,
-            clientData.getSniCustomListRaw(),
-        )
+        intent.putExtras(SessionReapply.buildIntent(this, clientData))
     }
 
     private fun restoreCachedTunnelSnapshot() {
@@ -1976,7 +2826,14 @@ class MainActivity : AppCompatActivity() {
                     clientData.saveLastExitObservation(
                         ip = primaryIp,
                         country = effectiveSnapshot.country,
-                        colo = effectiveSnapshot.colo,
+                        // Узел экран не измеряет вовсе: [ExitAddress] его не
+                        // сообщает, а спрашивать `/cdn-cgi/trace` отдельно — дело
+                        // службы, и только при включённом обходе узла. Записать
+                        // сюда пустую строку значило бы затирать измеренное
+                        // службой значение каждые две секунды: тик экрана идёт
+                        // чаще, чем замер выхода, и «Последний выход: RU / ? / …»
+                        // стало бы постоянным.
+                        colo = effectiveSnapshot.colo.ifBlank { clientData.getLastExitColo() },
                     )
                 }
                 Handler(Looper.getMainLooper()).post {
@@ -2138,7 +2995,34 @@ class MainActivity : AppCompatActivity() {
             setIntent(intent)
             if (maybeHandleAdbResetIntent(intent)) return
             maybeHandleAutomationIntent(intent)
+            maybeHandleWidgetIntent(intent)
         }
+    }
+
+    /**
+     * Выполняет действие, пришедшее с виджета рабочего стола.
+     *
+     * Перебор профилей живёт в обработчике кнопки «&gt;» и знает про VLESS,
+     * MASQUE, Opera и Proton по-разному. Виджет поэтому не повторяет эту цепочку,
+     * а нажимает ту же кнопку — иначе появилась бы вторая, расходящаяся с первой.
+     *
+     * Намерение съедается сразу: без этого поворот экрана или возврат из настроек
+     * повторяли бы переключение профиля на каждом восстановлении активности.
+     */
+    private fun maybeHandleWidgetIntent(intent: Intent?) {
+        if (intent == null) return
+        val action = intent.getStringExtra(EXTRA_WIDGET_ACTION)?.trim().orEmpty()
+        if (action.isEmpty()) return
+        intent.removeExtra(EXTRA_WIDGET_ACTION)
+        if (action != WIDGET_ACTION_NEXT_PROFILE) return
+        if (!::btnNextProfile.isInitialized) return
+        // Кнопка скрыта, когда переключать нечего: туннель не поднят или профиль
+        // один. Нажимать её в этом случае незачем — подсказка честнее молчания.
+        if (btnNextProfile.visibility != View.VISIBLE) {
+            Toast.makeText(this, "Переключать профиль сейчас не на что", Toast.LENGTH_SHORT).show()
+            return
+        }
+        btnNextProfile.performClick()
     }
 
     private fun maybeHandleAdbResetIntent(intent: Intent?): Boolean {
@@ -2432,50 +3316,50 @@ class MainActivity : AppCompatActivity() {
      * всегда всех.
      */
     private fun fetchIpSnapshot(network: Network?): IpSnapshot? {
-        val fastTrace = fetchTraceInfoViaSocket(
-            network,
-            CloudflareTrace.IPV4_HOSTS,
-            timeoutMs = if (network != null) 1200 else 1800,
-        )
-        if (fastTrace != null) {
-            return IpSnapshot(
-                ipv4 = fastTrace.ip.takeIf(::isIpv4Address).orEmpty(),
-                ipv6 = fastTrace.ip.takeUnless(::isIpv4Address).orEmpty(),
-                country = fastTrace.country,
-                colo = fastTrace.colo,
-            )
-        }
-        if (network != null) {
-            return null
-        }
-
+        // Спрашиваются оба входа [ExitAddress] разом, а ответ берётся строго по
+        // порядку: основной сильнее запасного всегда, даже если запасной успел
+        // первым. Разом — по той же причине, по которой раньше разом шли `ipv4.`
+        // и `ipv6.`: последовательный обход платит полным сроком за молчащий вход
+        // (G74), а молчит здесь именно основной — с выхода Cloudflare до него не
+        // устанавливается TCP.
+        //
+        // Поддоменов `ipv4.`/`ipv6.` тут больше нет: `/txt` у них отдаёт 404, и
+        // экран не получал адреса ни на одном транспорте. Семейство приходит
+        // полем самого ответа.
         val traces = pollTraceEntries(
-            listOf(
-                { fetchTraceInfoFromUrls(network, CloudflareTrace.IPV4_URLS) },
-                { fetchTraceInfoFromUrls(network, CloudflareTrace.IPV6_URLS) },
-                { fetchTraceInfoFromUrls(network, CloudflareTrace.HOSTNAME_URLS) },
+            ExitAddress.URLS.map { url -> { fetchExitObservation(network, url) } }
+        )
+        val index = traces.indexOfFirst { it != null }
+        if (index < 0) return null
+        val observation = traces[index] ?: return null
+        if (index > 0) {
+            // Подмена источника молчать не должна (I4): бейдж после неё
+            // показывает данные не того места, которое назвал владелец.
+            LogManager.log(
+                "UI checkCurrentIp: основной источник адреса молчит, ответ взят у " +
+                    "запасного (${ExitAddress.URLS[index]})."
             )
-        )
-        val ipv4Trace = traces[0]
-        val ipv6Trace = traces[1]
-        val genericTrace = traces[2]
-
-        // Только Cloudflare: адрес и страна приходят одним ответом и разойтись не
-        // могут, а сторонних определителей адреса здесь больше нет ([CloudflareTrace]).
-        val ipv4 = ipv4Trace?.ip.orEmpty().ifBlank {
-            genericTrace?.ip.orEmpty().takeIf(::isIpv4Address).orEmpty()
         }
-        val ipv6 = ipv6Trace?.ip.orEmpty().ifBlank {
-            genericTrace?.ip.orEmpty().takeUnless(::isIpv4Address).orEmpty()
-        }
-        val badgeTrace = ipv4Trace ?: ipv6Trace ?: genericTrace
-        if (ipv4.isBlank() && ipv6.isBlank()) return null
+        if (observation.ip.isBlank()) return null
+        val isV4 = ExitAddress.isIpv4(observation.ip)
         return IpSnapshot(
-            ipv4 = ipv4,
-            ipv6 = ipv6,
-            country = badgeTrace?.country.orEmpty(),
-            colo = badgeTrace?.colo.orEmpty(),
+            // Адрес и страна — из одного ответа. Второе семейство остаётся пустым:
+            // соврать про него нечем, а подставить чужой ответ — это ровно то
+            // смешение источников, на котором бейдж однажды показал адрес одного
+            // пути и страну другого (I10).
+            ipv4 = if (isV4) observation.ip else "",
+            ipv6 = if (isV4) "" else observation.ip,
+            country = observation.country,
+            // Узла Cloudflare этот источник не знает и знать не может.
+            colo = "",
         )
+    }
+
+    /** Один запрос к [ExitAddress] и разбор ответа тем разбором, что положен входу. */
+    private fun fetchExitObservation(network: Network?, url: String): TraceInfo? {
+        val body = readTextFromUrl(network, url) ?: return null
+        val parsed = ExitAddress.observe(url, body) ?: return null
+        return TraceInfo(ip = parsed.ip, country = parsed.country, colo = "")
     }
 
     /**
@@ -2483,15 +3367,19 @@ class MainActivity : AppCompatActivity() {
      *
      * Ждать всех нельзя: цена снимка тогда равна самому медленному входу, а мёртвый
      * вход досиживает свой полный таймаут — через туннель Proton это 4 с на пустом
-     * месте при живом ответе за 0,3 с. Ждать одного тоже нельзя: IPv4 и IPv6 — разные
-     * поля экрана, и второй приходит позже первого.
+     * месте при живом ответе за 0,3 с.
      *
-     * Поэтому два срока. Пока нет **ни одного** ответа, ждём до [TRACE_STAGE_CAP_MS]
-     * — на медленной сети живой вход должен успеть, а зависший не должен держать
-     * поток пула дольше, чем сторож считает работу здоровой. Как только ответ есть,
-     * остальным даётся всего [TRACE_ENTRY_GRACE_MS]: их дело — дозаполнить второе
-     * поле экрана, а не задавать цену снимку. Опоздавшие досиживают свой таймаут на
-     * демонских потоках пула, никого не держа.
+     * **Входы упорядочены, и порядок сильнее скорости.** Ответ первого входа
+     * заканчивает опрос немедленно — остальные ответы всё равно не понадобятся.
+     * Ответ любого другого только начинает отсчёт [TRACE_ENTRY_GRACE_MS], в
+     * течение которого первый ещё может успеть; иначе быстрый запасной источник
+     * обгонял бы живой основной, и экран показывал бы данные не оттуда, откуда
+     * обещано.
+     *
+     * Пока нет **ни одного** ответа, ждём до [TRACE_STAGE_CAP_MS] — на медленной
+     * сети живой вход должен успеть, а зависший не должен держать поток пула
+     * дольше, чем сторож считает работу здоровой. Опоздавшие досиживают свой
+     * таймаут на демонских потоках пула, никого не держа.
      */
     private fun pollTraceEntries(tasks: List<() -> TraceInfo?>): List<TraceInfo?> {
         val completion = ExecutorCompletionService<Pair<Int, TraceInfo?>>(traceExecutor)
@@ -2511,6 +3399,9 @@ class MainActivity : AppCompatActivity() {
             val (index, trace) = runCatching { future.get() }.getOrNull() ?: continue
             if (trace == null) continue
             results[index] = trace
+            // Ответ первого входа заканчивает опрос сразу: входы упорядочены, и
+            // ответы остальных всё равно не будут использованы.
+            if (index == 0) break
             if (graceDeadlineMs == 0L) {
                 graceDeadlineMs = SystemClock.elapsedRealtime() + TRACE_ENTRY_GRACE_MS
             }
@@ -2600,30 +3491,28 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun fetchIpSnapshotViaOperaProxy(): IpSnapshot? {
-        // Прокси Opera ходит и по литералам, и по именам, поэтому пробуем оба входа
-        // Cloudflare подряд; сторонних определителей адреса здесь нет.
-        val fastTrace = CloudflareTrace.PROXY_TRACE_HOSTS
-            .firstNotNullOfOrNull { host ->
-                readTextViaOperaProxySocket(host, CloudflareTrace.PATH, timeoutMs = 2200)
-                    ?.let(::parseTraceInfo)
-            }
-        val fastIpv4 = fastTrace?.ip?.takeIf(::isIpv4Address).orEmpty()
+        // Через петлевой прокси Opera идёт обычный HTTPS-запрос по имени: у
+        // [ExitAddress] нет ни литеральных входов, ни открытого HTTP, поэтому
+        // быстрый путь «сырым сокетом на порт 80» здесь не применим вовсе.
         val proxy = Proxy(Proxy.Type.HTTP, OperaProxyManager.getLoopbackProxyAddress(this))
-        val genericTrace = fastTrace
-            ?: fetchTraceInfoFromUrlsViaProxy(proxy, CloudflareTrace.HOSTNAME_URLS)
-
-        val ipv4 = fastIpv4.ifBlank {
-            genericTrace?.ip.orEmpty().takeIf(::isIpv4Address).orEmpty()
-        }
-        val ipv6 = genericTrace?.ip?.takeUnless(::isIpv4Address).orEmpty()
-        val badgeTrace = genericTrace
-        if (ipv4.isBlank() && ipv6.isBlank()) return null
+        // Порядок входов тот же, что и на прямом пути: основной, потом запасной.
+        // Через прокси они идут по очереди — параллелить нечего, ответ нужен один.
+        val trace = ExitAddress.URLS.firstNotNullOfOrNull { url ->
+            fetchExitObservationViaProxy(proxy, url)
+        } ?: return null
+        val isV4 = ExitAddress.isIpv4(trace.ip)
         return IpSnapshot(
-            ipv4 = ipv4,
-            ipv6 = ipv6,
-            country = badgeTrace?.country.orEmpty(),
-            colo = badgeTrace?.colo.orEmpty(),
+            ipv4 = if (isV4) trace.ip else "",
+            ipv6 = if (isV4) "" else trace.ip,
+            country = trace.country,
+            colo = "",
         )
+    }
+
+    private fun fetchExitObservationViaProxy(proxy: Proxy, url: String): TraceInfo? {
+        val body = readTextFromUrlViaProxy(proxy, url) ?: return null
+        val parsed = ExitAddress.observe(url, body) ?: return null
+        return TraceInfo(ip = parsed.ip, country = parsed.country, colo = "")
     }
 
     private fun fetchTraceInfoFromUrls(network: Network?, urls: List<String>): TraceInfo? {
@@ -3837,6 +4726,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateUiByState(state: String?) {
+        // Селектор перерисовывается на каждом кадре состояния, а не один раз при
+        // старте: регион теперь меняется, не уходя с экрана, и запрет на время
+        // регистрации устройства обязан появляться и сниматься сам.
+        refreshMainRegionSelector()
         refreshWarpDiscoverySnapshotFromStorage()
         val rawPersistedState = state ?: getPersistedServiceState()
         val persistedState = resolvePersistedStateAgainstSystemVpn(rawPersistedState)
@@ -4032,7 +4925,7 @@ class MainActivity : AppCompatActivity() {
         connectedUiAwaitingProof = false
         primaryActionPreviewActive = false
         btnConnect.text = "ОТКЛЮЧИТЬ"
-        btnNextProfile.visibility = View.GONE
+        setNextProfileVisible(false)
         tunnelIpResolved = false
         currentIpv4 = "..."
         currentIpv6 = "..."
@@ -4063,7 +4956,7 @@ class MainActivity : AppCompatActivity() {
         setBackdropConnecting(forceRestart = backdropState != BackdropState.CONNECTING)
         missingVpnSinceMs = 0L
         btnConnect.text = "ОТКЛЮЧИТЬ"
-        btnNextProfile.visibility = View.GONE
+        setNextProfileVisible(false)
         if (!preserveKnownIps) {
             tunnelIpResolved = false
             currentIpv4 = "..."
@@ -4155,16 +5048,27 @@ class MainActivity : AppCompatActivity() {
      *
      * У WARP, Proton и VLESS кнопка перебирает **свой** список узлов и остаётся.
      */
-    private val NEXT_PROFILE_HIDDEN_REGIONS = setOf("eu", "us", "masque")
+    private val NEXT_PROFILE_HIDDEN_REGIONS = setOf("eu", "us", "masque", "tor")
+
+    /**
+     * Подпись «след. профиль» над кнопкой «&gt;».
+     *
+     * Видимость обязана меняться там же, где у самой кнопки: висящая над пустотой
+     * подпись — это ровно та ложь, которую подпись и должна была убрать.
+     */
+    private var nextProfileCaption: TextView? = null
+
+    private fun setNextProfileVisible(visible: Boolean) {
+        if (::btnNextProfile.isInitialized) {
+            btnNextProfile.visibility = if (visible) View.VISIBLE else View.GONE
+        }
+        nextProfileCaption?.visibility = if (visible) View.VISIBLE else View.GONE
+    }
 
     private fun applyNextProfileButtonVisibility() {
         if (!::btnNextProfile.isInitialized) return
         val region = clientData.getExitRegionPreference().trim().lowercase(Locale.ROOT)
-        btnNextProfile.visibility = if (region in NEXT_PROFILE_HIDDEN_REGIONS) {
-            View.GONE
-        } else {
-            View.VISIBLE
-        }
+        setNextProfileVisible(region !in NEXT_PROFILE_HIDDEN_REGIONS)
     }
 
     private fun renderStoppedState() {
@@ -4179,7 +5083,7 @@ class MainActivity : AppCompatActivity() {
         latencyRefreshStartedAtMs = 0L
         connectedUiAwaitingProof = false
         primaryActionPreviewActive = false
-        btnNextProfile.visibility = View.GONE
+        setNextProfileVisible(false)
         tunnelIpResolved = false
         lastTunnelConnectedAtMs = 0L
         clientData.clearTunnelUiSnapshot()
@@ -4466,8 +5370,19 @@ class MainActivity : AppCompatActivity() {
                     vpnState == NovaVpnService.STATE_CONNECTING ||
                     vpnState == NovaVpnService.STATE_STOPPED
                 )
-        if (relevant) {
-            tvTransportNotice.text = notice
+        val text = if (relevant) notice else ""
+        // Идемпотентность здесь не украшение, а условие того, что эту функцию
+        // можно звать с тика.
+        //
+        // `TextView` при `wrap_content` уходит в `requestLayout` даже на том же
+        // самом тексте, а тик идёт дважды в секунду поверх фона, колец и графика
+        // задержки. Со сравнением повторный вызов не стоит ничего, и подпись
+        // можно перечитывать постоянно — без этого она обновлялась только вместе
+        // со сменой состояния службы.
+        if (text == displayedTransportNotice) return
+        displayedTransportNotice = text
+        if (text.isNotEmpty()) {
+            tvTransportNotice.text = text
             tvTransportNotice.visibility = View.VISIBLE
         } else {
             tvTransportNotice.visibility = View.GONE
@@ -4518,6 +5433,14 @@ class MainActivity : AppCompatActivity() {
         } else if (persistedState == NovaVpnService.STATE_CONNECTING) {
             updateAttemptProgressDisplay()
         }
+        // Подпись под статусом меняется и без смены состояния.
+        //
+        // Выпуск профилей идёт при уже поднятом туннеле и обновляет её трижды за
+        // полторы минуты, оставаясь в `CONNECTED`. Условие выше сюда не пускало,
+        // и на экране навсегда застывало «Выпуск профилей 1/3», хотя журнал
+        // службы честно показывал шаги 2/3 и 3/3. Вызов дешёвый: сама функция
+        // сравнивает текст и на совпадении не делает ничего.
+        refreshTransportNotice()
     }
 
     private fun refreshRestrictedMobileIndicator() {

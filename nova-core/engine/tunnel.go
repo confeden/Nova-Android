@@ -17,9 +17,9 @@ import (
 	"syscall"
 	"time"
 
-	wgconn "github.com/amnezia-vpn/amneziawg-go/conn"
-	"github.com/amnezia-vpn/amneziawg-go/device"
-	"github.com/amnezia-vpn/amneziawg-go/tun"
+	wgconn "github.com/amnezia-vpn/amneziawg-go/v3/conn"
+	"github.com/amnezia-vpn/amneziawg-go/v3/device"
+	"github.com/amnezia-vpn/amneziawg-go/v3/tun"
 )
 
 var activeDevice *device.Device
@@ -108,6 +108,8 @@ func SetDNSInterceptPolicy(enabled bool, mediaUpstreams []string, defaultUpstrea
 	// таймаута. Здоровье апстримов обнуляем по той же причине — «не отвечал» с
 	// прошлой сети ничего не говорит о новой.
 	resetDohClients()
+	resetDotConns()
+	resetDNSRouteChoices()
 	resetDNSUpstreamHealth()
 
 	if enabled && len(normalized) > 0 {
@@ -381,6 +383,11 @@ func configToUAPI(conf string) (string, error) {
 	currentSection := ""
 	pendingTrick := ""
 	reservedEnabled := true
+	// Ядро 3.1 требует, чтобы при заданном ключе защиты заголовка все четыре
+	// размера добивки были не меньше нонса шифра, иначе `IpcSet` отвергает весь
+	// профиль одной строкой. Проверяем здесь, чтобы сказать, что именно не так.
+	headerProtectionRequested := false
+	sizes := map[string]int{}
 	fakePacketsEnabled := true
 	fakeStrategyProfile := "aggressive"
 
@@ -469,6 +476,9 @@ func configToUAPI(conf string) (string, error) {
 				sb.WriteString(fmt.Sprintf("jmax=%s\n", val))
 
 			case "s1", "s2", "s3", "s4":
+				if parsed, err := strconv.Atoi(val); err == nil {
+					sizes[key] = parsed
+				}
 				if _, err := strconv.Atoi(val); err != nil {
 					return "", fmt.Errorf("failed to parse %s: %w", strings.ToUpper(key), err)
 				}
@@ -492,6 +502,73 @@ func configToUAPI(conf string) (string, error) {
 				}
 				MarkAwgCompatActive()
 				sb.WriteString(fmt.Sprintf("%s=%s\n", key, val))
+
+			// Параметры AmneziaWG 3.x.
+			//
+			// Ключ защиты заголовка приходит в base64, как и остальные ключи профиля,
+			// а UAPI ждёт hex — переводим тем же способом, что и `PrivateKey`.
+			case "headerprotectionkey":
+				decoded, err := base64.StdEncoding.DecodeString(val)
+				if err != nil {
+					return "", fmt.Errorf("invalid base64 HeaderProtectionKey: %v", err)
+				}
+				// Длину проверяем здесь, а не в ядре: там она сообщается как отказ всего
+				// IpcSet, то есть профиль просто не поднимается без внятной причины.
+				if len(decoded) != awgHeaderProtectionKeySize {
+					return "", fmt.Errorf("HeaderProtectionKey: ожидалось %d байт, получено %d", awgHeaderProtectionKeySize, len(decoded))
+				}
+				headerProtectionRequested = true
+				MarkAwgCompatActive()
+				sb.WriteString(fmt.Sprintf("header_protection_key=%s\n", hex.EncodeToString(decoded)))
+
+			// Диапазоны вида `10-100` ядро разбирает само (`UintRange.FromString`),
+			// одиночное число тоже принимает. Здесь только переименование ключа:
+			// проверять формат второй раз значило бы завести вторую копию правила,
+			// которая рано или поздно разойдётся с первой.
+
+			case "contentpaddingaddition":
+				MarkAwgCompatActive()
+				sb.WriteString(fmt.Sprintf("content_padding_addition=%s\n", val))
+
+			case "rekeyaftertime":
+				MarkAwgCompatActive()
+				sb.WriteString(fmt.Sprintf("rekey_after_time=%s\n", val))
+
+			case "rekeytimeout":
+				MarkAwgCompatActive()
+				sb.WriteString(fmt.Sprintf("rekey_timeout=%s\n", val))
+
+			case "rejectaftertime":
+				MarkAwgCompatActive()
+				sb.WriteString(fmt.Sprintf("reject_after_time=%s\n", val))
+
+			case "keepalivetimeout":
+				MarkAwgCompatActive()
+				sb.WriteString(fmt.Sprintf("keepalive_timeout=%s\n", val))
+
+			case "maxhandshakeattempts":
+				MarkAwgCompatActive()
+				sb.WriteString(fmt.Sprintf("max_handshake_attempts=%s\n", val))
+
+			// `on`/`off` — то, что пишет в профиль сама Amnezia, а UAPI ждёт
+			// `strconv.ParseBool`, который таких слов не знает. Без перевода профиль
+			// отвергался бы целиком на одной строке.
+			case "randomtrailers", "disablecookies":
+				parsed, err := parseAwgBool(val)
+				if err != nil {
+					return "", fmt.Errorf("failed to parse %s: %w", key, err)
+				}
+				uapiKey := "random_trailers"
+				if key == "disablecookies" {
+					uapiKey = "disable_cookies"
+				}
+				// Отметку «профиль правда обфусцирован» ставит только включённое значение:
+				// `RandomTrailers = off` формат на проводе не меняет, а отметка отключает
+				// переписывание заголовков в `smart_bind`.
+				if parsed {
+					MarkAwgCompatActive()
+				}
+				sb.WriteString(fmt.Sprintf("%s=%t\n", uapiKey, parsed))
 			}
 
 		case "peer":
@@ -525,6 +602,16 @@ func configToUAPI(conf string) (string, error) {
 
 			case "persistentkeepalive":
 				sb.WriteString(fmt.Sprintf("persistent_keepalive_interval=%s\n", val))
+			}
+		}
+	}
+	if headerProtectionRequested {
+		for _, name := range []string{"s1", "s2", "s3", "s4"} {
+			if size, ok := sizes[name]; ok && size < awgHeaderCipherNonceSize {
+				return "", fmt.Errorf(
+					"%s=%d слишком мал для HeaderProtectionKey: ядро требует не меньше %d",
+					strings.ToUpper(name), size, awgHeaderCipherNonceSize,
+				)
 			}
 		}
 	}
@@ -600,11 +687,12 @@ func protectOpenedSockets(bind wgconn.Bind) {
 // --- AndroidTUN Implementation ---
 
 type AndroidTUN struct {
-	file          *os.File
-	events        chan tun.Event
-	mtu           int
-	mu            sync.Mutex
-	telegramProxy *telegramTransparentProxy
+	file              *os.File
+	events            chan tun.Event
+	mtu               int
+	mu                sync.Mutex
+	telegramProxy     *telegramTransparentProxy
+	domainBypassProxy *domainBypassProxy
 }
 
 func CreateAndroidTUN(fd int) (tun.Device, error) {
@@ -664,6 +752,13 @@ func (t *AndroidTUN) Read(buffs [][]byte, sizes []int, offset int) (int, error) 
 				log.Printf("DNS intercept skipped: %v", interceptErr)
 			}
 			if intercepted {
+				continue
+			}
+			interceptedBypass, bypassErr := t.tryHandleDomainBypass(buffs[0][offset : offset+n])
+			if bypassErr != nil && domainBypassLogBudget.Add(-1) >= 0 {
+				log.Printf("Domain bypass relay skipped: %v", bypassErr)
+			}
+			if interceptedBypass {
 				continue
 			}
 		}
@@ -745,6 +840,10 @@ func (t *AndroidTUN) answerInterceptedDNS(
 			}
 			return
 		}
+		// Единственная точка обучения обхода по зонам: здесь проходят все
+		// перехваченные ответы, и IPv4, и IPv6. Отсюда же следует, что без
+		// включённого перехвата DNS обход по зонам работать не может.
+		domainBypassLearnFromAnswer(responsePayload)
 		responsePacket, err := buildResponse(responsePayload)
 		if err != nil {
 			if dnsInterceptLogBudget.Add(-1) >= 0 {
@@ -785,6 +884,14 @@ func (t *AndroidTUN) Close() error {
 		t.telegramProxy.close()
 		t.telegramProxy = nil
 	}
+	if t.domainBypassProxy != nil {
+		t.domainBypassProxy.close()
+		t.domainBypassProxy = nil
+	}
+	// Выученное принадлежит сеансу, а не процессу. Без этой строки адреса и
+	// счётчики переживали переподключение: на другой сети вчерашний адрес CDN
+	// уводил бы трафик мимо туннеля к хосту, которого по нему больше нет.
+	domainBypassResetSession()
 	if t.file == nil {
 		return nil
 	}
@@ -814,6 +921,32 @@ func (t *AndroidTUN) tryHandleTelegramTransparent(packet []byte) (bool, error) {
 		t.telegramProxy = proxy
 	}
 	return t.telegramProxy.maybeHandle(packet)
+}
+
+// tryHandleDomainBypass уводит поток к выученному адресу мимо туннеля.
+//
+// Релей поднимается лениво: пока обход выключен или ещё ничего не выучено,
+// второй netstack в процессе не создаётся вовсе.
+func (t *AndroidTUN) tryHandleDomainBypass(packet []byte) (bool, error) {
+	if !domainBypassActive() {
+		return false, nil
+	}
+	if len(packet) < 1 {
+		return false, nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.file == nil {
+		return false, os.ErrClosed
+	}
+	if t.domainBypassProxy == nil {
+		proxy, err := newDomainBypassProxy(t.file, t.mtu)
+		if err != nil {
+			return false, err
+		}
+		t.domainBypassProxy = proxy
+	}
+	return t.domainBypassProxy.maybeHandle(packet)
 }
 
 func (t *AndroidTUN) tryHandleDNSIntercept(packet []byte) (bool, error) {
@@ -856,6 +989,12 @@ func (t *AndroidTUN) tryHandleDNSInterceptIPv4(packet []byte, cfg dnsInterceptCo
 	srcPort := binary.BigEndian.Uint16(packet[udpStart : udpStart+2])
 	dstPort := binary.BigEndian.Uint16(packet[udpStart+2 : udpStart+4])
 	if dstPort != 53 {
+		return false, nil
+	}
+	if isCoreDNSPort(srcPort) {
+		// Наш собственный запрос, отправленный через туннель по `via=tunnel`.
+		// Перехватить его значило бы открыть следующий такой сокет, и так до
+		// исчерпания очереди.
 		return false, nil
 	}
 
@@ -918,6 +1057,12 @@ func (t *AndroidTUN) tryHandleDNSInterceptIPv6(packet []byte, cfg dnsInterceptCo
 	srcPort := binary.BigEndian.Uint16(packet[udpStart : udpStart+2])
 	dstPort := binary.BigEndian.Uint16(packet[udpStart+2 : udpStart+4])
 	if dstPort != 53 {
+		return false, nil
+	}
+	if isCoreDNSPort(srcPort) {
+		// Наш собственный запрос, отправленный через туннель по `via=tunnel`.
+		// Перехватить его значило бы открыть следующий такой сокет, и так до
+		// исчерпания очереди.
 		return false, nil
 	}
 
@@ -1110,80 +1255,163 @@ func resolveDNSPayload(query []byte, upstreams []string, timeout time.Duration) 
 
 	var lastErr error
 	for _, trimmed := range orderDNSUpstreamsByHealth(upstreams) {
-		if isDohUpstream(trimmed) {
-			upstream, err := parseDohUpstream(trimmed)
-			if err != nil {
-				lastErr = err
-				continue
-			}
-			payload, err := resolveDNSViaDoh(query, upstream, timeout)
-			if err != nil {
-				noteDNSUpstreamFailure(trimmed)
-				lastErr = fmt.Errorf("doh %s: %w", upstream.url, err)
-				continue
-			}
-			noteDNSUpstreamSuccess(trimmed)
-			return payload, upstream.url, nil
-		}
-
-		endpoint, err := net.ResolveUDPAddr("udp", net.JoinHostPort(trimmed, "53"))
+		spec, err := parseDNSUpstream(trimmed)
 		if err != nil {
 			noteDNSUpstreamFailure(trimmed)
-			lastErr = fmt.Errorf("resolve upstream %s: %w", trimmed, err)
+			lastErr = err
 			continue
 		}
-
-		network := "udp4"
-		if endpoint.IP == nil || endpoint.IP.To4() == nil {
-			network = "udp6"
-		}
-		conn, err := net.ListenUDP(network, nil)
+		payload, label, err := resolveDNSViaSpec(query, spec, timeout)
 		if err != nil {
 			noteDNSUpstreamFailure(trimmed)
-			lastErr = fmt.Errorf("open dns socket for %s: %w", trimmed, err)
-			continue
-		}
-		if err := protectDNSUDPConn(conn); err != nil {
-			_ = conn.Close()
-			noteDNSUpstreamFailure(trimmed)
-			lastErr = fmt.Errorf("protect dns socket for %s: %w", trimmed, err)
-			continue
-		}
-		_ = conn.SetDeadline(time.Now().Add(timeout))
-
-		if _, err := conn.WriteToUDP(query, endpoint); err != nil {
-			_ = conn.Close()
-			noteDNSUpstreamFailure(trimmed)
-			lastErr = fmt.Errorf("send dns query to %s: %w", trimmed, err)
-			continue
-		}
-
-		buffer := make([]byte, 4096)
-		n, _, err := conn.ReadFromUDP(buffer)
-		_ = conn.Close()
-		if err != nil {
-			noteDNSUpstreamFailure(trimmed)
-			lastErr = fmt.Errorf("read dns response from %s: %w", trimmed, err)
-			continue
-		}
-		if n < 12 {
-			noteDNSUpstreamFailure(trimmed)
-			lastErr = fmt.Errorf("short dns response from %s", trimmed)
-			continue
-		}
-		if buffer[0] != query[0] || buffer[1] != query[1] {
-			noteDNSUpstreamFailure(trimmed)
-			lastErr = fmt.Errorf("dns transaction id mismatch from %s", trimmed)
+			lastErr = err
 			continue
 		}
 		noteDNSUpstreamSuccess(trimmed)
-		return append([]byte(nil), buffer[:n]...), trimmed, nil
+		return payload, label, nil
 	}
 
 	if lastErr == nil {
 		lastErr = errors.New("no DNS upstreams configured")
 	}
 	return nil, "", lastErr
+}
+
+// resolveDNSViaSpec выбирает путь и делает один запрос.
+//
+// При `via=auto` запомненный победитель используется без повторной гонки, но
+// первый же отказ по нему возвращает к гонке: «раньше было быстрее» и «работает
+// сейчас» — разные утверждения, и держаться первого на мёртвом пути значит
+// платить полный таймаут на каждом запросе.
+func resolveDNSViaSpec(query []byte, spec *dnsUpstreamSpec, timeout time.Duration) ([]byte, string, error) {
+	if spec.route != dnsRouteAuto {
+		return resolveDNSOnRoute(query, spec, spec.route, timeout)
+	}
+	if remembered, ok := recallDNSRoute(spec.raw); ok {
+		payload, label, err := resolveDNSOnRoute(query, spec, remembered, timeout)
+		if err == nil {
+			return payload, label, nil
+		}
+		forgetDNSRoute(spec.raw)
+	}
+	return raceDNSRoutes(query, spec, timeout)
+}
+
+type dnsRouteAttempt struct {
+	route   dnsUpstreamRoute
+	payload []byte
+	label   string
+	err     error
+}
+
+// raceDNSRoutes спрашивает один и тот же резолвер обоими путями сразу.
+//
+// Гонка честна только для шифрованных апстримов, и [parseDNSUpstream] уже не
+// пускает сюда открытый UDP: там быстрый ответ бывает подделкой, и «быстрейший
+// метод» выбирал бы именно её. Здесь ответ подписан сертификатом сервера, так
+// что первым приходит именно тот путь, который действительно короче.
+func raceDNSRoutes(query []byte, spec *dnsUpstreamSpec, timeout time.Duration) ([]byte, string, error) {
+	results := make(chan dnsRouteAttempt, 2)
+	for _, route := range []dnsUpstreamRoute{dnsRouteDirect, dnsRouteTunnel} {
+		go func(route dnsUpstreamRoute) {
+			payload, label, err := resolveDNSOnRoute(query, spec, route, timeout)
+			results <- dnsRouteAttempt{route: route, payload: payload, label: label, err: err}
+		}(route)
+	}
+	var lastErr error
+	for i := 0; i < 2; i++ {
+		attempt := <-results
+		if attempt.err != nil {
+			lastErr = attempt.err
+			continue
+		}
+		rememberDNSRoute(spec.raw, attempt.route)
+		return attempt.payload, attempt.label, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("neither path answered for %s", spec.target)
+	}
+	return nil, "", lastErr
+}
+
+func resolveDNSOnRoute(query []byte, spec *dnsUpstreamSpec, route dnsUpstreamRoute, timeout time.Duration) ([]byte, string, error) {
+	switch spec.kind {
+	case dnsUpstreamDoH:
+		upstream := &dohUpstream{
+			raw:       spec.raw,
+			url:       spec.target,
+			host:      spec.host,
+			port:      spec.port,
+			bootstrap: spec.bootstrap,
+		}
+		payload, err := resolveDNSViaDoh(query, upstream, route, timeout)
+		if err != nil {
+			return nil, "", fmt.Errorf("doh %s: %w", spec.target, err)
+		}
+		return payload, spec.target, nil
+	case dnsUpstreamDoT:
+		payload, err := resolveDNSViaDoT(query, spec, route, timeout)
+		if err != nil {
+			return nil, "", fmt.Errorf("dot %s: %w", spec.target, err)
+		}
+		return payload, "tls://" + spec.target, nil
+	default:
+		payload, err := resolveDNSViaPlainUDP(query, spec, route, timeout)
+		if err != nil {
+			return nil, "", err
+		}
+		return payload, spec.target, nil
+	}
+}
+
+func resolveDNSViaPlainUDP(query []byte, spec *dnsUpstreamSpec, route dnsUpstreamRoute, timeout time.Duration) ([]byte, error) {
+	endpoint, err := net.ResolveUDPAddr("udp", net.JoinHostPort(spec.target, spec.port))
+	if err != nil {
+		return nil, fmt.Errorf("resolve upstream %s: %w", spec.target, err)
+	}
+
+	network := "udp4"
+	if endpoint.IP == nil || endpoint.IP.To4() == nil {
+		network = "udp6"
+	}
+	conn, err := net.ListenUDP(network, nil)
+	if err != nil {
+		return nil, fmt.Errorf("open dns socket for %s: %w", spec.target, err)
+	}
+	defer conn.Close()
+
+	if route == dnsRouteTunnel {
+		// Незащищённый сокет уходит в TUN, и его пакет вернётся сюда же с
+		// портом назначения 53. Перехват обязан узнать свой собственный
+		// исходящий порт, иначе он перехватит сам себя — воронка, ограниченная
+		// только очередью на 32 места.
+		local, ok := conn.LocalAddr().(*net.UDPAddr)
+		if !ok || local.Port <= 0 {
+			return nil, fmt.Errorf("dns socket for %s has no local port", spec.target)
+		}
+		rememberCoreDNSPort(uint16(local.Port))
+		defer forgetCoreDNSPort(uint16(local.Port))
+	} else if err := protectDNSUDPConn(conn); err != nil {
+		return nil, fmt.Errorf("protect dns socket for %s: %w", spec.target, err)
+	}
+
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	if _, err := conn.WriteToUDP(query, endpoint); err != nil {
+		return nil, fmt.Errorf("send dns query to %s: %w", spec.target, err)
+	}
+
+	buffer := make([]byte, 4096)
+	n, _, err := conn.ReadFromUDP(buffer)
+	if err != nil {
+		return nil, fmt.Errorf("read dns response from %s: %w", spec.target, err)
+	}
+	if n < 12 {
+		return nil, fmt.Errorf("short dns response from %s", spec.target)
+	}
+	if buffer[0] != query[0] || buffer[1] != query[1] {
+		return nil, fmt.Errorf("dns transaction id mismatch from %s", spec.target)
+	}
+	return append([]byte(nil), buffer[:n]...), nil
 }
 
 func protectDNSUDPConn(conn *net.UDPConn) error {
@@ -1318,3 +1546,26 @@ func internetChecksum(data []byte) uint16 {
 	}
 	return ^uint16(sum)
 }
+
+// parseAwgBool понимает и `true/false`, и `on/off`, и `yes/no`.
+//
+// Профили AmneziaWG 3.x пишут `RandomTrailers = on`, а `strconv.ParseBool` таких
+// слов не знает: без этого перевода весь профиль отвергался бы на одной строке.
+func parseAwgBool(val string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(val)) {
+	case "on", "yes", "y", "enable", "enabled":
+		return true, nil
+	case "off", "no", "n", "disable", "disabled":
+		return false, nil
+	}
+	return strconv.ParseBool(val)
+}
+
+// Размеры из ядра 3.1, продублированные здесь намеренно.
+//
+// Тянуть их импортом значило бы связать транслятор конфига с внутренними
+// константами устройства; расходятся они не чаще, чем формат самого профиля.
+const (
+	awgHeaderProtectionKeySize = 32
+	awgHeaderCipherNonceSize   = 12
+)

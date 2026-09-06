@@ -1,0 +1,13 @@
+- Domain and zone bypass: names in .ru, .su and Cyrillic zones leave outside the tunnel, with no reconnect.
+- Your own domains can be listed by hand; a rule covers subdomains too.
+- Your own list of DNS resolvers: the order they are asked in, each one switchable, and the path they take.
+- A separate DNS for one chosen app.
+- Direct Flow: Russian apps always travel outside the tunnel, and the list is editable.
+- Your own Cloudflare profiles are issued automatically half a minute after connecting, ahead of the bundled ones.
+- Proton reworked: nodes are picked by country and latency, and no profiles no longer means no tunnel.
+- Opera, Proton and Cloudflare registration goes through our own relay, so it works where their APIs are blocked.
+- Main screen: protocol and region as buttons, a latency graph, and an honest line under the status.
+- A notification screen: the speed and transport shown in the shade can be turned off.
+- A home-screen widget: connect, and jump to the next profile.
+- The TOR button collects working bridges (obfs4, webtunnel, vanilla, snowflake). The Tor transport itself is not here yet.
+- The app is almost 10 MB smaller.

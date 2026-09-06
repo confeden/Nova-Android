@@ -1,6 +1,7 @@
 package com.example.nova
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
@@ -22,15 +23,27 @@ data class AppItem(
     val packageName: String,
     val label: String,
     var icon: Drawable? = null,
-    var isSelected: Boolean = false
+    var isSelected: Boolean = false,
+    /** Системное приложение: по умолчанию такие в списке не показываются. */
+    val isSystem: Boolean = false,
+    /**
+     * Идёт мимо туннеля всегда, независимо от галочки.
+     *
+     * Считается снаружи, из [DirectAppsPolicy], поэтому и лежит в `var`:
+     * список приложений собирается кэшем, который про эту политику не знает.
+     */
+    var isDirect: Boolean = false,
 )
 
 object AppCacheManager {
-    private const val CACHE_SCHEMA_SALT = "include-system-apps-v2"
+    // v3: в записи кэша добавился признак системного приложения — старые
+    // файлы его не содержат, и отличать их надо по соли, а не по вере.
+    private const val CACHE_SCHEMA_SALT = "include-system-apps-v3"
 
     private data class CachedEntry(
         val packageName: String,
         val label: String,
+        val isSystem: Boolean = false,
     )
 
     private val loaderDispatcher = Executors.newSingleThreadExecutor { runnable ->
@@ -73,6 +86,7 @@ object AppCacheManager {
                 label = entry.label,
                 icon = iconCache[entry.packageName]?.newDrawable(appContext.resources),
                 isSelected = selectedApps.contains(entry.packageName),
+                isSystem = entry.isSystem,
             )
         }
     }
@@ -86,6 +100,7 @@ object AppCacheManager {
                 label = entry.label,
                 icon = iconCache[entry.packageName]?.newDrawable(appContext.resources),
                 isSelected = selectedApps.contains(entry.packageName),
+                isSystem = entry.isSystem,
             )
         }
     }
@@ -160,6 +175,11 @@ object AppCacheManager {
                         CachedEntry(
                             packageName = appInfo.packageName,
                             label = pm.getApplicationLabel(appInfo).toString(),
+                            // Обновлённое системное приложение остаётся системным:
+                            // без второго флага «Карты» и «Телефон» после первого же
+                            // обновления вылезали бы в список обычных.
+                            isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0 ||
+                                (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0,
                         )
                     } catch (_: Exception) {
                         null
@@ -220,7 +240,7 @@ object AppCacheManager {
                     val packageName = entry.optString("package")
                     val label = entry.optString("label")
                     if (packageName.isNotBlank() && label.isNotBlank()) {
-                        add(CachedEntry(packageName, label))
+                        add(CachedEntry(packageName, label, entry.optBoolean("system", false)))
                     }
                 }
             }
@@ -238,6 +258,7 @@ object AppCacheManager {
                     JSONObject().apply {
                         put("package", entry.packageName)
                         put("label", entry.label)
+                        put("system", entry.isSystem)
                     }
                 )
             }

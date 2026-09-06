@@ -118,7 +118,7 @@ tools/deps/fetch_go_deps.sh
 
 | Зависимость | Путь | Патч |
 | --- | --- | --- |
-| `amneziawg-go` | `tools/amneziawg-go` | да — `device/`, `tun/netstack/` |
+| `amneziawg-go` 3.1 (тег `v3.1.20260828`) | `tools/amneziawg-go` | да — только `tun/netstack/` |
 | `warp-plus` | `tools/warp-plus` | да — `wireguard/tun/netstack/`, `wiresocks/` |
 | `gvisor` | `build/deps/gvisor` | да — снят `pkg/sync/runtime_constants_go125.go` (не собирается на Go 1.26) |
 | `usque` | `build/deps/usque` | нет |
@@ -161,11 +161,11 @@ tools/build_nova_core_aar.sh
 ## Тесты
 
 ```bash
-./gradlew testDebugUnitTest
+./gradlew :app:testGithubDebugUnitTest
 ```
 
 ```bash
-cd nova-core && go test ./cfws/
+cd nova-core && go test ./cfws ./tlsshape ./dnsname
 ```
 
 Часть проверок — пробы на реальных данных: они пропускаются, если рядом нет

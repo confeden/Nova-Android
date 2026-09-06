@@ -138,14 +138,6 @@ object OperaProxyManager {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 OPR/114.0.0.0"
 
-    /** Адреса собственных релеев. Не секрет — секрет только пароль к ним. */
-    private val API_RELAY_ENDPOINTS = listOf(
-        "relay.nova-app.eu" to 8443,
-        "relay.nova-app.eu" to 2053,
-    )
-
-    private const val API_RELAY_USER = "nova"
-
     /**
      * Релеи для вызовов API SurfEasy, в порядке предпочтения.
      *
@@ -156,16 +148,16 @@ object OperaProxyManager {
      * адреса, до которых потом не дозвониться. Релей переносит в Швецию только
      * вызовы API — сам туннель набирается напрямую, страна выхода не меняется.
      *
-     * Пароль приходит из сборки и в репозиторий не попадает. Без него список пуст:
+     * Адреса и ключ — общие с Proton и с регистрацией Cloudflare, из
+     * [NovaRelay]: один сервер, один ключ (D16). Без ключа список пуст:
      * подставлять заглушку значило бы потратить попытку и получить 407, чтобы
      * узнать то же самое.
      */
     private fun apiRelays(): List<String> {
-        val password = BuildConfig.OPERA_RELAY_PASSWORD.trim()
-        if (password.isEmpty()) return emptyList()
-        val user = encodeUserInfo(API_RELAY_USER)
-        val secret = encodeUserInfo(password)
-        return API_RELAY_ENDPOINTS.map { (host, port) -> "https://$user:$secret@$host:$port" }
+        if (!NovaRelay.isConfigured()) return emptyList()
+        val user = encodeUserInfo(NovaRelay.keyId())
+        val secret = encodeUserInfo(NovaRelay.password())
+        return NovaRelay.ENDPOINTS.map { (host, port) -> "https://$user:$secret@$host:$port" }
     }
 
     /**

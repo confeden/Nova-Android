@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Подложка уведомления об обновлении.
+
+    Градиент по диагонали, а не сплошная заливка: уведомление стоит в общей ленте
+    рядом с системными, и единственное, чем оно может отличаться, — фон. Углы
+    скруглены под скругление самой карточки уведомления, чтобы подложка не
+    выпирала из неё прямыми углами.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+
+    <gradient
+        android:angle="315"
+        android:startColor="#FF0F3D2E"
+        android:centerColor="#FF10664A"
+        android:endColor="#FF0B2A4A"
+        android:type="linear" />
+
+    <corners android:radius="14dp" />
+
+    <stroke
+        android:width="1dp"
+        android:color="#4D5AE282" />
+</shape>

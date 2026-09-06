@@ -1,0 +1,27 @@
+# Отобранные зарубежные имена для TLS-маскировки вне режима белого списка.
+#
+# Класс выбран один — точки обновления и телеметрии операционных систем и
+# производителей. Их не блокируют, потому что цена ошибки — кирпичи вместо
+# телефонов; их нормальный профиль это крупная непрозрачная загрузка; и
+# постоянный разговор Android-устройства с ними ожидаем сам по себе.
+#
+# Первые четыре имени — измеренные, а не отобранные: 2026-08-15 на живом узле
+# 162.159.198.2:443 www.google.com, static.twitchcdn.net, 4pda.to и vk.com дали
+# данные на всех попытках, тогда как consumer-masque.cloudflareclient.com — ни на
+# одной. Они же лежат в MASQUE_NEUTRAL_SNI_POOL.
+www.google.com
+static.twitchcdn.net
+cdn.jsdelivr.net
+gstatic.com
+www.gstatic.com
+connectivitycheck.gstatic.com
+dl.google.com
+clients2.google.com
+storage.googleapis.com
+fonts.gstatic.com
+android.googleapis.com
+is1-ssl.mzstatic.com
+updates.cdn-apple.com
+gateway.icloud.com
+ctldl.windowsupdate.com
+ocsp.digicert.com

@@ -60,7 +60,7 @@
                 android:paddingTop="8dp"
                 android:paddingRight="16dp"
                 android:paddingBottom="8dp"
-                android:text="Скачать/поделиться приложением"
+                android:text="Скачать последнюю версию"
                 android:textColor="#FFFFFF"
                 android:textSize="16sp"
                 android:textStyle="bold" />
@@ -421,23 +421,10 @@
                         android:buttonTint="#F3C94A"/>
 
                     <RadioButton
-                        android:id="@+id/rb_exit_eu"
+                        android:id="@+id/rb_exit_opera"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="EU"
-                        android:textColor="#FFFFFF"
-                        android:textSize="11sp"
-                        android:paddingStart="0dp"
-                        android:paddingEnd="0dp"
-                        android:layout_marginEnd="10dp"
-                        android:maxLines="1"
-                        android:buttonTint="#F3C94A"/>
-
-                    <RadioButton
-                        android:id="@+id/rb_exit_us"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="US"
+                        android:text="OPERA"
                         android:textColor="#FFFFFF"
                         android:textSize="11sp"
                         android:paddingStart="0dp"
@@ -471,7 +458,47 @@
                         android:layout_marginEnd="10dp"
                         android:maxLines="1"
                         android:buttonTint="#F3C94A"/>
+
+                    <RadioButton
+                        android:id="@+id/rb_exit_tor"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="TOR"
+                        android:textColor="#FFFFFF"
+                        android:textSize="11sp"
+                        android:paddingStart="0dp"
+                        android:paddingEnd="0dp"
+                        android:layout_marginEnd="10dp"
+                        android:maxLines="1"
+                        android:buttonTint="#F3C94A"/>
                 </com.example.nova.FlowRadioGroup>
+
+                <!--
+                    Повтор выпуска Proton-профилей.
+
+                    Кнопка нужна потому, что пусковое событие у выпуска ровно одно —
+                    смена региона на PROTON, — а `RadioGroup` не сообщает о нажатии на
+                    уже выбранную кнопку. То есть повторить выпуск было нечем: прогон,
+                    закончившийся на встроенном списке узлов из прошивки, оставался
+                    таким навсегда.
+
+                    Видна только при выбранном регионе PROTON (`refreshConnectionSelector`).
+                -->
+                <TextView
+                    android:id="@+id/btn_proton_refresh"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:layout_marginTop="8dp"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
+                    android:background="@drawable/bg_settings_action_dark"
+                    android:gravity="center"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:text="Обновить профили Proton"
+                    android:textColor="#FFFFFF"
+                    android:textSize="13sp"
+                    android:visibility="gone" />
 
                 <TextView
                     android:id="@+id/tv_exit_last"
@@ -481,6 +508,107 @@
                     android:textColor="#AAAAAA"
                     android:textSize="12sp"
                     android:visibility="gone"/>
+            </LinearLayout>
+
+            <!--
+                Личные профили.
+
+                Переключателя «использовать свои профили» здесь больше нет:
+                однажды выпущенные личные профили используются в первую очередь
+                всегда, и выпускаются сами при первом подключении. Осталась
+                строка, которая это объясняет, состояние выпуска и обход узла.
+
+                Кнопки выпуска здесь тоже нет — она переехала в карточку выбора
+                протокола и переименовывается по состоянию («Сгенерировать» /
+                «Обновить»), как попросил владелец.
+
+                Собрана по тем же правилам, что и блок логирования: карточка вертикальная,
+                отступы 16dp по горизонтали и 8dp по вертикали, внутренние строки с
+                переключателем — минимальной высоты 48dp.
+            -->
+            <LinearLayout
+                android:id="@+id/row_warp_generate_block"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:background="@drawable/bg_settings_item"
+                android:backgroundTint="#20FFFFFF"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="Личные профили"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="Личные профили будут использоваться в первую очередь"
+                    android:textColor="#FFFFFF"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:id="@+id/tv_warp_generate_status"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:textColor="#7EEA87"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+
+                <!--
+                    Пояснения про личные профили здесь больше нет: владелец
+                    попросил убрать. Строки выше достаточно, а абзац серого текста
+                    на экране, где и без него плотно, читают единицы.
+                -->
+                <TextView
+                    android:id="@+id/tv_tor_bridges_status"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:textColor="#AAAAAA"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Обходить московский узел Cloudflare (DME)"
+                        android:textColor="#FFFFFF"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+
+                    <androidx.appcompat.widget.SwitchCompat
+                        android:id="@+id/sw_avoid_moscow_colo"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="4dp"
+                    android:text="Меняет узел Cloudflare. Страна выхода при этом тоже может смениться — но не обязана, решает Cloudflare. Каждое переключение — переподключение."
+                    android:textColor="#AAAAAA"
+                    android:textSize="12sp" />
             </LinearLayout>
 
             <LinearLayout
@@ -628,6 +756,208 @@
                     android:layout_height="wrap_content"
                     android:layout_marginStart="12dp"
                     android:text="›"
+                    android:textColor="#FFFFFF"
+                    android:textSize="24sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/row_notification_settings"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@drawable/bg_settings_item"
+                android:backgroundTint="#20FFFFFF"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="16dp"
+                android:clickable="true"
+                android:focusable="true">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Уведомление"
+                        android:textColor="#FFFFFF"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="Скорость и транспорт в шторке"
+                        android:textColor="#AAAAAA"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:text="›"
+                    android:textColor="#FFFFFF"
+                    android:textSize="24sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/row_domain_bypass"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@drawable/bg_settings_item"
+                android:backgroundTint="#20FFFFFF"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="16dp"
+                android:clickable="true"
+                android:focusable="true">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Обход по доменам"
+                        android:textColor="#FFFFFF"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/tv_domain_bypass_summary"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="Свои домены мимо туннеля"
+                        android:textColor="#AAAAAA"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:text="›"
+                    android:textColor="#FFFFFF"
+                    android:textSize="24sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/row_direct_flow"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@drawable/bg_settings_item"
+                android:backgroundTint="#20FFFFFF"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="16dp"
+                android:clickable="true"
+                android:focusable="true">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Прямой поток"
+                        android:textColor="#FFFFFF"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/tv_direct_flow_summary"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="Приложения всегда мимо туннеля"
+                        android:textColor="#AAAAAA"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:text="›"
+                    android:textColor="#FFFFFF"
+                    android:textSize="24sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/row_add_widget"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@drawable/bg_settings_item"
+                android:backgroundTint="#20FFFFFF"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="16dp"
+                android:clickable="true"
+                android:focusable="true">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Виджет на рабочий стол"
+                        android:textColor="#FFFFFF"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="Две кнопки: подключение и следующий профиль"
+                        android:textColor="#AAAAAA"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:text="+"
                     android:textColor="#FFFFFF"
                     android:textSize="24sp"
                     android:textStyle="bold" />
@@ -991,6 +1321,27 @@
                 android:layout_marginTop="4dp"
                 android:layout_marginBottom="8dp"
                 android:inputType="text"/>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="4dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Системные приложения"
+                    android:textColor="#FFFFFF"
+                    android:textSize="14sp" />
+
+                <Switch
+                    android:id="@+id/sw_show_system_apps"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
 
             <androidx.recyclerview.widget.RecyclerView
                 android:id="@+id/rv_apps"

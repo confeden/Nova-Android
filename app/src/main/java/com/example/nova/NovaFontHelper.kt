@@ -37,6 +37,10 @@ object NovaFontHelper {
         R.id.tv_exit_last,
         R.id.tv_warp_configs_note,
         R.id.tv_split_section_title,
+        R.id.tv_next_profile_caption,
+        R.id.tv_profile_issue_progress,
+        R.id.tv_exit_sub_region_label,
+        R.id.tv_tor_bridges_status,
     )
 
     fun apply(root: View) {

@@ -26,16 +26,19 @@ class BackgroundSettingsActivity : AppCompatActivity() {
         if (!animationSupported) {
             rbAnimation.isEnabled = false
             rbAnimation.alpha = 0.45f
-            tvHint.text = "Анимация недоступна на этом устройстве. Используется изображение."
+            tvHint.text = "Анимация недоступна на этом устройстве. По умолчанию фона нет; изображение можно выбрать вручную."
+            // Замена — пустой фон, а не картинка: на слабом устройстве
+            // полноэкранный растр стоит дороже пустоты, а выбрать его по-прежнему
+            // можно третьим пунктом.
             if (clientData.getMainBackgroundMode() == MainBackgroundPolicy.MODE_ANIMATION) {
-                clientData.setMainBackgroundMode(MainBackgroundPolicy.MODE_IMAGE)
+                clientData.setMainBackgroundMode(MainBackgroundPolicy.MODE_NONE)
             }
         }
 
         when (clientData.getMainBackgroundMode()) {
             MainBackgroundPolicy.MODE_IMAGE -> rgMode.check(R.id.rb_background_image)
             MainBackgroundPolicy.MODE_NONE -> rgMode.check(R.id.rb_background_none)
-            else -> rgMode.check(if (animationSupported) R.id.rb_background_animation else R.id.rb_background_image)
+            else -> rgMode.check(if (animationSupported) R.id.rb_background_animation else R.id.rb_background_none)
         }
 
         rgMode.setOnCheckedChangeListener { _, checkedId ->
@@ -45,7 +48,7 @@ class BackgroundSettingsActivity : AppCompatActivity() {
                 else -> MainBackgroundPolicy.MODE_ANIMATION
             }
             if (mode == MainBackgroundPolicy.MODE_ANIMATION && !animationSupported) {
-                rgMode.check(R.id.rb_background_image)
+                rgMode.check(R.id.rb_background_none)
                 return@setOnCheckedChangeListener
             }
             clientData.setMainBackgroundMode(mode)

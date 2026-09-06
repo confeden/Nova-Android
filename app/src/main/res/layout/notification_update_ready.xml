@@ -1,14 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Уведомление «обновление готово».
+
+    Отдельной кнопки «Обновить» здесь больше нет. Она была нарисована системным
+    `btn_default_small` — светло-серым прямоугольником из времён Android 4, — и
+    рядом с современными уведомлениями читалась как чужая. Нажатие теперь живёт на
+    всей карточке: действие ровно одно, и разделять его с фоном не на что.
+-->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/notification_root"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:orientation="horizontal"
+    android:background="@drawable/bg_notification_update"
     android:gravity="center_vertical"
-    android:paddingStart="12dp"
-    android:paddingTop="10dp"
-    android:paddingEnd="12dp"
-    android:paddingBottom="10dp">
+    android:orientation="horizontal"
+    android:paddingStart="14dp"
+    android:paddingTop="12dp"
+    android:paddingEnd="14dp"
+    android:paddingBottom="12dp">
 
     <LinearLayout
         android:layout_width="0dp"
@@ -20,7 +29,8 @@
             android:id="@+id/tv_update_title"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="#FFFFFF"
+            android:letterSpacing="0.01"
+            android:textColor="#FFFFFFFF"
             android:textSize="15sp"
             android:textStyle="bold" />
 
@@ -28,22 +38,22 @@
             android:id="@+id/tv_update_subtitle"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
-            android:textColor="#D9FFFFFF"
+            android:layout_marginTop="3dp"
+            android:textColor="#CCE6FFF0"
             android:textSize="12sp" />
     </LinearLayout>
 
+    <!--
+        Шеврон вместо кнопки: он показывает, что карточка ведёт дальше, но не
+        притворяется вторым, отдельным действием.
+    -->
     <TextView
-        android:id="@+id/btn_update_install"
+        android:id="@+id/tv_update_chevron"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:background="@android:drawable/btn_default_small"
-        android:paddingStart="12dp"
-        android:paddingTop="6dp"
-        android:paddingEnd="12dp"
-        android:paddingBottom="6dp"
-        android:text="Обновить"
-        android:textColor="#111111"
-        android:textSize="13sp"
+        android:layout_marginStart="10dp"
+        android:text="›"
+        android:textColor="#FF8CF0B8"
+        android:textSize="26sp"
         android:textStyle="bold" />
 </LinearLayout>

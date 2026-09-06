@@ -116,10 +116,14 @@ func protectRawConn(rawConn syscall.RawConn) error {
 	return protectErr
 }
 
-func dohClientFor(upstream *dohUpstream, timeout time.Duration) *http.Client {
+// Клиент кэшируется по паре «апстрим + путь», а не по одному апстриму: при
+// `via=auto` один и тот же URL опрашивается и мимо туннеля, и через него, и
+// общий keep-alive означал бы, что второй путь измеряет соединение первого.
+func dohClientFor(upstream *dohUpstream, route dnsUpstreamRoute, timeout time.Duration) *http.Client {
+	key := routeKey(upstream.raw, route)
 	dohClientsMu.Lock()
 	defer dohClientsMu.Unlock()
-	if client, ok := dohClients[upstream.raw]; ok {
+	if client, ok := dohClients[key]; ok {
 		return client
 	}
 
@@ -127,6 +131,12 @@ func dohClientFor(upstream *dohUpstream, timeout time.Duration) *http.Client {
 		Timeout:   timeout,
 		KeepAlive: 30 * time.Second,
 		Control: func(_ string, _ string, rawConn syscall.RawConn) error {
+			// Через туннель — намеренно без `protect()`: именно отсутствие метки
+			// и отправляет пакет в TUN. Зацикливания тут быть не может, перехват
+			// смотрит только на UDP/53.
+			if route == dnsRouteTunnel {
+				return nil
+			}
 			return protectRawConn(rawConn)
 		},
 	}
@@ -169,7 +179,7 @@ func dohClientFor(upstream *dohUpstream, timeout time.Duration) *http.Client {
 		IdleConnTimeout:       90 * time.Second,
 	}
 	client := &http.Client{Transport: transport}
-	dohClients[upstream.raw] = client
+	dohClients[key] = client
 	return client
 }
 
@@ -197,7 +207,7 @@ func resetDohClients() {
 // Идентификатор транзакции обнуляется на время запроса (так требует §4.1: он
 // мешает кэшированию) и восстанавливается в ответе, иначе вызывающая сторона
 // сочтёт ответ чужим.
-func resolveDNSViaDoh(query []byte, upstream *dohUpstream, timeout time.Duration) ([]byte, error) {
+func resolveDNSViaDoh(query []byte, upstream *dohUpstream, route dnsUpstreamRoute, timeout time.Duration) ([]byte, error) {
 	if len(query) < 12 {
 		return nil, errors.New("dns payload too short")
 	}
@@ -216,7 +226,7 @@ func resolveDNSViaDoh(query []byte, upstream *dohUpstream, timeout time.Duration
 	request.Header.Set("Accept", "application/dns-message")
 	request.ContentLength = int64(len(body))
 
-	response, err := dohClientFor(upstream, timeout).Do(request)
+	response, err := dohClientFor(upstream, route, timeout).Do(request)
 	if err != nil {
 		return nil, err
 	}

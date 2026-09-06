@@ -150,6 +150,27 @@
             android:theme="@style/Theme.Nova.Settings" />
 
         <activity
+            android:name=".NotificationSettingsActivity"
+            android:exported="false"
+            android:label="Уведомление"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.Nova.Settings" />
+
+        <activity
+            android:name=".DomainBypassActivity"
+            android:exported="false"
+            android:label="Обход по доменам"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.Nova.Settings" />
+
+        <activity
+            android:name=".DirectFlowActivity"
+            android:exported="false"
+            android:label="Прямой поток"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.Nova.Settings" />
+
+        <activity
             android:name=".LogsActivity"
             android:label="Логи"
             android:launchMode="singleTop"
@@ -201,6 +222,24 @@
             <intent-filter>
                 <action android:name="android.intent.action.DOWNLOAD_COMPLETE" />
             </intent-filter>
+        </receiver>
+
+        <!--
+            Виджет рабочего стола. `exported="true"` обязателен: нажатия приходят
+            от лаунчера, то есть из чужого процесса. Собственные действия виджета
+            адресованы по классу, поэтому чужое приложение их подделать не может,
+            а `VPN_STATE` уходит с `setPackage` — снаружи в этот фильтр не попасть.
+        -->
+        <receiver
+            android:name=".NovaWidgetProvider"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="com.example.nova.VPN_STATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_nova_info" />
         </receiver>
 
         <receiver

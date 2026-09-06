@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Рамка виджета: градиентная обводка, прозрачное тело.
+
+    Почему `vector`, а не `shape`. У `shape` обводка задаётся одним цветом —
+    градиентной она быть не умеет, — а трюк «слоями» (снизу градиентная заливка,
+    сверху та же фигура фоном) требует, чтобы верхний слой был **непрозрачным**:
+    прозрачным поверх ничего не стирается. Тело же должно остаться прозрачным,
+    чтобы сквозь виджет были видны обои. Остаётся `vector`: у него обводка может
+    быть градиентом (с Android 7, у нас minSdk 24), а заливки просто нет.
+
+    Углы при растягивании по ширине немного вытягиваются — виджет объявлен
+    горизонтально изменяемым. Это цена одного файла вместо девяти-патча, который
+    градиент всё равно бы не удержал.
+
+    Цвета названы владельцем: сапфир → бирюза → сирень → аметист, по диагонали.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="160dp"
+    android:height="90dp"
+    android:viewportWidth="160"
+    android:viewportHeight="90">
+
+    <path
+        android:pathData="M23,1.5 H137 A21.5,21.5 0 0 1 158.5,23 V67 A21.5,21.5 0 0 1 137,88.5 H23 A21.5,21.5 0 0 1 1.5,67 V23 A21.5,21.5 0 0 1 23,1.5 Z"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:type="linear"
+                android:startX="0"
+                android:startY="0"
+                android:endX="160"
+                android:endY="90">
+                <item android:offset="0.0" android:color="#FF0F52BA" />
+                <item android:offset="0.33" android:color="#FF40E0D0" />
+                <item android:offset="0.68" android:color="#FFC8A2C8" />
+                <item android:offset="1.0" android:color="#FF9966CC" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

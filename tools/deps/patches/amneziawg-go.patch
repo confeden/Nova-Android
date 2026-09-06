@@ -1,63 +1,13 @@
-diff --git a/device/receive.go b/device/receive.go
-index b3b6105..d7f5676 100644
---- a/device/receive.go
-+++ b/device/receive.go
-@@ -481,7 +481,7 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
- 			}
- 			rxBytesLen += uint64(len(elem.packet) + MinMessageSize)
- 
--			if len(elem.packet) == 0 {
-+			if len(elem.packet) == 0 || elem.packet[0] == 0 {
- 				device.log.Verbosef("%v - Receiving keepalive packet", peer)
- 				continue
- 			}
-diff --git a/device/send.go b/device/send.go
-index 5e5cc1b..39ca153 100644
---- a/device/send.go
-+++ b/device/send.go
-@@ -48,11 +48,12 @@ import (
-  */
- 
- type QueueOutboundElement struct {
--	buffer  *[MaxMessageSize]byte // slice holding the packet data
--	packet  []byte                // slice of "buffer" (always!)
--	nonce   uint64                // nonce for encryption
--	keypair *Keypair              // keypair for encryption
--	peer    *Peer                 // related peer
-+	buffer      *[MaxMessageSize]byte // slice holding the packet data
-+	packet      []byte                // slice of "buffer" (always!)
-+	nonce       uint64                // nonce for encryption
-+	keypair     *Keypair              // keypair for encryption
-+	peer        *Peer                 // related peer
-+	isKeepalive bool
- }
- 
- type QueueOutboundElementsContainer struct {
-@@ -64,6 +65,7 @@ func (device *Device) NewOutboundElement() *QueueOutboundElement {
- 	elem := device.GetOutboundElement()
- 	elem.buffer = device.GetMessageBuffer()
- 	elem.nonce = 0
-+	elem.isKeepalive = false
- 	// keypair and peer were cleared (if necessary) by clearPointers.
- 	return elem
- }
-@@ -84,6 +86,7 @@ func (elem *QueueOutboundElement) clearPointers() {
- func (peer *Peer) SendKeepalive() {
- 	if len(peer.queue.staged) == 0 && peer.isRunning.Load() {
- 		elem := peer.device.NewOutboundElement()
-+		elem.isKeepalive = true
- 		elemsContainer := peer.device.GetOutboundElementsContainer()
- 		elemsContainer.elems = append(elemsContainer.elems, elem)
- 		select {
-@@ -572,7 +575,7 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
- 		dataSent := false
- 		elemsContainer.Lock()
- 		for _, elem := range elemsContainer.elems {
--			if len(elem.packet) != MessageKeepaliveSize {
-+			if !elem.isKeepalive {
- 				dataSent = true
- 
- 				if padding := device.paddings.transport; padding > 0 {
+# Единственная наша правка поверх amneziawg-go 3.1.
+#
+# Двух прежних хунков здесь больше нет: upstream сам научился отличать keepalive
+# при включённой добивке (`elem.packet[0] == 0` в receive.go и явный флаг
+# `isKeepalive` в send.go) — раньше это делали мы, потому что размер пакета с
+# добивкой перестаёт совпадать с `MessageKeepaliveSize`.
+#
+# Осталось только `EnsureLocalAddress`: netstack upstream принимает локальные
+# адреса единственный раз, при создании NIC, а прозрачный транспорт Telegram
+# добавляет их по ходу работы.
 diff --git a/tun/netstack/tun.go b/tun/netstack/tun.go
 index 48a428b..953daf5 100644
 --- a/tun/netstack/tun.go

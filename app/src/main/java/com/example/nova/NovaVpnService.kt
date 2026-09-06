@@ -32,6 +32,7 @@ import java.net.Proxy
 import java.net.Socket
 import java.net.URL
 import java.util.ArrayDeque
+import android.net.TrafficStats
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
@@ -47,6 +48,9 @@ class NovaVpnService : OperaNativeVpnService() {
     private var interfaceDescriptor: ParcelFileDescriptor? = null
     private val CHANNEL_ID = "NovaVpnChannel"
     private val NOTIFICATION_ID = 1
+
+    /** Как часто пересчитывать скорость в уведомлении. */
+    private val NOTIFICATION_DETAILS_INTERVAL_MS = 2_000L
     @Volatile
     private var masqueAuthFailureObserved = false
 
@@ -110,6 +114,9 @@ class NovaVpnService : OperaNativeVpnService() {
      * каждое подключение висело бы по своему спящему потоку.
      */
     private val protonBackfillPending = AtomicBoolean(false)
+
+    /** Тот же однопоточный заслон для автоматического выпуска личных профилей. */
+    private val generatedWarpBackfillPending = AtomicBoolean(false)
     private val stoppedStateStaleDetachInProgress = AtomicBoolean(false)
     @Volatile
     private var lastStoppedStateStaleDetachAtMs = 0L
@@ -291,6 +298,23 @@ class NovaVpnService : OperaNativeVpnService() {
     @Volatile
     private var activeDnsInterceptServers: List<String> = emptyList()
 
+    /**
+     * Включён ли перехват DNS в ядре — отдельным флагом, а не по пустоте
+     * [activeDnsInterceptServers].
+     *
+     * Ветка targeted-media включает перехват и выходит, не трогая список: по нему
+     * перехват выглядел бы выключенным. Флагу это важно, потому что обход по
+     * зонам учит адреса **только** из перехваченных ответов — без перехвата зоны
+     * не заработают вовсе, и сказать об этом надо вслух, а не оставить нули в
+     * счётчиках.
+     */
+    @Volatile
+    private var coreDnsInterceptEnabled = false
+
+    /** Последняя опубликованная строка счётчиков обхода — чтобы не писать файл впустую. */
+    @Volatile
+    private var lastPublishedDomainBypassStats: String? = null
+
     /** DNS из импортированного профиля текущей сессии, для пересмотра порядка на лету. */
     @Volatile
     private var lastImportedProfileDnsServers: List<String> = emptyList()
@@ -346,11 +370,27 @@ class NovaVpnService : OperaNativeVpnService() {
             try {
                 sampleTunnelHealth()
                 reconcileSystemVpnConsistency()
+                // Счётчики обхода растут по ходу сеанса, а экран живёт в другом
+                // процессе и спросить ядро не может. Свой тик заводить незачем —
+                // этот и так будит процесс, а запись идёт только на изменение.
+                runCatching { publishDomainBypassStats(ClientData(this@NovaVpnService)) }
             } finally {
                 vpnConsistencyHandler.postDelayed(this, nextVpnConsistencyIntervalMs())
             }
         }
     }
+    private val notificationDetailsHandler = Handler(Looper.getMainLooper())
+    private var notificationSpeedLabel = ""
+    private var lastNotificationRxBytes = -1L
+    private var lastNotificationTxBytes = -1L
+    private var lastNotificationSampleAtMs = 0L
+    private val notificationDetailsRunnable = object : Runnable {
+        override fun run() {
+            refreshNotificationDetails()
+            notificationDetailsHandler.postDelayed(this, NOTIFICATION_DETAILS_INTERVAL_MS)
+        }
+    }
+    private val profileIssueSequenceRunning = AtomicBoolean(false)
     private val tunnelStallDetector = TunnelStallDetector()
     private val liveNodeRotation = LiveNodeRotation()
 
@@ -553,7 +593,13 @@ class NovaVpnService : OperaNativeVpnService() {
         val addresses: List<ImportedInterfaceAddress> = emptyList(),
         val peerPublicKey: String? = null,
         val peerPresharedKey: String? = null,
-        val peerPersistentKeepalive: Int? = null,
+        /**
+         * Сырым текстом, а не числом: профили AmneziaWG 3.x пишут сюда диапазон
+         * (`25-35`), из которого ядро само выбирает значение на сессию. Число
+         * `toIntOrNull` на таком тексте даёт `null`, и диапазон молча
+         * подменялся умолчанием.
+         */
+        val peerPersistentKeepalive: String? = null,
         val peerAdvancedSecurity: String? = null,
     )
 
@@ -660,6 +706,49 @@ class NovaVpnService : OperaNativeVpnService() {
          */
         private const val PRIVATE_DNS_RESOLVE_TIMEOUT_MS = 1_500L
 
+        /**
+         * Сколько доменов «обхода по доменам» вообще доходит до маршрутов.
+         *
+         * Каждое имя — это отдельный резолв мимо туннеля внутри подъёма TUN, то есть
+         * прямая плата временем за настройку, которую человек не видит. Тридцать два
+         * имени укладываются в бюджет ниже даже когда половина из них не отвечает.
+         * Всё, что сверх, отбрасывается — и об этом обязательно пишется в журнал:
+         * молчаливое обрезание читается как «покрыто всё», хотя покрыта только часть.
+         */
+        private const val DOMAIN_BYPASS_MAX_DOMAINS = 32
+
+        /** Сколько адресов берём с одного имени: у CDN их бывает десяток. */
+        private const val DOMAIN_BYPASS_MAX_ADDRESSES_PER_DOMAIN = 2
+
+        /** Общий потолок адресов: каждый из них становится вырезом маршрута. */
+        private const val DOMAIN_BYPASS_MAX_ADDRESSES = 48
+
+        /** Предел на один резолв. Больше — имя считаем мёртвым и идём дальше. */
+        private const val DOMAIN_BYPASS_RESOLVE_TIMEOUT_MS = 2_500L
+
+        /**
+         * Общий бюджет на весь список.
+         *
+         * Резолв идёт внутри создания TUN-интерфейса, поэтому потолок нужен именно
+         * суммарный: тридцать два мёртвых имени по 2,5 с последовательно съели бы
+         * больше минуты и попытка подключения не началась бы вовсе (тот же отказ,
+         * что уже ловили на Private DNS).
+         */
+        private const val DOMAIN_BYPASS_RESOLVE_BUDGET_MS = 6_000L
+
+        /** Сколько резолвов идёт одновременно. */
+        private const val DOMAIN_BYPASS_RESOLVE_PARALLELISM = 4
+
+        /**
+         * Насколько живёт разобранный список адресов.
+         *
+         * За один сеанс `establish()` зовут не раз (реаплай, смена сети, восстановление),
+         * и повторять весь резолв каждый раз — значит платить секундами за неизменившийся
+         * ответ. Ключ кэша включает сырую настройку и подложную сеть, так что правка на
+         * экране и переход Wi-Fi → LTE его сбрасывают сами.
+         */
+        private const val DOMAIN_BYPASS_CACHE_TTL_MS = 10 * 60_000L
+
         const val ACTION_VPN_STATE = "com.example.nova.VPN_STATE"
 
         /**
@@ -673,6 +762,20 @@ class NovaVpnService : OperaNativeVpnService() {
         const val ACTION_CONNECT_SMART = "CONNECT_SMART"
         const val ACTION_RESTORE_LAST_SESSION = "RESTORE_LAST_SESSION"
         const val ACTION_REAPPLY_CURRENT_SESSION = "REAPPLY_CURRENT_SESSION"
+
+        /**
+         * Правка обхода по доменам на ходу — без пересборки туннеля.
+         *
+         * Отдельное действие, а не [ACTION_REAPPLY_CURRENT_SESSION], потому что
+         * реаплай — это полное переподключение: он рвёт все соединения и на Opera
+         * вообще идёт через `stop-then-start`. Платить этим за снятую галочку
+         * `.su` нельзя.
+         *
+         * Здесь тратится ровно один вызов в ядро: правила живут под мьютексом и
+         * перечитываются на каждом DNS-ответе, поэтому новый набор начинает
+         * действовать сразу, а маршруты и сокеты остаются на месте.
+         */
+        const val ACTION_APPLY_DOMAIN_BYPASS = "APPLY_DOMAIN_BYPASS"
 
         /**
          * Переключение профиля VLESS на ходу, без пересборки сессии.
@@ -773,6 +876,20 @@ class NovaVpnService : OperaNativeVpnService() {
         const val ACTION_PROBE_PROTON_PROFILES = "PROBE_PROTON_PROFILES"
 
         /**
+         * Выпуск собственных профилей WARP: регистрация личности плюс сканирование
+         * точек входа.
+         *
+         * В службе, а не на экране, по той же причине, что и замер Proton: сканер
+         * открывает сотни UDP-сокетов и обязан помечать их `protect()`, а
+         * `GlobalProtector` ставит именно служба. В процессе интерфейса ядро —
+         * другой экземпляр, и там сокеты ушли бы в проверяемый туннель.
+         */
+        const val ACTION_GENERATE_WARP_PROFILES = "GENERATE_WARP_PROFILES"
+
+        /** Перевыпустить личность, а не переиспользовать сохранённую. */
+        const val EXTRA_WARP_GENERATE_FORCE = "warp_generate_force"
+
+        /**
          * Контрольный замер отдельно от прогона Proton.
          *
          * Нужен потому, что внутри прогона он неизбежно идёт **при поднятом
@@ -815,6 +932,16 @@ class NovaVpnService : OperaNativeVpnService() {
         const val ACTION_SYNC_LOCAL_PROXY = "SYNC_LOCAL_PROXY"
         const val ACTION_BACKGROUND_HEARTBEAT = "BACKGROUND_HEARTBEAT"
         const val ACTION_WARP_CONFIG_DISCOVERY = "com.example.nova.WARP_CONFIG_DISCOVERY"
+        /**
+         * Подробности в уведомлении — тоже extras, а не одни настройки.
+         *
+         * `notification_details_enabled` читает процесс `:vpn`, а пишет его
+         * экран настроек. Кэш `SharedPreferences` живёт на процесс (I2), и без
+         * этого поля переключатель сохранялся, предпросмотр на экране менялся, а
+         * в шторке всё оставалось как было — вместе с тиком пересчёта скорости,
+         * который будит телефон раз в две секунды (I19).
+         */
+        const val EXTRA_NOTIFICATION_DETAILS_ENABLED = "notification_details_enabled"
         const val EXTRA_FORCE_HEALTH_RECHECK_REASON = "force_health_recheck_reason"
         const val EXTRA_IGNORE_AUTO_RECONNECT_ON_RESTORE = "ignore_auto_reconnect_on_restore"
         const val EXTRA_FORCE_RESTART_ON_RESTORE = "force_restart_on_restore"
@@ -823,6 +950,19 @@ class NovaVpnService : OperaNativeVpnService() {
         const val EXTRA_IMPORTED_PROTOCOL_PREFERENCE = "imported_protocol_preference"
         const val EXTRA_REAPPLY_SPLIT_MODE = "reapply_split_mode"
         const val EXTRA_REAPPLY_SPLIT_APPS = "reapply_split_apps"
+
+        /**
+         * «Прямой поток» — тоже через extras, а не через одни настройки.
+         *
+         * Служба живёт в процессе `:vpn`, а `SharedPreferences` кэшируются в
+         * каждом процессе отдельно: запись из процесса интерфейса живой службе
+         * не видна. Настройка, которую человек включил на экране, тогда честно
+         * писалась бы в журнал и не делала ничего — тот самый дефект, что уже
+         * ловили на раздельном туннелировании и на маскировке.
+         */
+        const val EXTRA_REAPPLY_DIRECT_APPS = "reapply_direct_apps"
+        const val EXTRA_REAPPLY_DIRECT_EXCLUDED = "reapply_direct_excluded"
+        const val EXTRA_REAPPLY_RUSSIAN_DIRECT_ENABLED = "reapply_russian_direct_enabled"
         const val EXTRA_REAPPLY_TRAFFIC_MASK_ENABLED = "reapply_traffic_mask_enabled"
         const val EXTRA_REAPPLY_TRAFFIC_MASK_MODE = "reapply_traffic_mask_mode"
         const val EXTRA_REAPPLY_TRAFFIC_MASK_HOST = "reapply_traffic_mask_host"
@@ -836,6 +976,19 @@ class NovaVpnService : OperaNativeVpnService() {
          */
         const val EXTRA_REAPPLY_SNI_MASK_MODE = "reapply_sni_mask_mode"
         const val EXTRA_REAPPLY_SNI_MASK_LIST = "reapply_sni_mask_list"
+
+        /**
+         * «Обход по доменам» едет в службу тем же путём и по той же причине.
+         *
+         * Экран пишет настройки в `SharedPreferences` процесса интерфейса, а туннель
+         * собирает процесс `:vpn` со своей копией кэша — записанное там просто не
+         * видно. Без этих extras экран сохранял бы список, печатал бы его в журнал и
+         * не делал ничего: ровно тот дефект, что уже разбирали на раздельном
+         * туннелировании, «прямом потоке» и маскировке.
+         */
+        const val EXTRA_REAPPLY_DOMAIN_BYPASS_ENABLED = "reapply_domain_bypass_enabled"
+        const val EXTRA_REAPPLY_DOMAIN_BYPASS_ZONES = "reapply_domain_bypass_zones"
+        const val EXTRA_REAPPLY_DOMAIN_BYPASS_CUSTOM = "reapply_domain_bypass_custom"
         const val STATE_CONNECTING = "CONNECTING"
         const val STATE_CONNECTED = "CONNECTED"
         const val STATE_STOPPED = "STOPPED"
@@ -933,6 +1086,24 @@ class NovaVpnService : OperaNativeVpnService() {
         /** Пауза после подключения перед фоновой подготовкой Proton. */
         private const val PROTON_BACKFILL_SETTLE_MS = 30_000L
 
+
+        /**
+         * Число или диапазон `лоу-хай`.
+         *
+         * Одного совпадения по форме мало: `35-25` тоже подходит под неё, а ядро
+         * на перевёрнутом диапазоне отвергает **весь** профиль
+         * (`wrong range specified` из `UintRange.FromString`). Границы проверяет
+         * [normalizeKeepaliveValue].
+         */
+        private val KEEPALIVE_VALUE = Regex("""^\d{1,5}(-\d{1,5})?$""")
+
+        /** Пауза между шагами выпуска профилей. Срок назван владельцем. */
+        private const val PROFILE_ISSUE_STEP_MS = 30_000L
+
+        /** По этой приставке узнаём свою же надпись под статусом и не трём чужую. */
+        private const val PROFILE_ISSUE_NOTICE_PREFIX = "Выпуск профилей"
+
+
         /**
          * Пауза после неудачной фоновой подготовки Proton.
          *
@@ -941,6 +1112,86 @@ class NovaVpnService : OperaNativeVpnService() {
          * не просил. Следующее подключение всё равно зайдёт сюда снова.
          */
         private const val PROTON_BACKFILL_RETRY_MS = 15L * 60L * 1000L
+
+        /**
+         * Перерыв после неудачного автоматического выпуска личных профилей.
+         *
+         * Час, а не пятнадцать минут: у прогона цена выше (регистрация плюс до
+         * 45 с сканирования сотнями сокетов), и сеть, где он не проходит, не
+         * должна платить её при каждом подключении.
+         */
+        private const val GENERATED_WARP_BACKFILL_RETRY_MS = 60L * 60L * 1000L
+
+        /**
+         * Сколько личных профилей ведут очередь впереди прошивочных семян.
+         *
+         * Двенадцать: при цене попытки ~7,5 с это чуть больше полутора минут в
+         * худшем случае — когда весь набор мёртв на этой сети. Пятьдесят стоили бы
+         * шести минут до первого рабочего семени, и это измерено на устройстве, а
+         * не прикинуто.
+         */
+        private const val GENERATED_LEAD_LIMIT = 12
+
+        /**
+         * Когда личный набор пора выпустить заново.
+         *
+         * Две недели: точки входа искал сканер на той сети, где пользователь был
+         * в день выпуска, и на новой сети половина из них может быть отфильтрована
+         * навсегда. Без срока `alreadyIssued` оставался бы истинным до конца жизни
+         * установки, и единственным выходом была бы ручная кнопка.
+         */
+        private const val GENERATED_WARP_REISSUE_AFTER_MS = 14L * 24L * 60L * 60L * 1000L
+
+        /**
+         * Сколько ждать TCP-соединения при выборе DoH/DoT.
+         *
+         * Полторы секунды: замер идёт в подъёме туннеля, а туда нельзя ставить
+         * ничего, что способно висеть, — та же цена, из-за которой резолв имени
+         * получил жёсткий предел (kb/dns-routing.md).
+         */
+        private const val DNS_TRANSPORT_PROBE_TIMEOUT_MS = 1_500
+
+        /**
+         * Длина цикла перебора имён SNI для одного узла.
+         *
+         * Шестнадцать, а не шесть: отобранный набор (`proven_ru.sni` +
+         * `proven_global.sni`) стоит в голове очереди и один длиннее шести, так что
+         * при прежнем цикле часть его была недостижима в принципе. Не 64 (вся
+         * длина очереди) потому, что счётчик живёт в памяти службы и умирает
+         * вместе с ней: полный обход всё равно не успевает случиться, а хвост
+         * очереди — это уже случайные имена из большого списка.
+         */
+        private const val MASQUE_SNI_ATTEMPT_CYCLE = 16
+
+        /**
+         * Источники точек входа, которым цикл подключения доверяет.
+         *
+         * Доверие здесь измеримое: такой попытке дают больше времени на
+         * рукопожатие и больше бюджета на пробу, потому что адрес уже приводил к
+         * рабочему туннелю. Перечисление было выписано по месту четырьмя копиями,
+         * и личные профили Cloudflare (`warp-generated`) не попали ни в одну: они
+         * возглавили очередь и одновременно получили самый короткий срок —
+         * 2750 мс против 3900 у встроенного семени на том же порту и той же сети.
+         * То есть профили, которые должны выигрывать, бросали раньше всех.
+         *
+         * `warp-generated` заслуживает того же доверия по построению: адрес нашёл
+         * сканер **настоящим рукопожатием WireGuard** с ключом этого устройства,
+         * а не TCP-проверкой «кто-то слушает».
+         */
+        private val TRUSTED_ENDPOINT_SOURCES: Set<String> = setOf(
+            "last-success-exact",
+            "last-success",
+            "verified-config",
+            "bundled-seed",
+            WarpGeneratedStore.ENDPOINT_SOURCE,
+        )
+
+        fun isTrustedEndpointSource(source: String): Boolean =
+            source.trim().lowercase(Locale.US) in TRUSTED_ENDPOINT_SOURCES
+
+        /** Имя и путь [ExitAddress] — для путей, которые собирают запрос руками. */
+        private const val EXIT_ADDRESS_HOST = "whatismyip.help"
+        private const val EXIT_ADDRESS_PATH = "/txt"
 
         /**
          * Общий бюджет поиска живого узла, пока туннеля ещё нет.
@@ -1068,6 +1319,15 @@ class NovaVpnService : OperaNativeVpnService() {
         /** Хватает на первый выстрел и три повтора по 700 мс. */
         private const val PROTON_PROBE_TIMEOUT_MS = 3_500
 
+        /**
+         * Срок запасного TCP-замера ([ProtonLatency]).
+         *
+         * Короче срока рукопожатия намеренно: оба замера идут **одновременно** на
+         * одного кандидата, и запасной обязан уложиться внутрь основного, иначе он
+         * добавит времени прогону вместо того, чтобы спрятаться в нём.
+         */
+        private const val PROTON_PROBE_TCP_TIMEOUT_MS = 3_000
+
         /** Режим сети меняется вместе с сетью, а не по часам; таймер тут — страховка. */
         private const val WHITELIST_REGIME_CACHE_MS = 5L * 60L * 1000L
         private const val BACKGROUND_HEARTBEAT_REQUEST_CODE = 4515
@@ -1154,6 +1414,7 @@ class NovaVpnService : OperaNativeVpnService() {
     override fun onCreate() {
         super.onCreate()
         LogManager.setAppContext(this)
+        NovaRelay.attach(this)
         // Служба умеет стартовать без экрана — по автозапуску или из плитки, — поэтому
         // сброс после обновления проверяется и здесь. Отметка версии лежит в файле,
         // так что второй процесс её увидит и повторять сброс не станет.
@@ -1307,15 +1568,38 @@ class NovaVpnService : OperaNativeVpnService() {
 
         if (
             intent?.action != ACTION_REAPPLY_CURRENT_SESSION &&
-            intent?.action != ACTION_STOP_FOR_SOFT_RESTART
+            intent?.action != ACTION_STOP_FOR_SOFT_RESTART &&
+            // Правка обхода по доменам туннель не трогает и признак чужого
+            // мягкого реаплая снимать не вправе: сняв его, она сказала бы
+            // `hasStrongLocalEvidence`, что переподключения нет, — и идущий
+            // реаплай из другого экрана перестал бы считаться живым.
+            intent?.action != ACTION_APPLY_DOMAIN_BYPASS
         ) {
             clientData.clearSoftReapplyPending()
+        }
+
+        // Значение обязано лечь в настройки **до** первой отрисовки уведомления:
+        // ниже стоит startForeground(createNotification()), и он читает уже
+        // применённое значение.
+        if (intent?.action == ACTION_REFRESH_NOTIFICATION &&
+            intent.hasExtra(EXTRA_NOTIFICATION_DETAILS_ENABLED)
+        ) {
+            val details = intent.getBooleanExtra(EXTRA_NOTIFICATION_DETAILS_ENABLED, true)
+            if (details != clientData.isNotificationDetailsEnabled()) {
+                clientData.setNotificationDetailsEnabled(details)
+                LogManager.log(
+                    "Уведомление: подробности ${if (details) "включены" else "выключены"} из настроек."
+                )
+            }
         }
 
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification())
 
         if (intent?.action == ACTION_REFRESH_NOTIFICATION) {
+            // Подробности могли только что выключить или включить в настройках —
+            // вместе с ними заводится и останавливается тик пересчёта скорости.
+            syncNotificationDetailsTicker()
             return if (isRunning) START_STICKY else START_NOT_STICKY
         }
 
@@ -1350,8 +1634,83 @@ class NovaVpnService : OperaNativeVpnService() {
             return START_NOT_STICKY
         }
 
+        if (intent?.action == ACTION_GENERATE_WARP_PROFILES) {
+            // Та же уборка за собой, что и у замера Proton: выпуск обычно просят
+            // при снятом туннеле, а `startForeground` выше уже случился, и не
+            // погасить службу значит оставить вечное уведомление при выключенном
+            // VPN.
+            val wasIdle = !isRunning &&
+                currentState != STATE_CONNECTED &&
+                currentState != STATE_CONNECTING
+            val force = intent.getBooleanExtra(EXTRA_WARP_GENERATE_FORCE, false)
+            startSafeServiceThread("NovaWarpGenerate") {
+                var startedHere = false
+                try {
+                    startedHere = WarpProfileGenerator.run(
+                        context = applicationContext,
+                        force = force,
+                        register = { onProgress ->
+                            WarpClient(
+                                applicationContext,
+                                LogManager::log,
+                                shouldAbort = { isUserStopped },
+                            ).register(onProgress = onProgress)
+                        },
+                    )
+                } finally {
+                    // Гасим службу только если прогон завели мы. Иначе второй
+                    // интент остановил бы её посреди сорокапятисекундного
+                    // сканирования, начатого первым.
+                    if (wasIdle && startedHere) {
+                        Handler(Looper.getMainLooper()).post {
+                            if (isRunning || currentState == STATE_CONNECTED || currentState == STATE_CONNECTING) {
+                                return@post
+                            }
+                            LogManager.log("WARP-генератор: выпуск закончен, VPN не активен — останавливаем службу.")
+                            finishForegroundShutdown()
+                            stopSelfResult(startId)
+                        }
+                    }
+                }
+            }
+            return START_NOT_STICKY
+        }
+
         if (intent?.action == ACTION_PROBE_PROTON_PROFILES) {
-            probeProtonProfilesFromServiceProcess()
+            // Замер обычно просят при снятом туннеле — на чистой установке он вообще
+            // предшествует первому подключению, — а `startForeground` выше уже
+            // случился. Ветка была единственной из трёх, которая за собой не
+            // убирала: соседние (`SYNC_LOCAL_PROXY`, `PROBE_CONTROL_HANDSHAKE`)
+            // гасят службу, а эта оставляла процесс `:vpn` на переднем плане с
+            // вечным уведомлением при выключенном VPN. Сторож его тоже не снимал —
+            // `reconcileSystemVpnConsistency` выходит сразу, когда состояние
+            // `STOPPED` и сети Nova нет.
+            val wasIdle = !isRunning &&
+                currentState != STATE_CONNECTED &&
+                currentState != STATE_CONNECTING
+            probeProtonProfilesFromServiceProcess {
+                if (wasIdle && !isRunning && currentState != STATE_CONNECTED && currentState != STATE_CONNECTING) {
+                    Handler(Looper.getMainLooper()).post {
+                        // Состояние перечитывается **на главном потоке, вплотную к
+                        // остановке**. Между решением и этим местом помещается
+                        // целая минута замера, а сразу после неё экран настроек
+                        // шлёт `ACTION_CONNECT_SMART` — проверка, сделанная
+                        // раньше, погасила бы службу поверх только что пришедшего
+                        // подключения.
+                        if (isRunning || currentState == STATE_CONNECTED || currentState == STATE_CONNECTING) {
+                            LogManager.log("Proton probe: замер снят, но подключение уже начато — службу не гасим.")
+                            return@post
+                        }
+                        LogManager.log("Proton probe: замер снят, VPN не активен — останавливаем службу.")
+                        finishForegroundShutdown()
+                        // `stopSelfResult`, а не `stopSelf`: если за время замера
+                        // пришёл ещё один старт, его id старше нашего и служба
+                        // останется жить, вместо того чтобы умереть вместе с
+                        // чужой работой.
+                        stopSelfResult(startId)
+                    }
+                }
+            }
             return START_NOT_STICKY
         }
 
@@ -1397,6 +1756,33 @@ class NovaVpnService : OperaNativeVpnService() {
             // выбираем сами: экран живёт в другом процессе и порядок списка видит свой.
             clientData.nextVlessProfileLink()?.let(clientData::setVlessConfigLink)
             return if (reapplyCurrentPreferences(intent)) START_STICKY else START_NOT_STICKY
+        }
+
+        // Строго до ветки реаплая: оба действия про «применить настройки», и
+        // порядок здесь — это цена ошибки. Попади правка обхода в реаплай, каждая
+        // снятая галочка стоила бы полного переподключения.
+        if (intent?.action == ACTION_APPLY_DOMAIN_BYPASS) {
+            // Настройки процесса `:vpn` своей копией не обновляются, поэтому
+            // значения приезжают extras и записываются здесь — тем же кодом, что
+            // и при реаплае, чтобы разойтись эти два пути не могли.
+            applyExplicitReapplyOverrides(intent, clientData)
+            applyCoreDomainBypassPolicy(clientData, currentBackendLabel)
+            // Экран шлёт это намерение, только увидев признаки живого сеанса, но
+            // признаки бывают несвежими. Поднявшись на пустом месте, служба уже
+            // ушла в foreground выше — оставить её так значило бы повесить
+            // уведомление о VPN, которого нет.
+            if (
+                !isRunning &&
+                currentState != STATE_CONNECTED &&
+                currentState != STATE_CONNECTING &&
+                !clientData.isLocalProxyEnabled()
+            ) {
+                LogManager.log("Обход по доменам применён к настройкам, но туннеля нет — службу не держим.")
+                finishForegroundShutdown()
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            return if (isRunning || currentState == STATE_CONNECTED) START_STICKY else START_NOT_STICKY
         }
 
         if (intent?.action == ACTION_REAPPLY_CURRENT_SESSION) {
@@ -1754,6 +2140,7 @@ class NovaVpnService : OperaNativeVpnService() {
             }
         }
         currentState = state
+        syncNotificationDetailsTicker()
         clientData.saveServiceState(
             state,
             currentBackendLabel,
@@ -1770,8 +2157,7 @@ class NovaVpnService : OperaNativeVpnService() {
         refreshConnectedScreenOffWakeLock()
         if (state == STATE_CONNECTED) {
             refreshConnectedExitObservationAsync()
-            scheduleWarpIdentityBackfill()
-            scheduleProtonProfileBackfill("подключение")
+            scheduleProfileIssueSequence("подключение")
         }
         syncLocalAppProxy(reason = "state-$state")
         val intent = Intent(ACTION_VPN_STATE).apply {
@@ -1824,6 +2210,7 @@ class NovaVpnService : OperaNativeVpnService() {
         if (currentState == STATE_CONNECTED) {
             scheduleWarpIdentityBackfill(urgent = false)
             scheduleProtonProfileBackfill("сердцебиение")
+            scheduleGeneratedWarpBackfill("сердцебиение")
         }
         if (isRunning || currentState == STATE_CONNECTED || currentState == STATE_CONNECTING) {
             val currentVpn = findCurrentVpnNetwork(connectivityManager)
@@ -3589,6 +3976,29 @@ class NovaVpnService : OperaNativeVpnService() {
             val splitApps = intent.getStringArrayListExtra(EXTRA_REAPPLY_SPLIT_APPS)?.toSet().orEmpty()
             clientData.setSplitApps(splitApps)
         }
+        var directOverridden = false
+        if (intent.hasExtra(EXTRA_REAPPLY_DIRECT_APPS)) {
+            val directApps = intent.getStringArrayListExtra(EXTRA_REAPPLY_DIRECT_APPS)?.toSet().orEmpty()
+            clientData.setDirectApps(directApps)
+            directOverridden = true
+        }
+        if (intent.hasExtra(EXTRA_REAPPLY_DIRECT_EXCLUDED)) {
+            val excluded = intent.getStringArrayListExtra(EXTRA_REAPPLY_DIRECT_EXCLUDED)?.toSet().orEmpty()
+            clientData.setDirectAppsExcluded(excluded)
+            directOverridden = true
+        }
+        if (intent.hasExtra(EXTRA_REAPPLY_RUSSIAN_DIRECT_ENABLED)) {
+            clientData.setRussianDirectAppsEnabled(
+                intent.getBooleanExtra(
+                    EXTRA_REAPPLY_RUSSIAN_DIRECT_ENABLED,
+                    clientData.isRussianDirectAppsEnabled(),
+                )
+            )
+            directOverridden = true
+        }
+        // Кэш в `:vpn` живёт полминуты и пережил бы эту правку: без сброса
+        // перестроенный туннель взял бы ответ, посчитанный до неё.
+        if (directOverridden) DirectAppsPolicy.invalidate()
         if (intent.hasExtra(EXTRA_REAPPLY_TRAFFIC_MASK_ENABLED)) {
             clientData.setTrafficMaskEnabled(
                 intent.getBooleanExtra(EXTRA_REAPPLY_TRAFFIC_MASK_ENABLED, clientData.getTrafficMaskEnabled())
@@ -3606,6 +4016,36 @@ class NovaVpnService : OperaNativeVpnService() {
         if (intent.hasExtra(EXTRA_REAPPLY_SNI_MASK_LIST)) {
             clientData.setSniCustomListRaw(intent.getStringExtra(EXTRA_REAPPLY_SNI_MASK_LIST))
         }
+        // Сбрасываем кэш адресов только на **настоящей** смене значения.
+        //
+        // Эти три extras кладёт в намерение каждый сборщик — и реаплай из чужого
+        // экрана, и плитка, и виджет, — поэтому «пришёл extra» не значит «что-то
+        // изменилось». Сброс по одному факту прихода стирал кэш почти на каждом
+        // намерении, и переподключение из-за смены SNI платило полный бюджет
+        // резолва за список, который не трогали.
+        var domainBypassOverridden = false
+        if (intent.hasExtra(EXTRA_REAPPLY_DOMAIN_BYPASS_ENABLED)) {
+            val next = intent.getBooleanExtra(
+                EXTRA_REAPPLY_DOMAIN_BYPASS_ENABLED,
+                clientData.isDomainBypassEnabled(),
+            )
+            if (next != clientData.isDomainBypassEnabled()) {
+                clientData.setDomainBypassEnabled(next)
+                domainBypassOverridden = true
+            }
+        }
+        if (intent.hasExtra(EXTRA_REAPPLY_DOMAIN_BYPASS_ZONES)) {
+            // Зоны не участвуют в резолве вовсе, поэтому кэш от них не зависит.
+            clientData.setDomainBypassZonesRaw(intent.getStringExtra(EXTRA_REAPPLY_DOMAIN_BYPASS_ZONES))
+        }
+        if (intent.hasExtra(EXTRA_REAPPLY_DOMAIN_BYPASS_CUSTOM)) {
+            val next = intent.getStringExtra(EXTRA_REAPPLY_DOMAIN_BYPASS_CUSTOM).orEmpty()
+            if (next != clientData.getDomainBypassCustomRaw()) {
+                clientData.setDomainBypassCustomRaw(next)
+                domainBypassOverridden = true
+            }
+        }
+        if (domainBypassOverridden) invalidateDomainBypassCache()
     }
 
     private fun reapplyCurrentPreferences(intent: Intent): Boolean {
@@ -5841,13 +6281,37 @@ class NovaVpnService : OperaNativeVpnService() {
             val forcedImportedProtocol = clientData.resolveEffectiveImportedProtocol()
                 .takeIf { importedProtocolModeActive && !it.equals("auto", ignoreCase = true) }
             val primaryRankedAttempts = prioritizeConnectionAttempts(primaryConnectionAttempts, clientData)
+            // Личные профили Cloudflare идут в ту же волну и **впереди** прошивочных
+            // семян.
+            //
+            // Это и есть «использовать в первую очередь». Раньше выпущенный набор
+            // попадал только в `mergedVerifiedWarpConfigs`, а её читают лишь две
+            // точки — сопоставление уже построенной попытки и ветка импортированных
+            // профилей, которая в обычном режиме выходит пустой. То есть выпуск
+            // работал, файл писался, а до очереди подключения не доезжал ни один
+            // профиль: снаружи это выглядело как «выпустил и ничего не изменилось».
             val builtInSeedConfigsForPrimary = if (!importedConfigSourceActive) {
-                clientData.getWarpVerifiedConfigs()
-                    .filter { clientData.isBundledSeed(it) && !it.engine.equals("masque", ignoreCase = true) }
+                // Вычёркивание нежелательного узла применяется **здесь**, а не
+                // только в `mergedVerifiedWarpConfigs`.
+                //
+                // Ту функцию читают лишь две точки, и в обычном режиме обе не дают
+                // очереди ни одной записи. То есть настройка «обходить московский
+                // узел» вычёркивала точку входа, писала об этом в журнал,
+                // переподключалась — и собирала ровно ту же очередь с тем же узлом
+                // впереди, пять раз подряд. Пять обрывов рабочего туннеля с нулевым
+                // эффектом при честной записи «вычёркиваем ... и переподключаемся».
+                withoutAvoidedColoEndpoints(
+                    generatedWarpConfigs(clientData) +
+                        clientData.getWarpVerifiedConfigs()
+                            .filter {
+                                clientData.isBundledSeed(it) && !it.engine.equals("masque", ignoreCase = true)
+                            }
+                )
             } else {
                 emptyList()
             }
-            val primaryWarpAttempts = if (importedProtocolModeActive || clientData.isProtonSourceActive()) {
+            // `var`, потому что пустая очередь Proton заменяется встроенной ниже.
+            var primaryWarpAttempts = if (importedProtocolModeActive || clientData.isProtonSourceActive()) {
                 // Ручной шаг доходит и до собственного списка. Пока ключ отдавали
                 // только встроенной ветке, кнопка «следующий профиль» в режиме Proton
                 // не двигала очередь вообще: она перестраивалась в том же порядке и
@@ -5970,6 +6434,39 @@ class NovaVpnService : OperaNativeVpnService() {
             // автопереподключение с «ПОДКЛЮЧЕНИЕ… AWG Proton» на экране и без единого
             // объяснения (I4).
             val protonModeActive = clientData.isProtonSourceActive() && !importedProtocolModeActive
+            // Пустой список Proton — не повод гаснуть: идём на встроенные.
+            //
+            // Так решил владелец. Прежнее поведение — остановка с надписью
+            // «выберите регион AWG Proton заново» — оставляло человека без связи
+            // ровно тогда, когда выпуск не удался, то есть в самой частой на
+            // российской сети ситуации. Регион при этом **не** переписывается:
+            // выбор остаётся за пользователем (I1), и как только профили появятся,
+            // очередь снова соберётся из них. Молчать нельзя (I4) — о подмене
+            // источника говорит и журнал, и надпись на экране.
+            //
+            // Режим импортированных профилей эта ветка не трогает: там встроенных
+            // семян в очереди нет вовсе, и подставлять их было бы подменой уже
+            // другого рода.
+            if (protonModeActive && primaryWarpAttempts.isEmpty()) {
+                primaryWarpAttempts = buildBuiltInWarpAttemptSet(
+                    primaryRankedAttempts,
+                    clientData,
+                    builtInSeedConfigsForPrimary,
+                    manualWarpProfileSwitchTargetKey,
+                )
+                LogManager.log(
+                    "USER WARP: выбран AWG Proton, но профилей нет — подключаемся на встроенных " +
+                        "(${primaryWarpAttempts.size} попыток). Регион не меняем."
+                )
+                if (primaryWarpAttempts.isNotEmpty()) {
+                    publishTransportNotice(
+                        clientData,
+                        "Профилей Proton нет — подключаемся на встроенных. Выпустить их можно " +
+                            "кнопкой в «Настройках».",
+                        keepOnStop = false,
+                    )
+                }
+            }
             if ((importedProtocolModeActive || protonModeActive) && primaryWarpAttempts.isEmpty()) {
                 val selectedProtocol = forcedImportedProtocol?.uppercase(Locale.US) ?: "AUTO"
                 LogManager.log(
@@ -6704,6 +7201,232 @@ class NovaVpnService : OperaNativeVpnService() {
     private fun priorityDohInterceptUpstream(): String =
         PriorityDns.interceptUpstream(priorityDohAddresses())
 
+    /**
+     * Приоритетный DoH — только когда его нет в пользовательском списке.
+     *
+     * Раньше он дописывался безусловно, и это переопределяло явный выбор (I1):
+     * пользователь снимал переключатель у строки «наш резолвер» или удалял её, а
+     * она всё равно попадала в цепочку — просто в самый конец, то есть **позади**
+     * провайдерской ступени, вопреки и подписи на экране, и порядку, который
+     * строит [userDnsPlan]. Умолчания везут этот резолвер первой строкой, так что
+     * в обычном случае здесь пусто, а нужен он ровно там, где список пуст или
+     * выключен целиком, — тогда без него не осталось бы ни одного шифрованного.
+     */
+    private fun priorityDohFallbackUpstreams(plan: UserDnsPlan): List<String> {
+        val alreadyThere = plan.upstreams.any {
+            it.startsWith(PriorityDns.DOH_URL) || it.startsWith(PriorityDns.DOT_URL)
+        }
+        if (alreadyThere) return emptyList()
+        // «Его нет в цепочке» и «пользователь его выключил» — разные вещи.
+        //
+        // Пока проверка смотрела только на состав апстримов, снятый переключатель
+        // у строки нашего резолвера выглядел так же, как её отсутствие, и резолвер
+        // дописывался обратно — то самое молчаливое переопределение явного выбора
+        // (I1), от которого эта функция и заводилась.
+        if (plan.ownerRuleActive) return emptyList()
+        return listOf(priorityDohInterceptUpstream()).filter { it.isNotBlank() }
+    }
+
+    /**
+     * Пользовательские правила DNS, разрешённые и готовые к употреблению.
+     *
+     * До этого экран настроек DNS был **односторонним**: он писал `dns_settings_json`,
+     * и его не читал никто, кроме него самого. Порядок резолверов в туннеле был
+     * захардкожен целиком, так что и порядок, и выбор пути на экране ничего не
+     * меняли — а выглядели как настройка.
+     *
+     * Апстримы и вырез маршрута считаются **одним проходом** и возвращаются парой.
+     * Порознь они разъезжались: апстримам bootstrap доставался из своего резолва, а
+     * вырезу — только из того, что пользователь вписал руками, и правило
+     * `tls://dns.quad9.net` без вручную вписанного адреса уходило в ядро с
+     * `9.9.9.9`, для которого выреза не было. Поведение зависело от того, набрал
+     * человек адрес сам или его подставило приложение.
+     *
+     * @param resolveNames разворачивать ли имена. Вырезу маршрута это нужно, а
+     *        вызову из «страна выхода определена» — нет, там сеть уже поднята.
+     */
+    /**
+     * @param ownerRuleActive есть ли в списке включённая строка нашего резолвера.
+     *        Приезжает вместе с планом, а не отдельным чтением файла: план и так
+     *        читает `dns_rules.json`, а зовут его из пути подъёма туннеля — то
+     *        есть на каждую попытку подключения, а их в обходе полсотни.
+     */
+    private data class UserDnsPlan(
+        val upstreams: List<String>,
+        val bypass: List<String>,
+        val ownerRuleActive: Boolean = false,
+    )
+
+    private fun userDnsPlan(): UserDnsPlan {
+        val set = DnsRulesStore.load(this)
+        // Общий выключатель списка. Раньше служба его не читала вовсе: человек
+        // выключал «свой DNS», сводка менялась, а цепочка ядра оставалась с его
+        // правилами впереди — то есть настройка выглядела выключенной и работала.
+        if (!set.enabled || set.rules.isEmpty()) return UserDnsPlan(emptyList(), emptyList())
+        val connectivityManager = runCatching {
+            getSystemService(android.net.ConnectivityManager::class.java)
+        }.getOrNull()
+        val underlyingNetwork = selectUnderlyingNetwork(connectivityManager)
+        val networkKey = buildUnderlyingNetworkSignature(connectivityManager, underlyingNetwork)
+            ?: underlyingNetwork?.toString()
+            ?: "no-underlying"
+        val resolver: (String) -> List<String> = { host ->
+            resolveHostOutsideVpn(host, underlyingNetwork).mapNotNull { address ->
+                address.hostAddress?.substringBefore('%')
+            }
+        }
+        val upstreams = ArrayList<String>()
+        val bypass = ArrayList<String>()
+        // Провайдерская ступень — всегда последняя, чем бы её ни двигали мышкой на
+        // экране. Она единственная незашифрованная, и её место — за всеми, кто
+        // умеет шифровать. Порядок внутри ядра она всё равно не гарантирует
+        // (`orderDNSUpstreamsByHealth` поднимает наверх того, кто отвечает), но
+        // отдавать её вперёд по нашей собственной воле — нет.
+        val enabledRules = set.rules.filter { it.enabled }
+            .sortedBy { if (it.kind == DnsRule.Kind.PROVIDER) 1 else 0 }
+        for (rule in enabledRules) {
+            if (rule.kind == DnsRule.Kind.PROVIDER) {
+                val providerServers = providerDnsAddresses(connectivityManager, underlyingNetwork)
+                if (providerServers.isEmpty()) {
+                    // Молчать нельзя (I4): пользователь оставил ступень включённой,
+                    // а её просто нечем заполнить на этой сети.
+                    LogManager.log(
+                        "DNS: резолвер провайдера включён, но сеть его не сообщает — ступень пропущена."
+                    )
+                    continue
+                }
+                providerServers.forEach { address ->
+                    upstreams += rule.toUpstream(set.routeMode, address)
+                    bypass += address
+                }
+                continue
+            }
+            if (!rule.encrypted) {
+                upstreams += rule.toUpstream(set.routeMode)
+                bypass += rule.value
+                continue
+            }
+            val host = dnsRuleHost(rule)
+            val fresh = when {
+                host.isBlank() -> emptyList()
+                // Правило указывает прямо на адрес — разворачивать нечего.
+                DnsRule.normalizeAddress(host) != null -> listOf(host)
+                // Зашитые адреса есть — свежий резолв не нужен и стоит дорого.
+                //
+                // Цена буквальная: `userDnsPlan` зовётся из `establishTunnelInterface`,
+                // а тот — на каждую попытку подключения, и их в обходе бывает
+                // полсотни. Умолчания дают шесть имён, у каждого предел резолва
+                // полторы секунды, а память о неудаче живёт минуту, — то есть на
+                // сети, где эти имена не разворачиваются, каждая минута обхода
+                // добавляла до девяти секунд чистого ожидания. Своё имя владельца
+                // всё равно разворачивается: у него отдельный кэш с длинным сроком.
+                rule.bootstrap.isNotEmpty() && rule.kind != DnsRule.Kind.AUTO -> emptyList()
+                else -> PriorityDns.addressesForHost(host, networkKey, resolver, LogManager::log)
+            }
+            val bootstrap = (fresh + rule.bootstrap).distinct()
+            // Без адресов ядру нечем дозвониться, и подставленный URL стоил бы
+            // таймаута на каждом запросе (см. [PriorityDns.interceptUpstream]).
+            if (bootstrap.isEmpty()) continue
+            val prepared = rule.copy(bootstrap = bootstrap)
+            if (rule.kind == DnsRule.Kind.AUTO) {
+                // Наш резолвер — одной строкой на экране, двумя в ядре: сначала тот
+                // транспорт, который на этой сети отвечает быстрее, следом второй.
+                // Выбросить проигравшего нельзя — 443 и 853 блокируют порознь, и
+                // «медленнее» на замере не значит «мёртв» через минуту.
+                val doh = PriorityDns.preferredTransportIsDoh(
+                    networkKey = networkKey,
+                    addresses = bootstrap,
+                    probe = { host, port ->
+                        ProtonLatency.probeTcpRttMs(host, port, DNS_TRANSPORT_PROBE_TIMEOUT_MS) { socket ->
+                            // Замер обязан описывать прямой путь, а не канал уже
+                            // поднятого туннеля: защита ставится до `connect`.
+                            protect(socket)
+                        }
+                    },
+                    logger = LogManager::log,
+                )
+                val ordered = if (doh) {
+                    listOf(PriorityDns.DOH_URL, PriorityDns.DOT_URL)
+                } else {
+                    listOf(PriorityDns.DOT_URL, PriorityDns.DOH_URL)
+                }
+                ordered.forEach { upstreams += prepared.toUpstream(set.routeMode, it) }
+                // Вырез маршрута — только для нашего резолвера (D10).
+                bypass += bootstrap
+                continue
+            }
+            upstreams += prepared.toUpstream(set.routeMode)
+            // Bootstrap **чужого** шифрованного резолвера в вырез не идёт.
+            //
+            // Вырез — это `excludeRoute` на весь адрес, а не на порт 53: адрес с
+            // ним не попадает в TUN вообще, ни для DNS, ни для чего-либо ещё.
+            // Умолчания теперь везут `1.1.1.1`, `1.0.0.1`, `8.8.8.8`, `8.8.4.4` и
+            // адреса Xbox как bootstrap-адреса DoH-правил, и вырез для них означал
+            // бы, что любое приложение с зашитым `8.8.8.8` шлёт открытый запрос
+            // мимо туннеля — ровно та утечка, ради которой открытый хвост и
+            // убирали. Дозвониться этим правилам вырез не нужен: ядро дёргает их
+            // через `GlobalProtector`, а маршрут внутрь туннеля им не мешает —
+            // именно так и было записано в D10: «наружу идёт только шифрованный
+            // резолвер владельца».
+        }
+        // Режим «через VPN» отменяет вырез: адрес с `excludeRoute` не попадает в
+        // TUN, помечен сокет или нет, — то есть вырез сильнее выбранного пути.
+        val effectiveBypass = if (set.routeMode == DnsRouteMode.TUNNEL) {
+            emptyList()
+        } else {
+            bypass.filter { it.isNotBlank() }.distinct()
+        }
+        // «Строка владельца есть и включена» — не то же самое, что «её апстрим
+        // попал в список»: она могла не развернуться и быть пропущена. Для
+        // решения «дописывать ли приоритетный DoH» важно именно первое, иначе
+        // выключенная пользователем строка выглядела бы как отсутствующая (I1).
+        val ownerRuleActive = enabledRules.any {
+            it.kind == DnsRule.Kind.AUTO || dnsRuleHost(it).equals(PriorityDns.HOST, ignoreCase = true)
+        }
+        return UserDnsPlan(upstreams.distinct(), effectiveBypass, ownerRuleActive)
+    }
+
+    private fun userDnsUpstreams(): List<String> = userDnsPlan().upstreams
+
+    /** Имя (или адрес) зашифрованного правила — то, что надо развернуть. */
+    private fun dnsRuleHost(rule: DnsRule): String = when (rule.kind) {
+        DnsRule.Kind.DOH -> runCatching { java.net.URI(rule.value).host }.getOrNull().orEmpty()
+        DnsRule.Kind.DOT -> rule.value.removePrefix("tls://").substringBefore(':').trim('[', ']')
+        // Имя нашего резолвера лежит в значении как есть — транспорт выберется потом.
+        DnsRule.Kind.AUTO -> rule.value
+        DnsRule.Kind.PLAIN -> rule.value
+        // Разворачивать нечего: адрес придёт из свойств сети.
+        DnsRule.Kind.PROVIDER -> ""
+    }
+
+    /**
+     * Резолверы, которые сообщает сама сеть.
+     *
+     * `LinkProperties.getDnsServers()` — единственный поддерживаемый способ их
+     * узнать: `net.dns1..4` убрали в Android 8.0, а `/etc/resolv.conf` на Android
+     * не существовало никогда.
+     *
+     * Сеть берём **нижележащую**, а не активную: активной под поднятым туннелем
+     * будет сам туннель, и его список — это то, что мы туда и положили.
+     */
+    private fun providerDnsAddresses(
+        connectivityManager: android.net.ConnectivityManager?,
+        underlyingNetwork: android.net.Network?,
+    ): List<String> {
+        val cm = connectivityManager ?: return emptyList()
+        val network = underlyingNetwork ?: return emptyList()
+        val properties = runCatching { cm.getLinkProperties(network) }.getOrNull() ?: return emptyList()
+        return properties.dnsServers
+            .mapNotNull { it.hostAddress?.substringBefore('%') }
+            .filter { address ->
+                address.isNotBlank() &&
+                    !address.startsWith("127.") &&
+                    address != "::1" &&
+                    DnsRule.normalizeAddress(address) != null
+            }
+            .distinct()
+    }
+
     private fun applyCoreDnsInterceptConfig(
         clientData: ClientData,
         backendLabel: String,
@@ -6715,14 +7438,28 @@ class NovaVpnService : OperaNativeVpnService() {
             .map { it.trim() }
             .filter { it.isNotBlank() }
             .distinct()
-        // Приоритетный DoH идёт первым во всём перехвате, а не только в «обычном»
-        // профиле: без него первый же запрос ушёл бы открытым текстом к Xbox DNS —
-        // мимо туннеля, то есть прямо провайдеру. Он не заменяет список, а встаёт
-        // перед ним: если DoH не отвечает, ядро берёт следующий адрес.
-        val defaultServers = if (plainServers.isEmpty()) {
-            plainServers
+        // Порядок здесь и есть каскад: ядро берёт следующий апстрим ровно тогда,
+        // когда предыдущий не ответил.
+        //
+        // Зашитого открытого хвоста (Xbox + Cloudflare по 53/udp) больше нет.
+        // Он был не запасом, а утечкой по построению: каждый его адрес уезжал в
+        // `directBypassDnsAddresses`, оттуда в `excludeRoute`, и запрос к нему
+        // покидал туннель в открытом виде — на WARP, MASQUE, Proton и Opera
+        // одинаково. Незашифрованной осталась ровно одна ступень — резолвер
+        // провайдера, и она стоит в списке последней и выключается отдельно.
+        //
+        // Открытые адреса из `dnsServers` продолжают уходить в интерфейс
+        // (`addDnsServer` принимает только литералы), но в цепочку перехвата не
+        // попадают: перехват ловит любой UDP на 53 и отвечает шифрованно.
+        val userPlan = runCatching { userDnsPlan() }.getOrElse { error ->
+            LogManager.log("DNS-правила пользователя не прочитались (${error.message}) — идём по встроенной цепочке.")
+            UserDnsPlan(emptyList(), emptyList())
+        }
+        val userServers = userPlan.upstreams
+        val defaultServers = if (plainServers.isEmpty() && userServers.isEmpty()) {
+            emptyList()
         } else {
-            (listOf(priorityDohInterceptUpstream()).filter { it.isNotBlank() } + plainServers).distinct()
+            (userServers + priorityDohFallbackUpstreams(userPlan)).distinct()
         }
         val enableTargetedMediaDns =
             backendLabel == BACKEND_WARP && clientData.shouldEnableTargetedMediaDns(backendLabel, countryHint)
@@ -6758,6 +7495,7 @@ class NovaVpnService : OperaNativeVpnService() {
                         defaultServers.joinToString(","),
                         mediaDomains.joinToString(","),
                     )
+                    coreDnsInterceptEnabled = true
                     LogManager.log(
                         "TUN-level targeted DNS intercept активирован: " +
                             "media=${mediaServers.joinToString(",")} " +
@@ -6778,6 +7516,136 @@ class NovaVpnService : OperaNativeVpnService() {
     }
 
     /**
+     * Отдаёт ядру правила обхода по доменам и зонам.
+     *
+     * ## Зачем это отдельно от выреза маршрута
+     *
+     * Маршруты Android фиксирует в `establish()`, и знает он только адреса —
+     * поэтому [domainBypassAddresses] резолвит каждое имя заранее и выводит его
+     * адреса из туннеля. Для зоны такой список не существует: адресов у `.ru`
+     * столько же, сколько сайтов. Ядро решает это иначе — учит адреса из тех же
+     * DNS-ответов, которые и так перехватывает, и ретранслирует совпавшие потоки
+     * наружу через защищённый сокет. Маршруты при этом не меняются вовсе, значит
+     * правку можно применить к живому сеансу.
+     *
+     * ## Границы, о которых нельзя молчать
+     *
+     * Учеба идёт **только** внутри перехвата DNS: нет перехвата — нет и адресов,
+     * сколько зон ни отметь. И работает это только там, где пакеты видит Go-код,
+     * то есть на WARP и MASQUE; Opera и VLESS отдают дескриптор TUN библиотеке
+     * tun2proxy. Обе границы уезжают в журнал и в файл счётчиков, чтобы экран мог
+     * сказать правду, а не показывать вечные нули (I4).
+     *
+     * Разбор идёт тем же [DomainBypassRules], которым считает экран: две копии
+     * разбора — это G49, когда список в поле и список в ядре расходятся молча.
+     */
+    private fun applyCoreDomainBypassPolicy(clientData: ClientData, backendLabel: String) {
+        val enabled = clientData.isDomainBypassEnabled()
+        val zoneTokens = DomainBypassRules.parseZones(clientData.getDomainBypassZonesRaw())
+        // «cyrillic» — не зона, а флаг: в ядре под него отдельный параметр, и,
+        // оставшись в списке зон, он превратился бы в поиск TLD с таким именем.
+        val cyrillic = DomainBypassRules.CYRILLIC_TOKEN in zoneTokens
+        val zonesCsv = (zoneTokens - DomainBypassRules.CYRILLIC_TOKEN).joinToString(",")
+        val domains = DomainBypassRules.parseDomains(clientData.getDomainBypassCustomRaw())
+        val domainsCsv = domains.joinToString(",")
+
+        val transportSupported = !isOperaBackendLabel(backendLabel) && !isVlessBackendLabel(backendLabel)
+
+        try {
+            if (!transportSupported) {
+                // Явное выключение, а не «просто не включаем»: политика в ядре живёт
+                // дольше сессии, и остаток от прошлого WARP-подключения продолжал бы
+                // числиться включённым.
+                Nova.setDomainBypassPolicy(false, "", "", false)
+                if (enabled) {
+                    LogManager.log(
+                        "Обход по доменам: транспорт $backendLabel отдаёт TUN библиотеке tun2proxy, " +
+                            "Go-ядро пакетов не видит — обход по зонам на нём не работает. Свои домены " +
+                            "продолжают уходить мимо туннеля вырезом маршрута."
+                    )
+                }
+            } else {
+                Nova.setDomainBypassPolicy(enabled, zonesCsv, domainsCsv, cyrillic)
+                if (enabled) {
+                    LogManager.log(
+                        "Обход по доменам передан ядру: зоны=[$zonesCsv], кириллица=$cyrillic, " +
+                            "своих доменов=${domains.size}, транспорт=$backendLabel"
+                    )
+                    if (!coreDnsInterceptEnabled && (zonesCsv.isNotEmpty() || cyrillic)) {
+                        LogManager.log(
+                            "Обход по зонам включён, но перехват DNS выключен: адреса учить неоткуда, " +
+                                "зоны не сработают. Включите шифрованный DNS."
+                        )
+                    }
+                } else {
+                    LogManager.log("Обход по доменам выключен — ядро сбросило выученные адреса.")
+                }
+            }
+        } catch (t: Throwable) {
+            LogManager.log("Не удалось отдать ядру правила обхода по доменам: ${t.message}")
+        }
+
+        // Метку транспорта передаём ту же, под которой применили политику:
+        // `currentBackendLabel` в момент подъёма туннеля может ещё нести прошлое
+        // значение, и экран сказал бы «зоны работают» про Opera.
+        publishDomainBypassStats(clientData, force = true, backendLabel = backendLabel)
+    }
+
+    /**
+     * Выкладывает счётчики обхода в файл, чтобы их увидел экран.
+     *
+     * Экран живёт в процессе интерфейса, а счётчики — в Go-ядре процесса `:vpn`:
+     * позвать `Nova.getDomainBypassStats()` со своей стороны он не может, там
+     * другой экземпляр ядра с пустым состоянием. Файл через `AtomicFile` — тот же
+     * канал, которым уже идёт состояние службы.
+     *
+     * @param force записать даже если значения не изменились — нужно сразу после
+     * применения политики, чтобы экран не показывал предыдущий транспорт.
+     */
+    private fun publishDomainBypassStats(
+        clientData: ClientData,
+        force: Boolean = false,
+        backendLabel: String = currentBackendLabel,
+    ) {
+        val enabled = clientData.isDomainBypassEnabled()
+        // Пока обход выключен и публиковать ещё нечего, ядро не трогаем: первое же
+        // обращение к `Nova` подтянуло бы libgojni.so в процесс, где туннеля может
+        // не быть вовсе, — пятнадцать мегабайт ради строки нулей.
+        if (!enabled && !force && lastPublishedDomainBypassStats == null) return
+        val raw = try {
+            Nova.getDomainBypassStats()
+        } catch (t: Throwable) {
+            LogManager.log("Счётчики обхода по доменам не прочитались: ${t.message}")
+            return
+        }
+        val values = raw.lineSequence()
+            .mapNotNull { line ->
+                val idx = line.indexOf('=')
+                if (idx <= 0) null else line.substring(0, idx).trim() to line.substring(idx + 1).trim()
+            }
+            .toMap()
+
+        val supported = !isOperaBackendLabel(backendLabel) && !isVlessBackendLabel(backendLabel)
+        val signature = "$raw|$enabled|$supported|$coreDnsInterceptEnabled|$backendLabel"
+        if (!force && signature == lastPublishedDomainBypassStats) return
+        lastPublishedDomainBypassStats = signature
+
+        clientData.saveDomainBypassStats(
+            learned = values["learned"]?.toIntOrNull() ?: 0,
+            relayed = values["relayed"]?.toLongOrNull() ?: 0L,
+            installed = values["installed"]?.toIntOrNull() ?: 0,
+            listeners = values["listeners"]?.toIntOrNull() ?: 0,
+            dropped = values["dropped"]?.toLongOrNull() ?: 0L,
+            quicSkipped = values["quicSkipped"]?.toLongOrNull() ?: 0L,
+            enabled = enabled,
+            transportSupported = supported,
+            dnsInterceptEnabled = coreDnsInterceptEnabled,
+            backend = backendLabel,
+            relayState = values["relayState"]?.toIntOrNull() ?: 0,
+        )
+    }
+
+    /**
      * Включает перехват всего DNS внутри туннеля с заданным порядком резолверов.
      *
      * Зачем: список DNS из `VpnService.Builder` меняется только переустановкой
@@ -6795,10 +7663,12 @@ class NovaVpnService : OperaNativeVpnService() {
         if (normalized.isEmpty()) {
             Nova.setDnsInterceptPolicy(false, "", "", "")
             activeDnsInterceptServers = emptyList()
+            coreDnsInterceptEnabled = false
             return
         }
         Nova.setDnsInterceptPolicy(true, normalized.joinToString(","), "", "")
         activeDnsInterceptServers = normalized
+        coreDnsInterceptEnabled = true
         LogManager.log(
             "TUN-level DNS intercept: порядок резолверов задан без переустановки туннеля " +
                 "($reason): ${normalized.joinToString(", ")}"
@@ -6806,29 +7676,34 @@ class NovaVpnService : OperaNativeVpnService() {
     }
 
     /**
-     * Пересматривает порядок DNS, когда стала известна настоящая страна выхода.
+     * Пересобирает цепочку перехвата, когда стала известна страна выхода.
      *
-     * Сам порядок от страны больше не зависит — Xbox DNS первый всегда, — но список
-     * резолверов Nova может смениться (например, включился профиль без рекламы), и
-     * тогда перехват в ядре надо обновить, не роняя соединения.
+     * Сам порядок от страны не зависит — его задаёт список пользователя, — но к
+     * этому моменту успевает измениться состав: провайдерская ступень наполняется
+     * адресами уже поднятой сети, а имена правил разворачиваются. Перехват надо
+     * обновить, не роняя соединение.
+     *
+     * **Открытый хвост сюда не дописывается.** Он был убран из первой сборки
+     * цепочки, а эта ветка возвращала его в середине сеанса:
+     * `getPreferredVpnDnsServers` отдаёт литеральные адреса (Xbox, Cloudflare),
+     * ядро разбирает их как открытый апстрим с прямым путём и шлёт запрос
+     * открытым UDP наружу. В журнал при этом уходило нейтральное «обновляем
+     * порядок». Незашифрованной остаётся ровно одна ступень — провайдерская, и
+     * она приходит из [userDnsUpstreams] вместе с остальными правилами.
+     *
+     * Проверки на импортированный профиль здесь тоже нет. Она осталась от старого
+     * тела, где из списка Nova вычитались адреса профиля, и после переделки просто
+     * выключала функцию для любого сеанса без импорта — то есть для обычного
+     * WARP/MASQUE пересборка не случалась никогда.
      */
-    private fun reapplyDnsOrderForObservedCountry(clientData: ClientData, observedCountry: String) {
+    private fun reapplyDnsOrderForObservedCountry(observedCountry: String) {
         val country = observedCountry.trim().uppercase(Locale.US)
         if (country.isBlank()) return
         val current = activeDnsInterceptServers
         if (current.isEmpty()) return
-        val importedDns = lastImportedProfileDnsServers
-        if (importedDns.isEmpty()) return
 
-        // Резолвер профиля в перехват не возвращаем: он живёт внутри туннеля, а
-        // перехват ходит наружу по защищённому сокету — оттуда он недостижим.
-        val novaDns = clientData.getPreferredVpnDnsServers(BACKEND_WARP, country)
-        val plain = novaDns.filterNot { it in importedDns }.distinct()
-        if (plain.isEmpty()) return
-        // Приоритетный DoH обязан пережить пересборку списка. Без него эта ветка
-        // молча снимала бы шифрованный резолвер в середине сеанса — ровно тогда,
-        // когда выяснилась страна выхода, то есть на живом туннеле.
-        val desired = (listOf(priorityDohInterceptUpstream()).filter { it.isNotBlank() } + plain).distinct()
+        val userPlan = runCatching { userDnsPlan() }.getOrDefault(UserDnsPlan(emptyList(), emptyList()))
+        val desired = (userPlan.upstreams + priorityDohFallbackUpstreams(userPlan)).distinct()
         if (desired == current) return
         LogManager.log(
             "Страна выхода определена как $country — обновляем порядок резолверов перехвата, без переподключения."
@@ -6932,6 +7807,9 @@ class NovaVpnService : OperaNativeVpnService() {
             dnsServers = dnsServers.filterNot { it in importedDnsServers },
             dnsLabel = dnsLabel,
         )
+        // Строго после перехвата DNS: политика обхода смотрит на его состояние,
+        // чтобы честно сказать «зонам неоткуда учить адреса».
+        applyCoreDomainBypassPolicy(clientData, BACKEND_WARP)
         builder.setSession("NovaVPN")
 
         applySplitTunnelPolicy(builder, clientData)
@@ -6959,7 +7837,7 @@ class NovaVpnService : OperaNativeVpnService() {
             connectivityManager = connectivityManager,
             underlyingNetwork = underlyingNetwork,
             protectedAddresses = localBypassProtectedAddresses,
-            bypassAddresses = directBypassDnsAddresses(),
+            bypassAddresses = directBypassDnsAddresses() + domainBypassAddresses(underlyingNetwork),
         )
         applyUnderlyingNetworkHint(
             builder = builder,
@@ -7144,6 +8022,7 @@ class NovaVpnService : OperaNativeVpnService() {
             dnsServers = emptyList(),
             dnsLabel = "",
         )
+        applyCoreDomainBypassPolicy(clientData, BACKEND_OPERA)
         applyOperaSplitTunnelPolicy(builder, clientData)
         val connectivityManager = getSystemService(android.net.ConnectivityManager::class.java)
         val underlyingNetwork = selectUnderlyingNetwork(connectivityManager)
@@ -7160,7 +8039,7 @@ class NovaVpnService : OperaNativeVpnService() {
                 coreInterceptHandlesDns = false,
                 connectivityManager = connectivityManager,
                 underlyingNetwork = underlyingNetwork,
-            ),
+            ) + domainBypassAddresses(underlyingNetwork),
         )
         applyUnderlyingNetworkHint(
             builder = builder,
@@ -7204,6 +8083,7 @@ class NovaVpnService : OperaNativeVpnService() {
             dnsServers = emptyList(),
             dnsLabel = "",
         )
+        applyCoreDomainBypassPolicy(clientData, BACKEND_VLESS)
         applyOperaSplitTunnelPolicy(builder, clientData)
         val connectivityManager = getSystemService(android.net.ConnectivityManager::class.java)
         val underlyingNetwork = selectUnderlyingNetwork(connectivityManager)
@@ -7220,7 +8100,7 @@ class NovaVpnService : OperaNativeVpnService() {
                 coreInterceptHandlesDns = false,
                 connectivityManager = connectivityManager,
                 underlyingNetwork = underlyingNetwork,
-            ),
+            ) + domainBypassAddresses(underlyingNetwork),
         )
         applyUnderlyingNetworkHint(
             builder = builder,
@@ -9370,7 +10250,7 @@ class NovaVpnService : OperaNativeVpnService() {
         val effectivePresharedKey = importedInterfaceOverrides.peerPresharedKey
             ?.takeIf { useImportedIdentity && it.isNotBlank() }
         val effectivePersistentKeepalive =
-            importedInterfaceOverrides.peerPersistentKeepalive ?: 5
+            importedInterfaceOverrides.peerPersistentKeepalive?.takeIf { it.isNotBlank() } ?: "5"
         val effectiveAdvancedSecurity = importedInterfaceOverrides.peerAdvancedSecurity
             ?.takeIf { useImportedIdentity && it.isNotBlank() }
         val emittedNovaMode = transportMode.novaModeOverride?.trim().orEmpty().ifBlank { transportMode.name }
@@ -9531,7 +10411,7 @@ class NovaVpnService : OperaNativeVpnService() {
         var privateKey: String? = null
         var peerPublicKey: String? = null
         var peerPresharedKey: String? = null
-        var peerPersistentKeepalive: Int? = null
+        var peerPersistentKeepalive: String? = null
         var peerAdvancedSecurity: String? = null
 
         matchingConfig.rawConfig.lineSequence().forEach { rawLine ->
@@ -9571,7 +10451,10 @@ class NovaVpnService : OperaNativeVpnService() {
                         peerPresharedKey = value.takeIf { it.isNotBlank() }
                     }
                     "persistentkeepalive" -> {
-                        peerPersistentKeepalive = value.toIntOrNull()?.coerceIn(0, 65_535)
+                        // Принимаем и число, и диапазон `лоу-хай`: и то, и другое
+                        // ядро 3.x разбирает само. Мусор отсекаем здесь, чтобы он
+                        // не дошёл до UAPI и не уронил весь профиль.
+                        peerPersistentKeepalive = normalizeKeepaliveValue(value)
                     }
                     "advancedsecurity" -> {
                         peerAdvancedSecurity = value.takeIf { it.isNotBlank() }
@@ -10003,7 +10886,21 @@ class NovaVpnService : OperaNativeVpnService() {
         rawConfig: String,
         includeHandshakePayloads: Boolean = true,
     ): List<String> {
-        val supportedKeys = Regex("(?i)^(Jc|Jmin|Jmax|S[1-4]|H[1-4]|I[1-5])\\s*=")
+        // Список ключей — единственное место, где решается, доедет ли параметр
+        // профиля до ядра вообще: всё, что сюда не попало, отбрасывается ещё в
+        // Kotlin и в `.conf` для ядра не пишется.
+        //
+        // Девять полей AmneziaWG 3.x добавлены вместе с переходом вшитого ядра
+        // на 3.1. До этого профиль 3.1 импортировался и подключался, но работал
+        // как 2.0: защита заголовка, добивка содержимого и случайные хвосты
+        // выбрасывались здесь молча, а если сервер их требовал, рукопожатие не
+        // сходилось никогда.
+        val supportedKeys = Regex(
+            "(?i)^(Jc|Jmin|Jmax|S[1-4]|H[1-4]|I[1-5]" +
+                "|HeaderProtectionKey|ContentPaddingAddition" +
+                "|RekeyAfterTime|RekeyTimeout|RejectAfterTime|KeepaliveTimeout" +
+                "|MaxHandshakeAttempts|RandomTrailers|DisableCookies)\\s*="
+        )
         val deduped = linkedMapOf<String, String>()
         rawConfig.lineSequence().forEach { rawLine ->
             val trimmed = rawLine.trim()
@@ -10404,12 +11301,7 @@ class NovaVpnService : OperaNativeVpnService() {
             connectionAttempts
                 .filter { attempt ->
                     attempt.mode.engine == "masque" &&
-                        (
-                            attempt.endpointSource.equals("verified-config", ignoreCase = true) ||
-                                attempt.endpointSource.equals("last-success-exact", ignoreCase = true) ||
-                                attempt.endpointSource.equals("last-success", ignoreCase = true) ||
-                                attempt.endpointSource.equals("bundled-seed", ignoreCase = true)
-                            )
+                        isTrustedEndpointSource(attempt.endpointSource)
                 }
                 .take(5)
                 .map { attempt ->
@@ -10832,10 +11724,7 @@ class NovaVpnService : OperaNativeVpnService() {
                             transportMode.engine == "masque" &&
                                 isTrustedMasqueFastPort(currentPort) &&
                                 (
-                                    currentAttempt.endpointSource.equals("last-success-exact", ignoreCase = true) ||
-                                        currentAttempt.endpointSource.equals("verified-config", ignoreCase = true) ||
-                                        currentAttempt.endpointSource.equals("last-success", ignoreCase = true) ||
-                                        currentAttempt.endpointSource.equals("bundled-seed", ignoreCase = true)
+                                    isTrustedEndpointSource(currentAttempt.endpointSource)
                                     )
                         val probeBudgetMs = when {
                             trustedMasqueProbeBudget ->
@@ -10961,12 +11850,7 @@ class NovaVpnService : OperaNativeVpnService() {
                             (transportMode.engine == "masque" && isTrustedMasqueFastPort(currentPort)) ||
                                 (transportMode.engine != "masque" && isCoreWarpPort(currentPort))
                             ) &&
-                            (
-                                currentAttempt.endpointSource.equals("last-success-exact", ignoreCase = true) ||
-                                    currentAttempt.endpointSource.equals("verified-config", ignoreCase = true) ||
-                                    currentAttempt.endpointSource.equals("last-success", ignoreCase = true) ||
-                                    currentAttempt.endpointSource.equals("bundled-seed", ignoreCase = true)
-                                )
+                            isTrustedEndpointSource(currentAttempt.endpointSource)
                     val trustedMasqueTrafficReady =
                         transportMode.engine == "masque" &&
                             currentVpnNet != null &&
@@ -11102,9 +11986,7 @@ class NovaVpnService : OperaNativeVpnService() {
                         messengerPriorityCore -> if (fastConnectMode) 1_950L else 2_700L
                         currentAttempt.endpointSource.equals("last-success-exact", ignoreCase = true) &&
                             isCoreWarpPort(currentPort) -> if (fastConnectMode) 4_400L else 5_400L
-                        (currentAttempt.endpointSource.equals("verified-config", ignoreCase = true) ||
-                            currentAttempt.endpointSource.equals("last-success", ignoreCase = true) ||
-                            currentAttempt.endpointSource.equals("bundled-seed", ignoreCase = true)) &&
+                        isTrustedEndpointSource(currentAttempt.endpointSource) &&
                             isCoreWarpPort(currentPort) -> if (fastConnectMode) 3_900L else 4_900L
                         else -> if (fastConnectMode) 2_750L else 3_500L
                     }
@@ -11310,6 +12192,22 @@ class NovaVpnService : OperaNativeVpnService() {
                                 // запоминается для этой сети: следующий раз оно
                                 // пойдёт первым и перебор не начнётся с нуля.
                                 rememberSuccessfulSni(currentAttempt)
+                                // Успех личного профиля обнуляет его счётчик отказов:
+                                // «подвёл трижды подряд» обязано означать именно
+                                // подряд, иначе одна плохая неделя ссылала бы точку
+                                // входа в хвост навсегда.
+                                if (
+                                    currentAttempt.endpointSource
+                                        .equals(WarpGeneratedStore.ENDPOINT_SOURCE, ignoreCase = true)
+                                ) {
+                                    runCatching {
+                                        WarpGeneratedStore(this).noteAttemptOutcome(
+                                            currentHost,
+                                            currentPort,
+                                            success = true,
+                                        )
+                                    }
+                                }
                                 // На **каждом** подтверждённом успехе, а не только на
                                 // первом в цикле: первым может подняться профиль
                                 // Proton, и тогда встроенное семя, поднявшееся следом,
@@ -11989,6 +12887,24 @@ class NovaVpnService : OperaNativeVpnService() {
             }
             onAttemptResult?.invoke(currentAttempt, outcome, attemptDurationMs, stableDurationMs)
 
+            // Отказ личного профиля запоминается рядом с самим профилем.
+            //
+            // **Вне** ветки MASQUE, и это существенно: личные профили — обычный
+            // wireguard, и внутри неё отметка не поставилась бы ни разу. Нужна она
+            // затем, чтобы приоритет личных профилей был обратим: набор,
+            // выпущенный дома и отфильтрованный на мобильной сети, иначе вёл бы
+            // очередь вечно — измерено, шесть минут до первого рабочего семени.
+            // Отказ по ключу не в счёт: он говорит о ключе, а не о точке входа.
+            if (
+                outcome != AttemptOutcome.SUCCESS &&
+                normalizedFailureReason != "access_denied" &&
+                currentAttempt.endpointSource
+                    .equals(WarpGeneratedStore.ENDPOINT_SOURCE, ignoreCase = true)
+            ) {
+                runCatching {
+                    WarpGeneratedStore(this).noteAttemptOutcome(currentHost, currentPort, success = false)
+                }
+            }
             if (transportMode.engine == "masque") {
                 unstableMasqueStreak = when (outcome) {
                     AttemptOutcome.UNSTABLE, AttemptOutcome.HANDSHAKE -> unstableMasqueStreak + 1
@@ -13194,7 +14110,99 @@ class NovaVpnService : OperaNativeVpnService() {
     }
 
     private fun createNotification(subtitle: String = ""): Notification {
-        return AppUpdateManager.buildForegroundVpnNotification(this, CHANNEL_ID, subtitle)
+        val text = subtitle.ifBlank { buildNotificationDetails() }
+        return AppUpdateManager.buildForegroundVpnNotification(this, CHANNEL_ID, text)
+    }
+
+    /**
+     * Строка уведомления: транспорт, регион и скорость.
+     *
+     * Всё в одну строку и без подписей-слов: уведомление показывается свёрнутым,
+     * и вторая строка в нём просто не видна. Порядок — от неизменного к
+     * изменчивому, чтобы прыгающие цифры стояли справа и не двигали остальное.
+     */
+    private fun buildNotificationDetails(): String {
+        val clientData = ClientData(this)
+        if (!clientData.isNotificationDetailsEnabled()) return ""
+        if (currentState != STATE_CONNECTED) return ""
+        val parts = mutableListOf<String>()
+        val transport = currentTransportLabel.trim()
+            .ifBlank { clientData.getServiceTransport().trim() }
+            .ifBlank { currentBackendLabel.trim() }
+        if (transport.isNotBlank()) parts.add(transport.uppercase(Locale.ROOT))
+        val country = clientData.getTunnelUiSnapshot()?.country?.trim().orEmpty()
+        if (country.isNotBlank()) parts.add(country.uppercase(Locale.ROOT))
+        if (notificationSpeedLabel.isNotBlank()) parts.add(notificationSpeedLabel)
+        return parts.joinToString("  ·  ")
+    }
+
+    /**
+     * Считает скорость по счётчикам своего UID.
+     *
+     * Именно своего, а не всей системы: весь туннельный трафик уходит наружу
+     * сокетами этого процесса, а чтения и записи в `tun` в счётчики
+     * [TrafficStats] не попадают вовсе — двойного счёта поэтому нет. На части
+     * устройств счётчики отдают `UNSUPPORTED` (-1); тогда строка скорости просто
+     * не появляется, а остальная часть уведомления работает.
+     */
+    private fun sampleNotificationSpeed() {
+        val rx = TrafficStats.getUidRxBytes(applicationInfo.uid)
+        val tx = TrafficStats.getUidTxBytes(applicationInfo.uid)
+        val now = SystemClock.elapsedRealtime()
+        if (rx < 0L || tx < 0L) {
+            notificationSpeedLabel = ""
+            return
+        }
+        val previousRx = lastNotificationRxBytes
+        val previousTx = lastNotificationTxBytes
+        val previousAtMs = lastNotificationSampleAtMs
+        lastNotificationRxBytes = rx
+        lastNotificationTxBytes = tx
+        lastNotificationSampleAtMs = now
+        if (previousRx < 0L || previousTx < 0L || previousAtMs <= 0L) return
+        val elapsedMs = (now - previousAtMs).coerceAtLeast(1L)
+        // Счётчики монотонны, но переживают перезапуск процесса `:vpn`: после
+        // него разность отрицательна, и показывать её нельзя.
+        val deltaRx = (rx - previousRx).coerceAtLeast(0L)
+        val deltaTx = (tx - previousTx).coerceAtLeast(0L)
+        val rxPerSec = deltaRx * 1000L / elapsedMs
+        val txPerSec = deltaTx * 1000L / elapsedMs
+        notificationSpeedLabel = "↓ ${formatSpeed(rxPerSec)}  ↑ ${formatSpeed(txPerSec)}"
+    }
+
+    private fun formatSpeed(bytesPerSecond: Long): String {
+        return when {
+            bytesPerSecond >= 1024L * 1024L ->
+                String.format(Locale.ROOT, "%.1f МБ/с", bytesPerSecond / (1024.0 * 1024.0))
+            bytesPerSecond >= 1024L -> "${bytesPerSecond / 1024L} КБ/с"
+            else -> "$bytesPerSecond Б/с"
+        }
+    }
+
+    /**
+     * Заводит и останавливает обновление уведомления.
+     *
+     * Тик живёт только пока туннель поднят и подробности вообще включены: он
+     * будит процесс раз в две секунды, и держать его при остановленном туннеле
+     * значило бы платить за строку, которой нет.
+     */
+    private fun syncNotificationDetailsTicker() {
+        notificationDetailsHandler.removeCallbacks(notificationDetailsRunnable)
+        notificationSpeedLabel = ""
+        lastNotificationRxBytes = -1L
+        lastNotificationTxBytes = -1L
+        lastNotificationSampleAtMs = 0L
+        if (currentState != STATE_CONNECTED) return
+        if (!ClientData(this).isNotificationDetailsEnabled()) return
+        notificationDetailsHandler.postDelayed(notificationDetailsRunnable, NOTIFICATION_DETAILS_INTERVAL_MS)
+    }
+
+    private fun refreshNotificationDetails() {
+        sampleNotificationSpeed()
+        runCatching {
+            getSystemService(NotificationManager::class.java)
+                ?.notify(NOTIFICATION_ID, createNotification())
+        }
     }
 
     private fun parseEndpoint(endpoint: String): Pair<String, Int?> {
@@ -15809,6 +16817,36 @@ class NovaVpnService : OperaNativeVpnService() {
         val forcedImportedProtocol = clientData.resolveEffectiveImportedProtocol()
             .takeIf { importedProtocolModeActive && !protonModeActive && !it.equals("auto", ignoreCase = true) }
 
+        // Выбранная страна Proton — **первый** ключ сортировки очереди.
+        //
+        // Раньше предпочтение выражалось прибавкой к `qualityAvgPingMs`, то есть
+        // работало четвёртым ключом, после `promotedAt`, накопленного качества
+        // эндпоинта и числа удачных проб. У любого узла с историей успехов это не
+        // отыгрывалось: владелец выбирал NO, очередь всё равно начиналась с
+        // раскачанного US-узла, и бейдж честно показывал `AWG PROTON: US` —
+        // подключение действительно уходило не туда, куда просили.
+        //
+        // Отбором это не делается: узлов нужной страны может не остаться вовсе
+        // (в бесплатном наборе Proton страна NO представлена одним узлом), и
+        // пустая очередь была бы хуже чужой страны. Поэтому свои идут первыми, а
+        // чужие остаются следом.
+        val protonWantedCountry = clientData.getProtonCountryPreference()
+            .trim()
+            .uppercase(Locale.US)
+            .takeIf { protonModeActive && it.length == 2 }
+        val protonCountryByEndpoint = if (protonWantedCountry == null) {
+            emptyMap()
+        } else {
+            runCatching {
+                ProtonProfileStore.countryByEndpoint(ProtonProfileStore(this).readProfiles())
+            }.getOrDefault(emptyMap())
+        }
+        fun matchesWantedCountry(config: WarpVerifiedConfig): Boolean {
+            if (protonWantedCountry == null) return false
+            val host = config.host.trim().trim('[', ']')
+            return protonCountryByEndpoint["$host:${config.port}"] == protonWantedCountry
+        }
+
         val importedConfigs = mergedVerifiedWarpConfigs(clientData)
             .filter { it.userImported && !it.manual && !it.engine.equals("masque", ignoreCase = true) }
             // Выбран Proton — в очередь идут только его узлы.
@@ -15827,7 +16865,8 @@ class NovaVpnService : OperaNativeVpnService() {
                 forcedImportedProtocol == null || clientData.inferImportedProtocolFamily(config) == forcedImportedProtocol
             }
             .sortedWith(
-                compareByDescending<WarpVerifiedConfig> { it.promotedAt }
+                compareByDescending<WarpVerifiedConfig> { matchesWantedCountry(it) }
+                    .thenByDescending { it.promotedAt }
                     .thenByDescending { clientData.getWarpVerifiedQualityTier(it) }
                     .thenByDescending { it.qualityPingSuccesses }
                     .thenBy {
@@ -16092,6 +17131,42 @@ class NovaVpnService : OperaNativeVpnService() {
                 compareBy<WarpVerifiedConfig> {
                     if (isStalledEndpointCooling(it.host, it.port, queueNowMs)) 1 else 0
                 }
+                    // Личные профили — первыми, но **после** проверки на умерший
+                    // обратный поток: «свой» узел, который только что замолчал, не
+                    // должен держать голову очереди только потому, что он свой.
+                    //
+                    // И только пока он не подводил подряд. Приоритет без этого
+                    // условия необратим: набор выпускается на домашнем Wi-Fi, а на
+                    // мобильной сети его точки входа фильтруются — и тогда каждое
+                    // подключение перебирает полсотни мёртвых адресов, прежде чем
+                    // дойти до первого рабочего встроенного семени, и так каждый
+                    // раз. Отметки о неудачах теперь копятся (см. `canUpdateVerifiedConfig`)
+                    // и накладываются на запись (`withRecordedQuality`), поэтому
+                    // здесь есть на что смотреть.
+                    // Личные профили ведут очередь, но **ограниченным блоком**.
+                    //
+                    // Измерено на устройстве: набор, выпущенный на другой сети, шёл
+                    // впереди целиком, каждая попытка стоила ~7,5 с, и до первого
+                    // прошивочного семени очередь добиралась через шесть минут.
+                    // «В первую очередь» не должно означать «вместо всего
+                    // остального»: голову ведут первые GENERATED_LEAD_LIMIT профилей
+                    // **без единого отказа**, дальше идут семена, а остальные личные
+                    // профили — за ними.
+                    //
+                    // Порог — один отказ, а не три. Отказ обнуляется успехом
+                    // (`noteAttemptOutcome`), профиль из очереди никуда не девается,
+                    // а сходится это за один обход вместо трёх.
+                    .thenBy {
+                        val generated = it.endpointSource == WarpGeneratedStore.ENDPOINT_SOURCE
+                        val leads = generated &&
+                            it.qualityFailureCount == 0 &&
+                            it.seedOrder < GENERATED_LEAD_LIMIT
+                        when {
+                            leads -> 0
+                            !generated -> 1
+                            else -> 2
+                        }
+                    }
                     .thenBy { bundledSeedQueueOrder(it) }
                     .thenByDescending { clientData.getWarpVerifiedQualityTier(it) }
                     .thenByDescending { clientData.warpConfigHoldGrade(it) }
@@ -16211,11 +17286,144 @@ class NovaVpnService : OperaNativeVpnService() {
     }
 
     private fun mergedVerifiedWarpConfigs(clientData: ClientData, scope: String? = null): List<WarpVerifiedConfig> {
-        return (
+        val all = (
             protonVerifiedConfigs(clientData) +
+                generatedWarpConfigs(clientData) +
                 clientData.getWarpVerifiedExportSnapshot(scope) +
                 clientData.getWarpVerifiedConfigs(scope)
             ).distinctBy { it.id }
+        return withoutAvoidedColoEndpoints(all)
+    }
+
+    /**
+     * Вычёркивает точки входа, отвергнутые за нежелательный узел Cloudflare.
+     *
+     * Ключ — **хост**, а не `host:port`. `getLastSuccessEndpoint()` хранит один
+     * хост (порт лежит отдельно, в `getLastSuccessPort`), так что сравнение с
+     * `host:port` не совпадало никогда: список не менялся, та же точка входа
+     * выбиралась снова, и настройка давала пять подряд обрывов всех соединений с
+     * нулевым эффектом — а журнал утверждал обратное.
+     *
+     * Отдельной функцией потому, что фильтр нужен **двум** местам: и слиянию
+     * списков, и первичной волне обычного режима. Пока он был только в слиянии,
+     * обычный режим — то есть тот самый WARP, ради которого настройка и
+     * существует, — его не видел вовсе.
+     */
+    private fun withoutAvoidedColoEndpoints(configs: List<WarpVerifiedConfig>): List<WarpVerifiedConfig> {
+        if (coloAvoidedEndpoints.isEmpty()) return configs
+        val kept = configs.filterNot { it.host in coloAvoidedEndpoints }
+        // Пустой список хуже нежелательного узла: «интернет не работает» — это не
+        // то, что просили, когда просили обойти московский край.
+        return if (kept.isEmpty()) configs else kept
+    }
+
+    /**
+     * Свои выпущенные профили WARP — впереди встроенных семян.
+     *
+     * Впереди потому, что они лучше по обоим признакам сразу: личность
+     * зарегистрирована этим устройством, а не одна на всех из прошивки, и точки
+     * входа найдены сканером на этой сети, а не отобраны при сборке. Встроенные
+     * семена остаются за ними запасным путём — они неизменяемы (I6) и работают
+     * там, где регистрация не проходит вовсе.
+     *
+     * Переключателя больше нет: однажды выпущенные профили используются в первую
+     * очередь всегда. Он был не безобиден — по умолчанию стоял «выключено», то
+     * есть выпущенный набор лежал на диске и не участвовал ни в одной попытке, а
+     * снаружи это выглядело как «выпуск ничего не дал».
+     *
+     * Единственное исключение — режим импортированных профилей: там пользователь
+     * назвал свой список, и подмешивать в него чужие точки входа нельзя.
+     *
+     * Кэш той же длины, что у Proton, и по той же причине: точка вызывается на
+     * каждую попытку перебора, а список лежит в файле.
+     */
+    private fun generatedWarpConfigs(clientData: ClientData): List<WarpVerifiedConfig> {
+        if (clientData.isImportedConfigSourceActive()) {
+            return emptyList()
+        }
+        val nowMs = SystemClock.elapsedRealtime()
+        val cached = cachedGeneratedWarpConfigs
+        if (cached != null && nowMs - cachedGeneratedWarpConfigsAt < PROTON_CONFIG_CACHE_MS) return cached
+        val snapshot = WarpGeneratedStore(this).read()
+        // Маскировка первого пакета берётся из встроенного семени: она уже
+        // проверена на пятидесяти профилях, а подбирать её под сеть умеет
+        // `AwgI1Adaptation` — отдельно и позже.
+        // Накопленные отказы приезжают вместе со снимком: они лежат в том же
+        // файле, рядом с профилями, а не в общем списке проверенных конфигураций,
+        // где идентификатор записи совпал бы с прошивочным семенем того же адреса.
+        val configs = WarpGeneratedStore.toVerifiedConfigs(snapshot, bundledMaskPacket(clientData))
+        cachedGeneratedWarpConfigs = configs
+        cachedGeneratedWarpConfigsAt = nowMs
+        return configs
+    }
+
+    /**
+     * Точки входа, отвергнутые в этом сеансе за нежелательный узел Cloudflare.
+     *
+     * Живёт в памяти службы и умирает вместе с ней: «этот адрес приводит в
+     * Москву» — свойство сегодняшней сети, а не самого адреса. Сохранить его на
+     * диск значило бы вычеркнуть рабочие точки входа на всех остальных сетях.
+     */
+    private val coloAvoidedEndpoints = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+    private val coloSwitchCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+
+    /**
+     * Уводит сессию с нежелательного узла Cloudflare, если так попросили.
+     *
+     * Что здесь **не** делается и почему. Не перебирается страна выхода: её
+     * Cloudflare выбирает по адресу клиента, а не по точке входа, поэтому из
+     * российской сети выход останется российским при любой точке входа — туннель
+     * может идти через Франкфурт и всё равно выходить как Россия. Перебор ради
+     * страны крутился бы вечно. Узел же от точки входа зависит, и жалоба на
+     * замедление YouTube — это фильтрация DPI на трафике через московский край, а
+     * не следствие страны выхода. Подробности и источники — `ExitColoPolicy`.
+     */
+    private fun maybeSwitchAwayFromAvoidedColo(clientData: ClientData, observedColo: String) {
+        val enabled = clientData.isAvoidedColoSwitchEnabled()
+        val switches = coloSwitchCount.get()
+        val verdict = ExitColoPolicy.evaluate(
+            enabled = enabled,
+            observedColo = observedColo,
+            switchesSoFar = switches,
+        )
+        if (!enabled) return
+        LogManager.log(
+            ExitColoPolicy.describe(observedColo, verdict, switches, ExitColoPolicy.DEFAULT_SWITCH_BUDGET)
+        )
+        if (verdict != ExitColoPolicy.Verdict.SWITCH) return
+        val endpoint = clientData.getLastSuccessEndpoint()?.trim().orEmpty()
+        if (endpoint.isBlank()) {
+            // Без адреса вычёркивать нечего, и переподключение вернуло бы на тот же
+            // узел. Молчать нельзя (I4): снаружи это выглядело бы как «настройка
+            // включена и ничего не делает».
+            LogManager.log("Обход узла: текущая точка входа неизвестна — переключаться не с чего.")
+            return
+        }
+        coloAvoidedEndpoints += endpoint
+        coloSwitchCount.incrementAndGet()
+        LogManager.log("Обход узла: вычёркиваем $endpoint на этот сеанс и переподключаемся.")
+        val generation = beginConnectGeneration(stopExisting = true)
+        if (!isConnectGenerationCurrent(generation) || isUserStopped) return
+        startSmartConnection(
+            regionPreferenceOverride = null,
+            diagnosticsMode = false,
+            connectGenerationId = generation,
+        )
+    }
+    @Volatile
+    private var cachedGeneratedWarpConfigs: List<WarpVerifiedConfig>? = null
+
+    @Volatile
+    private var cachedGeneratedWarpConfigsAt: Long = 0L
+
+    /** `I1` из первого встроенного семени, где он есть. Пусто — строка не пишется. */
+    private fun bundledMaskPacket(clientData: ClientData): String {
+        val seed = clientData.getWarpVerifiedConfigs()
+            .firstOrNull { Regex("""(?im)^I1\s*=""").containsMatchIn(it.rawConfig) }
+            ?: return ""
+        return Regex("""(?im)^I1\s*=\s*(.+)$""").find(seed.rawConfig)?.groupValues?.get(1)?.trim().orEmpty()
     }
 
     /**
@@ -16244,7 +17452,18 @@ class NovaVpnService : OperaNativeVpnService() {
         val configs = if (account == null) {
             emptyList()
         } else {
-            ProtonProfileStore.toVerifiedConfigs(store.readProfiles(), account.wireGuardPrivateKey)
+            // Выбранная пользователем страна поднимает свои узлы наверх очереди.
+            // Именно поднимает: отбор опустошил бы её там, где узлов этой страны
+            // не осталось, и «выбрал страну — перестал подключаться» было бы
+            // честным следствием, но не тем, что просили.
+            ProtonProfileStore.toVerifiedConfigs(
+                ProtonProfileStore.orderByCountry(
+                    store.readProfiles(),
+                    clientData.getProtonCountryPreference(),
+                ),
+                account.wireGuardPrivateKey,
+                clientData.getProtonCountryPreference(),
+            )
         }
         cachedProtonConfigs = configs
         cachedProtonConfigsAt = nowMs
@@ -18202,7 +19421,9 @@ class NovaVpnService : OperaNativeVpnService() {
         fun verifiedSourceOrder(attempt: ConnectionAttempt): Int {
             return when (attempt.endpointSource.lowercase()) {
                 "last-success-exact" -> 0
-                "verified-config" -> 1
+                // Личные профили Cloudflare — на равных с проверенными: адрес нашёл
+                // сканер настоящим рукопожатием с ключом этого устройства.
+                "verified-config", "warp-generated" -> 1
                 "last-success" -> 2
                 "bundled-seed" -> 3
                 else -> 4
@@ -18253,7 +19474,9 @@ class NovaVpnService : OperaNativeVpnService() {
         fun endpointSourcePriority(attempt: ConnectionAttempt): Int {
             return when (attempt.endpointSource.lowercase()) {
                 "last-success-exact" -> 0
-                "verified-config" -> 1
+                // Личные профили Cloudflare — на равных с проверенными: адрес нашёл
+                // сканер настоящим рукопожатием с ключом этого устройства.
+                "verified-config", "warp-generated" -> 1
                 "last-success" -> 2
                 "bundled-seed" -> 3
                 "awg-fallback" -> 4
@@ -18591,7 +19814,9 @@ class NovaVpnService : OperaNativeVpnService() {
         fun endpointSourceOrder(attempt: ConnectionAttempt): Int {
             return when (attempt.endpointSource.lowercase()) {
                 "last-success-exact" -> 0
-                "verified-config" -> 1
+                // Личные профили Cloudflare — на равных с проверенными: адрес нашёл
+                // сканер настоящим рукопожатием с ключом этого устройства.
+                "verified-config", "warp-generated" -> 1
                 "last-success" -> 2
                 "bundled-seed" -> 3
                 else -> 4
@@ -19447,7 +20672,12 @@ class NovaVpnService : OperaNativeVpnService() {
     private fun noteMasqueSniFailure(mode: TransportMode, host: String, port: Int) {
         if (!mode.engine.equals("masque", ignoreCase = true)) return
         val key = masqueSniKey(mode, host, port)
-        val next = ((masqueSniFailures[key] ?: 0) + 1) % MASQUE_NEUTRAL_SNI_POOL.size
+        // Цикл считается по своей длине, а не по размеру запасного пула из шести
+        // имён. Этот счётчик — индекс в очереди `SniMaskPolicy` длиной 64, и пока
+        // он заворачивался на шести, дальше шестой позиции перебор не уходил
+        // никогда: очередь строилась из шестидесяти четырёх имён, а доступны были
+        // ровно первые шесть.
+        val next = ((masqueSniFailures[key] ?: 0) + 1) % MASQUE_SNI_ATTEMPT_CYCLE
         masqueSniFailures[key] = next
         // Запись потребляется: имя уже получило свою оценку, и оставленное здесь оно
         // могло бы получить вторую — за попытку, в которой не участвовало.
@@ -21182,8 +22412,23 @@ class NovaVpnService : OperaNativeVpnService() {
         }
     }
 
+    /**
+     * Раздельное туннелирование по приложениям.
+     *
+     * Поверх выбора человека лежит закрытый список [DirectAppsPolicy]: банк,
+     * госуслуги, карты и личные кабинеты операторов уводятся мимо туннеля даже
+     * в режиме «все приложения».
+     *
+     * В режиме allow-list (`1`) их нельзя «дополнительно запретить»: Android не
+     * разрешает смешивать `addAllowedApplication` и `addDisallowedApplication` в
+     * одном `Builder` — второй вызов бросает исключение. Но там это и не нужно:
+     * всё, чего нет в списке разрешённых, и так идёт мимо. Достаточно вычесть
+     * прямые пакеты из самого списка, иначе явно добавленный туда банк остался
+     * бы в туннеле вопреки настройке.
+     */
     private fun applySplitTunnelPolicy(builder: Builder, clientData: ClientData) {
         val splitMode = clientData.getSplitMode()
+        val directApps = DirectAppsPolicy.resolve(this, clientData)
         val selectedApps = clientData.getSplitApps()
             .map { it.trim() }
             .filter { it.isNotBlank() && it != packageName }
@@ -21191,7 +22436,9 @@ class NovaVpnService : OperaNativeVpnService() {
 
         when (splitMode) {
             1 -> {
-                val allowedPackages = (selectedApps + packageName).distinct()
+                val allowedPackages = (selectedApps + packageName)
+                    .filter { it == packageName || it !in directApps }
+                    .distinct()
                 var applied = 0
                 for (pkg in allowedPackages) {
                     try {
@@ -21202,12 +22449,13 @@ class NovaVpnService : OperaNativeVpnService() {
                 }
                 LogManager.log(
                     "Split tunneling: только выбранные приложения " +
-                        "(${selectedApps.size}), служебный пакет Nova оставлен внутри VPN."
+                        "(${selectedApps.size}), служебный пакет Nova оставлен внутри VPN. " +
+                        "Прямых вычтено: ${selectedApps.count { it in directApps }}."
                 )
             }
 
             2 -> {
-                val disallowedPackages = selectedApps
+                val disallowedPackages = (selectedApps + directApps).distinct()
                 for (pkg in disallowedPackages) {
                     try {
                         builder.addDisallowedApplication(pkg)
@@ -21216,22 +22464,33 @@ class NovaVpnService : OperaNativeVpnService() {
                 }
                 LogManager.log(
                     "Split tunneling: VPN для всех, кроме выбранных приложений " +
-                        "(${selectedApps.size}), служебный пакет Nova оставлен внутри VPN."
+                        "(${selectedApps.size}) и прямых (${directApps.size}), " +
+                        "служебный пакет Nova оставлен внутри VPN."
                 )
             }
 
             else -> {
-                LogManager.log("Split tunneling: все приложения, включая Nova, идут через VPN.")
+                for (pkg in directApps) {
+                    try {
+                        builder.addDisallowedApplication(pkg)
+                    } catch (_: Exception) {
+                    }
+                }
+                LogManager.log(
+                    "Split tunneling: все приложения идут через VPN, кроме прямых (${directApps.size})."
+                )
             }
         }
     }
 
     private fun applyOperaSplitTunnelPolicy(builder: Builder, clientData: ClientData) {
         val splitMode = clientData.getSplitMode()
+        val directApps = DirectAppsPolicy.resolve(this, clientData)
         val selectedApps = clientData.getSplitApps()
             .map { it.trim() }
             .filter { it.isNotBlank() && it != packageName }
             .distinct()
+            .filter { splitMode != 1 || it !in directApps }
 
         when (splitMode) {
             1 -> {
@@ -21259,7 +22518,7 @@ class NovaVpnService : OperaNativeVpnService() {
                 } catch (error: Exception) {
                     LogManager.log("Opera split tunneling: не удалось исключить пакет Nova из VPN: ${error.message}")
                 }
-                for (pkg in selectedApps) {
+                for (pkg in (selectedApps + directApps).distinct()) {
                     try {
                         builder.addDisallowedApplication(pkg)
                     } catch (error: Exception) {
@@ -21268,7 +22527,7 @@ class NovaVpnService : OperaNativeVpnService() {
                 }
                 LogManager.log(
                     "Opera split tunneling: VPN для всех, кроме выбранных приложений " +
-                        "(${selectedApps.size}), пакет Nova исключён из VPN."
+                        "(${selectedApps.size}) и прямых (${directApps.size}), пакет Nova исключён из VPN."
                 )
             }
 
@@ -21278,20 +22537,33 @@ class NovaVpnService : OperaNativeVpnService() {
                 } catch (error: Exception) {
                     LogManager.log("Opera split tunneling: не удалось исключить пакет Nova из VPN: ${error.message}")
                 }
-                LogManager.log("Opera split tunneling: все приложения, кроме Nova, идут через VPN.")
+                for (pkg in directApps) {
+                    try {
+                        builder.addDisallowedApplication(pkg)
+                    } catch (error: Exception) {
+                        LogManager.log("Opera split tunneling: не удалось исключить пакет $pkg из VPN: ${error.message}")
+                    }
+                }
+                LogManager.log(
+                    "Opera split tunneling: все приложения, кроме Nova и прямых " +
+                        "(${directApps.size}), идут через VPN."
+                )
             }
         }
     }
 
-    private fun normalizeRegionPreference(value: String?): String {
-        return when (value?.trim()?.lowercase()) {
-            "eu" -> "eu"
-            "us" -> "us"
-            "ru" -> "ru"
-            "proton" -> "proton"
-            else -> "auto"
-        }
-    }
+    /**
+     * Приводит сохранённый регион к известному значению.
+     *
+     * Словарь один на всё приложение — [RegionTransportPolicy.KNOWN_REGIONS].
+     * Здесь его копия не хватала на `masque` и `vless`, и каждое из семнадцати
+     * мест службы, зовущих эту функцию, молча превращало явный выбор
+     * пользователя в «Авто», а «Авто» разрешает подмену транспорта. Это ровно то
+     * переопределение, которое запрещает I1, и тот же класс, что G51 и G53:
+     * список известных значений, записанный дважды, расходится молча.
+     */
+    private fun normalizeRegionPreference(value: String?): String =
+        RegionTransportPolicy.normalizeKnown(value)
 
     /**
      * Выбран ли пользователем собственный источник профилей.
@@ -21391,7 +22663,27 @@ class NovaVpnService : OperaNativeVpnService() {
         // Сам DoH выводится наружу независимо от списка интерфейса: в `addDnsServer`
         // он попасть не может (там только IP), но идти обязан напрямую — иначе
         // шифрованный резолвер уедет в тот самый туннель, чьи имена он и разрешает.
-        val priorityDoh = priorityDohAddresses().filter { it.isNotBlank() }.toSet()
+        // Режим «через VPN» отменяет вырез целиком, включая встроенную цепочку.
+        //
+        // Вырез маршрута сильнее метки сокета: адрес с `excludeRoute` не попадает
+        // в TUN вообще, помечен сокет или нет. Оставить здесь адреса встроенной
+        // цепочки значило бы, что запрос по правилу «через туннель» всё равно
+        // уходит мимо него — то есть настройка не действует, а выглядит как
+        // действующая.
+        val ruleSet = runCatching { DnsRulesStore.load(this) }.getOrNull()
+        val routeMode = ruleSet?.routeMode ?: DnsRouteMode.AUTO
+        val tunnelRouted = ruleSet?.enabled == true && routeMode == DnsRouteMode.TUNNEL
+        // Адрес, до которого ядро ходит по защищённому сокету, обязан иметь
+        // маршрут мимо туннеля — иначе шифрованный резолвер уедет в тот самый
+        // туннель, чьи имена он и разрешает. Режим «через VPN» это отменяет:
+        // вырез сильнее метки сокета, адрес с `excludeRoute` не попадает в TUN
+        // вообще, и оставленный вырез сделал бы настройку недействующей.
+        val userBypass = runCatching { userDnsPlan().bypass }.getOrDefault(emptyList())
+        val priorityDoh = if (tunnelRouted) {
+            emptySet()
+        } else {
+            (priorityDohAddresses() + userBypass).filter { it.isNotBlank() }.toSet()
+        }
         if (priorityDoh.isEmpty()) {
             // Молчать нельзя (I4): пустой список означает, что шифрованный резолвер
             // не развернулся, и весь DNS пойдёт внутрь туннеля — это рабочее
@@ -21420,15 +22712,37 @@ class NovaVpnService : OperaNativeVpnService() {
                 underlyingNetwork?.let { connectivityManager?.getLinkProperties(it) }
             )
         if (!strictPrivateDns) {
+            if (tunnelRouted) {
+                LogManager.log(
+                    "DNS идёт через туннель по настройке: маршрут мимо туннеля не выводим " +
+                        "ни для одного резолвера."
+                )
+                return emptySet()
+            }
             if (priorityDoh.isNotEmpty()) {
                 LogManager.log(
-                    "Мимо туннеля идёт только шифрованный DNS ${PriorityDns.HOST}: " +
-                        "${priorityDoh.joinToString(",")}. Открытый DNS наружу не выпускаем."
+                    // Строка перечисляет то, что действительно выведено маршрутом:
+                    // резолвер владельца и, если ступень включена, адреса резолвера
+                    // провайдера. Прежний текст утверждал «только шифрованный DNS»
+                    // и печатал при этом весь список — то есть противоречил сам себе
+                    // ровно в том месте, где его и читают при разборе утечки.
+                    "Мимо туннеля идут только резолвер ${PriorityDns.HOST} и, если ступень включена, " +
+                        "резолвер провайдера: ${priorityDoh.joinToString(",")}. " +
+                        "Bootstrap чужих шифрованных резолверов наружу не выводим."
                 )
             }
             return priorityDoh
         }
 
+        // Дальше — только ветка строгого Private DNS, и «через VPN» её не отменяет.
+        //
+        // Она написана ровно против того, что иначе происходит: netd резолвит имя
+        // самого DoT-сервера через сеть VPN, виртуальный DNS tun2proxy отдаёт на
+        // него поддельный адрес, сеть помечается `PrivateDnsBroken` и резолвинг
+        // умирает целиком. Ранний выход по режиму стоял выше этой ветки и отменял
+        // её — то есть выбор «через VPN» в Opera или VLESS ломал резолвинг
+        // полностью. В этих режимах перехвата ядра нет вовсе, так что выбор пути
+        // там ни на что и не влияет.
         val plain = plainDnsServers.map { it.trim() }.filter { it.isNotBlank() }.toSet()
         if (plain.isEmpty()) return priorityDoh
         LogManager.log(
@@ -21438,6 +22752,209 @@ class NovaVpnService : OperaNativeVpnService() {
                 "Наружу при этом уходит одно имя — самого DoT-сервера."
         )
         return priorityDoh + plain
+    }
+
+    /** Разобранный список адресов вместе с ключом, по которому он посчитан. */
+    private class DomainBypassCache(
+        val key: String,
+        val computedAtMs: Long,
+        val addresses: Set<String>,
+    )
+
+    @Volatile
+    private var domainBypassCache: DomainBypassCache? = null
+
+    /**
+     * Забыть посчитанные адреса обхода по доменам.
+     *
+     * Зовётся из [applyExplicitReapplyOverrides]: настройки приехали новые, а кэш
+     * держит ответ, посчитанный по старым, и живёт десять минут. Без сброса правка
+     * на экране применилась бы только через них.
+     */
+    private fun invalidateDomainBypassCache() {
+        domainBypassCache = null
+    }
+
+    /**
+     * Адреса доменов, которые человек велел пускать мимо туннеля.
+     *
+     * ## Почему именно адреса, а не имена
+     *
+     * Android фиксирует маршруты в момент `establish()` и не умеет решать по имени:
+     * в таблице маршрутизации имён нет вовсе. Единственный доступный способ — узнать
+     * адреса заранее и вырезать их из маршрутов туннеля через `excludeRoute`. Отсюда
+     * два честных ограничения, о которых сказано и на экране: правило действует только
+     * на те адреса, что имя имело в момент подключения (CDN может отдать другие), а
+     * целые зоны (`.ru`, `.su`, кириллические) так не реализуются вовсе — списка всех
+     * адресов зоны не существует.
+     *
+     * ## Почему резолв со своим бюджетом
+     *
+     * Функция вызывается внутри сборки TUN-интерфейса, то есть её время — это время
+     * подключения. Мёртвое имя в списке не имеет права его съесть: на этом уже горели
+     * с Private DNS, где голый `getAllByName` висел около восьмидесяти секунд и попытка
+     * не начиналась вовсе. Поэтому предел на каждое имя, общий предел на весь список и
+     * ограниченный пул: что успело разрешиться — применяется, остальное молча теряется,
+     * но пишется в журнал.
+     *
+     * Резолвим через [resolveHostOutsideVpn] — он ходит по подложной сети. Обычный
+     * резолвер после подъёма туннеля уходит внутрь него, и «мимо VPN» перестало бы
+     * быть правдой.
+     */
+    private fun domainBypassAddresses(underlyingNetwork: android.net.Network?): Set<String> {
+        val clientData = ClientData(this)
+        if (!clientData.isDomainBypassEnabled()) return emptySet()
+
+        // До Android 13 выреза маршрута нет, и `configureInternetRoutes` выражает
+        // каждый обойдённый адрес дырой в `0.0.0.0/0` и `::/0`: один IPv4 стоит
+        // ~31 маршрут, один IPv6 — ~127. Полтора десятка адресов превращаются в
+        // тысячи `addRoute` внутри `establish()`, то есть в многосекундный затык
+        // на потоке подключения, а свежие прошивки такой набор просто отвергают.
+        // Молчать нельзя: настройка выглядела бы работающей (I4).
+        if (findExcludeRouteMethod(Builder()) == null) {
+            LogManager.log(
+                "Обход по доменам: на этой версии Android нет выреза маршрута (нужен Android 13), " +
+                    "а выражать адреса дырами в маршруте по умолчанию слишком дорого — маршрутом " +
+                    "не выводится ничего. И зоны, и свои домены ведёт ядро по выученным из DNS " +
+                    "адресам: маршруты ему не нужны, но покрывает оно только TCP 80/443."
+            )
+            return emptySet()
+        }
+
+        val rawCustom = clientData.getDomainBypassCustomRaw()
+        val rawZones = clientData.getDomainBypassZonesRaw()
+        val domains = DomainBypassRules.parseDomains(rawCustom).toList()
+
+        // Зоны сюда не попадают и попасть не могут: вырез маршрута выражается
+        // адресами, а списка всех адресов зоны не существует. Их применяет ядро —
+        // [applyCoreDomainBypassPolicy], учась адресам из перехваченных DNS-ответов.
+        val zones = DomainBypassRules.parseZones(rawZones)
+        if (zones.isNotEmpty()) {
+            // «cyrillic» — флаг, а не зона: в ядре под него отдельный параметр
+            // (см. applyCoreDomainBypassPolicy). Оставленный в перечислении, он
+            // читался бы в логе как домен верхнего уровня с таким именем.
+            val cyrillic = DomainBypassRules.CYRILLIC_TOKEN in zones
+            val named = (zones - DomainBypassRules.CYRILLIC_TOKEN).joinToString(",")
+            val zoneText = when {
+                named.isNotEmpty() && cyrillic -> "$named + кириллические"
+                named.isNotEmpty() -> named
+                else -> "кириллические"
+            }
+            LogManager.log(
+                "Обход по доменам: зоны ($zoneText) применяет ядро по выученным " +
+                    "из DNS адресам; в вырез маршрута уходят только свои домены."
+            )
+        }
+
+        if (domains.isEmpty()) {
+            LogManager.log(
+                "Обход по доменам: список своих доменов пуст — вырезом маршрута не выведено ничего."
+            )
+            return emptySet()
+        }
+
+        val networkKey = underlyingNetwork
+            ?.let { runCatching { it.networkHandle.toString() }.getOrDefault(it.toString()) }
+            ?: "none"
+        val cacheKey = "$rawCustom|$networkKey"
+        val now = SystemClock.elapsedRealtime()
+
+        domainBypassCache?.let { cached ->
+            if (cached.key == cacheKey && now - cached.computedAtMs < DOMAIN_BYPASS_CACHE_TTL_MS) {
+                LogManager.log(
+                    "Обход по доменам: берём готовые ${cached.addresses.size} адресов из кэша, " +
+                        "настройки и подложная сеть не менялись."
+                )
+                return cached.addresses
+            }
+        }
+
+        val applied = domains.take(DOMAIN_BYPASS_MAX_DOMAINS)
+        val dropped = domains.size - applied.size
+        if (dropped > 0) {
+            LogManager.log(
+                "Обход по доменам: задано ${domains.size} доменов, применяем первые " +
+                    "$DOMAIN_BYPASS_MAX_DOMAINS, отброшено $dropped. Отброшенные пойдут через туннель " +
+                    "как обычно — считать список полностью покрытым нельзя."
+            )
+        }
+
+        val addresses = linkedSetOf<String>()
+        var resolvedCount = 0
+        val pool = Executors.newFixedThreadPool(
+            minOf(DOMAIN_BYPASS_RESOLVE_PARALLELISM, applied.size)
+        )
+        try {
+            val pending = applied.map { domain ->
+                domain to pool.submit<List<InetAddress>> {
+                    resolveHostOutsideVpn(
+                        hostname = domain,
+                        underlyingNetwork = underlyingNetwork,
+                        timeoutMs = DOMAIN_BYPASS_RESOLVE_TIMEOUT_MS,
+                    )
+                }
+            }
+            val deadline = now + DOMAIN_BYPASS_RESOLVE_BUDGET_MS
+            for ((_, future) in pending) {
+                val remaining = deadline - SystemClock.elapsedRealtime()
+                val resolved = if (remaining <= 0L) {
+                    // Бюджет исчерпан: досматривать очередь нечем, но то, что уже
+                    // разрешилось, применяем — частичный обход лучше сорванного подъёма.
+                    // Готовую задачу при этом не выбрасываем: она ничего больше не
+                    // ждёт, а её результат честно посчитан.
+                    if (future.isDone && !future.isCancelled) {
+                        runCatching { future.get() }.getOrDefault(emptyList())
+                    } else {
+                        future.cancel(true)
+                        emptyList()
+                    }
+                } else {
+                    try {
+                        future.get(remaining, TimeUnit.MILLISECONDS)
+                    } catch (_: Exception) {
+                        future.cancel(true)
+                        emptyList()
+                    }
+                }
+                if (resolved.isNotEmpty()) resolvedCount++
+                // Потолок стоит на адресах, а не только на доменах: за одним именем
+                // CDN отдаёт с десяток записей, и тридцать два домена легко дают
+                // сотню адресов — а каждый из них ещё превращается в маршрут.
+                resolved.take(DOMAIN_BYPASS_MAX_ADDRESSES_PER_DOMAIN).forEach { address ->
+                    if (addresses.size >= DOMAIN_BYPASS_MAX_ADDRESSES) return@forEach
+                    // У IPv6 адрес приходит с зоной вида `%wlan0`; в маршруте она лишняя.
+                    val text = address.hostAddress?.substringBefore('%').orEmpty().trim()
+                    if (text.isNotEmpty()) addresses.add(text)
+                }
+            }
+        } finally {
+            pool.shutdownNow()
+        }
+
+        LogManager.log(
+            "Обход по доменам: применено $resolvedCount из ${applied.size} доменов, " +
+                "мимо туннеля выведено ${addresses.size} адресов " +
+                "(${addresses.joinToString(",")})."
+        )
+
+        // Пустой результат при непустом списке — это не «нечего выводить», а
+        // «не смогли сейчас»: DNS мог не отвечать в момент восстановления сессии
+        // после смены сети. Запомнить такое на десять минут значит выключить
+        // настройку до конца сеанса, ничего об этом не сказав.
+        if (addresses.isEmpty()) {
+            LogManager.log(
+                "Обход по доменам: ни один домен не разрешился — не запоминаем этот результат, " +
+                    "следующее подключение попробует снова."
+            )
+            domainBypassCache = null
+        } else {
+            domainBypassCache = DomainBypassCache(
+                key = cacheKey,
+                computedAtMs = SystemClock.elapsedRealtime(),
+                addresses = addresses,
+            )
+        }
+        return addresses
     }
 
     private fun applyPrivateDnsBypass(
@@ -21826,7 +23343,12 @@ class NovaVpnService : OperaNativeVpnService() {
         underlyingNetwork: android.net.Network? = null,
         timeoutMs: Long = PRIVATE_DNS_RESOLVE_TIMEOUT_MS,
     ): List<InetAddress> {
-        val executor = Executors.newSingleThreadExecutor()
+        val executor = Executors.newSingleThreadExecutor { runnable ->
+            // Демон и с именем: `InetAddress.getAllByName` прерывание не уважает,
+            // и после `shutdownNow` поток остаётся висеть на резолве. Недемон в
+            // этом месте держал бы процесс, а безымянный — не находился бы в дампе.
+            Thread(runnable, "NovaResolveOutsideVpn").apply { isDaemon = true }
+        }
         return try {
             val task = executor.submit<List<InetAddress>> {
                 val resolved = underlyingNetwork?.getAllByName(hostname)
@@ -22513,13 +24035,55 @@ class NovaVpnService : OperaNativeVpnService() {
      * настоящее подключение. Голая проба на сети с DPI блокируется сама по себе, и
      * результат «узел мёртв» относился бы к пробе, а не к узлу.
      */
-    private fun probeProtonProfilesFromServiceProcess() {
+    private fun probeProtonProfilesFromServiceProcess(onFinished: (() -> Unit)? = null) {
+        // Второй такой же замер писал бы те же два файла из двадцати четырёх
+        // потоков наперегонки. Повторный `ACTION_PROBE_PROTON_PROFILES` приходит
+        // легко: его шлёт и прогон профилей, и кнопка «Обновить профили Proton».
+        //
+        // Отказавший вызов обязан всё равно позвать `onFinished` — иначе теряется
+        // ветка, которая гасит службу, и `:vpn` остаётся на переднем плане с
+        // вечным уведомлением при выключенном VPN.
+        if (!protonProbeInFlight.compareAndSet(false, true)) {
+            // `onFinished` здесь звать нельзя. Он снимает передний план и гасит
+            // службу, а замер, который уже идёт, живёт в потоке-демоне именно этой
+            // службы: остановка убила бы его на середине, оставив
+            // `proton_probe.json` в состоянии `running`, и ждущий прогон выжег бы
+            // все 120 с впустую. Уборку за собой сделает тот вызов, который замер
+            // и завёл.
+            LogManager.log("Proton probe: замер уже идёт — второй не заводим, службу не трогаем.")
+            return
+        }
+        var handedOff = false
+        try {
+            probeProtonProfilesLocked(onFinished) { handedOff = true }
+        } finally {
+            // Признак снимает тот, кто им завладел: если работа так и не ушла в
+            // поток, снять его больше некому и следующий замер не завёлся бы уже
+            // никогда.
+            if (!handedOff) protonProbeInFlight.set(false)
+        }
+    }
+
+    /**
+     * Признак идущего замера Proton.
+     *
+     * Живёт в памяти процесса `:vpn`, а не в файле, намеренно: он защищает от двух
+     * одновременных потоков **внутри одного процесса**, а замер только там и идёт.
+     */
+    private val protonProbeInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private fun probeProtonProfilesLocked(onFinished: (() -> Unit)?, onHandedOff: () -> Unit) {
         val store = ProtonProfileStore(this)
         val account = store.readAccount()
-        val candidates = store.readProfiles()
+        // Кандидаты берутся из своего файла, а не из рабочего списка: рабочий список
+        // всё это время обязан оставаться прежним, иначе очередь подключения,
+        // пересобранная во время замера, построится из неизмеренного набора
+        // (см. `ProtonProfileStore.candidatesFile`).
+        val candidates = store.readCandidates()
         if (account == null || candidates.isEmpty()) {
             LogManager.log("Proton probe: мерить нечего — нет личности или списка кандидатов.")
             store.writeProbeState(ProtonProfileStore.ProbeState(ProtonProfileStore.STATE_FAILED, 0, 0, 0))
+            onFinished?.invoke()
             return
         }
         // `protect()` только исключает сокет из туннеля, но не выбирает ему сеть:
@@ -22529,7 +24093,9 @@ class NovaVpnService : OperaNativeVpnService() {
         val underlyingNetwork = runCatching {
             selectUnderlyingNetwork(getSystemService(android.net.ConnectivityManager::class.java))
         }.getOrNull()
+        onHandedOff()
         startSafeServiceThread("NovaProtonProbe") {
+          try {
             val privateKey = account.wireGuardPrivateKey
             val total = candidates.size
             store.writeProbeState(
@@ -22538,6 +24104,13 @@ class NovaVpnService : OperaNativeVpnService() {
             LogManager.log("Proton probe: меряем $total кандидатов рукопожатием, сокеты защищены.")
 
             val pool = java.util.concurrent.Executors.newFixedThreadPool(PROTON_PROBE_PARALLELISM)
+            // Второй пул того же размера — под запасной TCP-замер.
+            //
+            // Он идёт **одновременно** с рукопожатием, а не после него: последовательно
+            // мёртвый узел стоил бы трёх секунд сверх трёх с половиной, то есть
+            // удвоил бы весь замер. Параллельно цена — max(рукопожатие, TCP), а это и
+            // есть срок рукопожатия.
+            val tcpPool = java.util.concurrent.Executors.newFixedThreadPool(PROTON_PROBE_PARALLELISM)
             val done = java.util.concurrent.atomic.AtomicInteger(0)
             val alive = java.util.concurrent.atomic.AtomicInteger(0)
             val probeReplyType2 = java.util.concurrent.atomic.AtomicInteger(0)
@@ -22546,6 +24119,41 @@ class NovaVpnService : OperaNativeVpnService() {
             val measured = try {
                 val futures = candidates.mapIndexed { index, candidate ->
                     pool.submit<ProtonProfile> {
+                        val tcpFuture = tcpPool.submit<Int> {
+                            ProtonLatency.probeTcpRttMs(
+                                host = candidate.entryIp,
+                                timeoutMs = PROTON_PROBE_TCP_TIMEOUT_MS,
+                                protect = { socket ->
+                                    // Порядок здесь **не** такой, как у рукопожатия,
+                                    // и это принципиально. `probeHandshakeRttMs`
+                                    // работает с `DatagramSocket`, который
+                                    // привязывается уже в конструкторе, поэтому
+                                    // дескриптор у него есть сразу. У `Socket()`
+                                    // дескриптора ещё нет — он создаётся в `bind`
+                                    // или `connect`, — а `VpnService.protect(Socket)`
+                                    // его разыменовывает. Без явного `bind` защита
+                                    // отказывала на каждом кандидате, отказ глотался
+                                    // (`catch { -1 }`), и весь TCP-ярус ранжирования
+                                    // молча вырождался в сортировку по нагрузке.
+                                    val boundLocal = runCatching {
+                                        socket.bind(java.net.InetSocketAddress(0))
+                                    }.isSuccess
+                                    val protectedOk = runCatching { protect(socket) }.getOrDefault(false)
+                                    val bound = underlyingNetwork?.let { network ->
+                                        runCatching { network.bindSocket(socket) }.isSuccess
+                                    }
+                                    // Молчать нельзя (I4): незащищённый сокет ушёл бы
+                                    // в проверяемый туннель, и «TCP-откликом 0»
+                                    // читалось бы как «узлы мертвы».
+                                    if (index == 0) {
+                                        LogManager.log(
+                                            "Proton probe TCP: bind=$boundLocal, protect=$protectedOk, " +
+                                                "bindSocket=$bound."
+                                        )
+                                    }
+                                },
+                            )
+                        }
                         val rtt = ProtonCrypto.probeHandshakeRttMs(
                             privateKeyB64 = privateKey,
                             peerPublicKeyB64 = candidate.peerPublicKey,
@@ -22584,7 +24192,29 @@ class NovaVpnService : OperaNativeVpnService() {
                                 }
                             },
                         )
-                        if (rtt > 0) alive.incrementAndGet()
+                        val tcp = runCatching {
+                            tcpFuture.get(PROTON_PROBE_TCP_TIMEOUT_MS * 2L, TimeUnit.MILLISECONDS)
+                        }.getOrDefault(-1)
+                        // Рукопожатие сильнее TCP-отклика и потому идёт первым: оно
+                        // доказывает, что узел знает наш ключ, а TCP говорит только
+                        // «сервер жив и вот столько до него лететь». Но замер,
+                        // выданный за рукопожатие, когда его не было, — это враньё в
+                        // журнале, поэтому источник записывается рядом с числом.
+                        val result = when {
+                            rtt > 0 -> candidate.copy(
+                                pingMs = rtt,
+                                pingSource = ProtonLatency.SOURCE_HANDSHAKE,
+                            )
+                            tcp > 0 -> candidate.copy(
+                                pingMs = tcp,
+                                pingSource = ProtonLatency.SOURCE_TCP,
+                            )
+                            else -> candidate.copy(
+                                pingMs = -1,
+                                pingSource = ProtonLatency.SOURCE_NONE,
+                            )
+                        }
+                        if (result.pingMs > 0) alive.incrementAndGet()
                         val finished = done.incrementAndGet()
                         if (finished % 5 == 0 || finished == total) {
                             store.writeProbeState(
@@ -22596,7 +24226,7 @@ class NovaVpnService : OperaNativeVpnService() {
                                 )
                             )
                         }
-                        candidate.copy(pingMs = rtt)
+                        result
                     }
                 }
                 futures.mapNotNull {
@@ -22604,29 +24234,44 @@ class NovaVpnService : OperaNativeVpnService() {
                 }
             } finally {
                 pool.shutdownNow()
+                tcpPool.shutdownNow()
             }
 
-            // Если не отозвался никто, список не выбрасывается: проба — догадка, а не
-            // приговор, и молчание узла на неё уже один раз означало не мёртвый узел.
-            // Тогда порядок задаёт нагрузка, а честность выдачи — счётчик `alive`.
-            val answered = measured.filter { it.pingMs > 0 }
-            val ranked = if (answered.isNotEmpty()) {
-                answered.sortedBy { it.pingMs }
-            } else {
-                measured.sortedBy { it.load }
-            }.take(ProtonProfileManager.TARGET_COUNT)
+            // Три яруса, а не два.
+            //
+            // Раньше их было два: ответившие на рукопожатие — по задержке, все
+            // остальные — по нагрузке. Из России рукопожатие отвечает нулю узлов из
+            // пятидесяти (открытый P11), то есть ярус ровно один, и «отсортировать
+            // по возрастанию задержки» превращалось в «отсортировать по
+            // загруженности сервера»: первым в очереди оказывался не ближайший узел,
+            // а наименее занятый — на другом континенте.
+            //
+            // Теперь ниже рукопожатия лежит TCP-отклик ([ProtonLatency]). Он слабее —
+            // ничего не доказывает про ключ, — но это настоящая задержка до того же
+            // адреса, и порядок он задаёт правильный. Ярус нагрузки остаётся третьим,
+            // для узлов, не ответивших вообще ничем.
+            val answered = measured.filter { it.pingSource == ProtonLatency.SOURCE_HANDSHAKE }
+            val tcpOnly = measured.filter { it.pingSource == ProtonLatency.SOURCE_TCP }
+            val silent = measured.filter { it.pingMs <= 0 }
+            val ranked = (
+                answered.sortedBy { it.pingMs } +
+                    tcpOnly.sortedBy { it.pingMs } +
+                    silent.sortedBy { it.load }
+                ).take(ProtonProfileManager.TARGET_COUNT)
             store.writeProfiles(ranked)
             store.writeProbeState(
                 ProtonProfileStore.ProbeState(
                     ProtonProfileStore.STATE_DONE,
                     total,
                     total,
-                    answered.size,
+                    answered.size + tcpOnly.size,
                 )
             )
             LogManager.log(
-                "Proton probe: из $total ответили ${answered.size}, " +
-                    "сохранено ${ranked.size}, лучший ${ranked.firstOrNull()?.pingMs ?: -1} мс."
+                "Proton probe: из $total рукопожатием ответили ${answered.size}, " +
+                    "TCP-откликом ${tcpOnly.size}, молчат ${silent.size}. " +
+                    "Сохранено ${ranked.size}, лучший ${ranked.firstOrNull()?.pingMs ?: -1} мс " +
+                    "(${ranked.firstOrNull()?.pingSource?.takeIf { it.isNotEmpty() } ?: "без замера"})."
             )
             // Счётчик без разбивки лжёт (G11): «ответили 0» — это и «узлы молчат», и
             // «узлы отвечают, а мы ответ выбрасываем». Пакетов приходит больше, чем
@@ -22645,10 +24290,23 @@ class NovaVpnService : OperaNativeVpnService() {
             // сверх самой пробы, и до этой перестановки они стояли перед
             // `writeProfiles`, так что `awaitProbe` держал прогон всё это время.
             // Порядок важен только этим: сами замеры не изменились.
-            if (measured.none { it.pingMs > 0 }) {
+            //
+            // Условие — молчание **рукопожатия**, а не отсутствие замера вообще.
+            // TCP-отклик теперь почти всегда есть, и по нему диагностика молчания
+            // рукопожатия не заводилась бы никогда — а именно она и остаётся
+            // единственным источником сведений по открытому P11.
+            if (answered.isEmpty()) {
                 runControlHandshakeProbe(underlyingNetwork)
                 runTunnelledProtonProbe(candidates.first(), privateKey)
             }
+          } finally {
+            // `startSafeServiceThread` проглатывает любое исключение, поэтому без
+            // `finally` бросок в любом месте пробы оставлял бы `:vpn` на переднем
+            // плане с вечным уведомлением и выключенным VPN — ровно то состояние,
+            // ради снятия которого `onFinished` и появился.
+            protonProbeInFlight.set(false)
+            onFinished?.invoke()
+          }
         }
     }
 
@@ -23187,6 +24845,256 @@ class NovaVpnService : OperaNativeVpnService() {
     }
 
     /**
+     * Первый выпуск личных профилей Cloudflare — сам, без кнопки.
+     *
+     * Владелец попросил, чтобы профили выпускались автоматически, если их ещё не
+     * выпускали, и чтобы прогресс был виден на главном экране.
+     *
+     * **После подключения, а не до него.** Прогон — это регистрация устройства
+     * плюс до 45 секунд сканирования сотнями UDP-сокетов; поставить его перед
+     * построением очереди значило бы задержать первое подключение почти на
+     * минуту, причём сканеру для работы нужна та самая сеть, которой ещё нет.
+     * Поэтому первая сессия идёт на прошивочных семенах, а личные профили
+     * возглавят очередь со следующего подключения — ровно так же устроена
+     * фоновая подготовка Proton.
+     *
+     * Прогресс виден: [WarpProfileGenerator] пишет `warp_generated_state.json`, а
+     * главный экран его читает и рисует строку под зелёным статусом (I2 — синглтон
+     * из `:vpn` в интерфейсе не виден вовсе).
+     *
+     * Пауза перед стартом та же, что у Proton: нужен устоявшийся обратный поток, а
+     * не первый успех.
+     */
+    /**
+     * Три выпуска подряд, а не три одновременно.
+     *
+     * Раньше подключение запускало все три фоновые подготовки сразу: профили
+     * Cloudflare AWG, ключ MASQUE и профили Proton. Каждая из них — это
+     * регистрация и десятки проб через **только что** поднятый туннель, и
+     * втроём они забивали его собственный data-plane именно в те секунды, когда
+     * он ещё устаканивается. Снаружи это выглядело как «подключилось и висит», а
+     * чаще всего не доезжал самый первый — выпуск Cloudflare: на устройстве
+     * владельца `warp_generated.json` не появлялся вовсе.
+     *
+     * Порядок задан владельцем и совпадает с порядком, в котором эти профили
+     * потом нужны: Cloudflare AWG, MASQUE, Proton AWG. Шаг между ними —
+     * [PROFILE_ISSUE_STEP_MS].
+     *
+     * Каждый шаг — это по-прежнему прежняя функция со своими проверками
+     * «уже выпущено», «идёт» и «перерыв после неудачи»: последовательность
+     * ничего не выпускает заново, она только разводит начала во времени.
+     */
+    /**
+     * Приводит значение `PersistentKeepalive` к тому, что ядро точно примет.
+     *
+     * Возвращает `null` на всём, что не число и не возрастающий диапазон в
+     * пределах 16 бит: вызывающая сторона тогда берёт своё умолчание, а не
+     * роняет профиль целиком на одной строке. Проверять это в ядре поздно —
+     * там перевёрнутый диапазон отвергает весь `IpcSet`.
+     */
+    private fun normalizeKeepaliveValue(raw: String): String? {
+        val text = raw.trim()
+        if (!KEEPALIVE_VALUE.matches(text)) return null
+        val parts = text.split('-')
+        val low = parts[0].toIntOrNull() ?: return null
+        val high = if (parts.size > 1) parts[1].toIntOrNull() ?: return null else low
+        if (low > high || high > 65_535) return null
+        return text
+    }
+
+    private fun scheduleProfileIssueSequence(reason: String) {
+        if (!profileIssueSequenceRunning.compareAndSet(false, true)) return
+        startSafeServiceThread("NovaProfileIssueSequence") {
+            val clientData = ClientData(applicationContext)
+            try {
+                val steps = listOf<Pair<String, () -> Unit>>(
+                    "Cloudflare AWG" to { scheduleGeneratedWarpBackfill(reason) },
+                    "MASQUE" to { scheduleWarpIdentityBackfill() },
+                    "Proton AWG" to { scheduleProtonProfileBackfill(reason) },
+                )
+                steps.forEachIndexed { index, (label, action) ->
+                    if (currentState != STATE_CONNECTED || isUserStopped) return@startSafeServiceThread
+                    publishProfileIssueProgress(clientData, index + 1, steps.size, label)
+                    action()
+                    if (index < steps.lastIndex) {
+                        if (!sleepWhileConnected(PROFILE_ISSUE_STEP_MS)) {
+                            return@startSafeServiceThread
+                        }
+                    }
+                }
+                // Последний шаг только запущен, не закончен: даём ему столько же,
+                // сколько остальным, прежде чем убрать надпись.
+                sleepWhileConnected(PROFILE_ISSUE_STEP_MS)
+            } finally {
+                clearProfileIssueProgress(clientData)
+                profileIssueSequenceRunning.set(false)
+            }
+        }
+    }
+
+    /**
+     * Спит, пока туннель жив, и говорит, дожил ли он до конца паузы.
+     *
+     * Просыпается часто, а не один раз на все тридцать секунд: остановка в
+     * середине паузы не должна оставлять на экране надпись о выпуске, которого
+     * уже нет.
+     */
+    private fun sleepWhileConnected(totalMs: Long): Boolean {
+        var slept = 0L
+        while (slept < totalMs) {
+            if (currentState != STATE_CONNECTED || isUserStopped) return false
+            val chunk = minOf(500L, totalMs - slept)
+            try {
+                Thread.sleep(chunk)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
+            slept += chunk
+        }
+        return currentState == STATE_CONNECTED && !isUserStopped
+    }
+
+    /**
+     * Пишет ход выпуска в ту же строку под статусом, что и пояснения о транспорте.
+     *
+     * Своей строки под это заводить не стали: место на экране одно, а сообщения
+     * не пересекаются по времени. Чужое пояснение при этом не затирается —
+     * объяснение «работает не тот транспорт» важнее фоновой работы, и если оно
+     * уже стоит, прогресс молчит.
+     */
+    private fun publishProfileIssueProgress(
+        clientData: ClientData,
+        step: Int,
+        total: Int,
+        label: String,
+    ) {
+        val existing = currentTransportNotice.trim()
+        if (existing.isNotEmpty() && !existing.startsWith(PROFILE_ISSUE_NOTICE_PREFIX)) return
+        publishTransportNotice(clientData, "$PROFILE_ISSUE_NOTICE_PREFIX $step/$total: $label")
+        LogManager.log("Выпуск профилей: шаг $step/$total — $label.")
+    }
+
+    private fun clearProfileIssueProgress(clientData: ClientData) {
+        if (!currentTransportNotice.trim().startsWith(PROFILE_ISSUE_NOTICE_PREFIX)) return
+        publishTransportNotice(clientData, "")
+    }
+
+    private fun scheduleGeneratedWarpBackfill(reason: String) {
+        if (!generatedWarpBackfillPending.compareAndSet(false, true)) return
+        val clientData = ClientData(applicationContext)
+        if (clientData.isImportedConfigSourceActive()) {
+            generatedWarpBackfillPending.set(false)
+            return
+        }
+        val store = WarpGeneratedStore(applicationContext)
+        val snapshot = runCatching { store.read() }.getOrNull()
+        val issuedAt = snapshot?.profiles?.maxOfOrNull { it.createdAt } ?: 0L
+        val tooOld = issuedAt > 0L &&
+            System.currentTimeMillis() - issuedAt > GENERATED_WARP_REISSUE_AFTER_MS
+        // Набор мёртв на этой сети, если подвела **каждая** его точка входа.
+        //
+        // Срок в две недели сам по себе этого не ловит: пользователь переехал на
+        // другую сеть сегодня, весь набор там отфильтрован, очередь честно ушла на
+        // прошивочные семена — и осталась бы на них до истечения срока. Условие
+        // точное и дешёвое: счётчик отказов обнуляется первым же успехом, поэтому
+        // «все подвели» означает именно то, что написано. От повторов защищает
+        // часовой перерыв после неудачного прогона.
+        val allFailed = snapshot?.profiles?.isNotEmpty() == true &&
+            snapshot.profiles.all { it.failures > 0 }
+        val stale = tooOld || allFailed
+        val alreadyIssued = snapshot?.identity != null &&
+            snapshot.profiles.isNotEmpty() &&
+            !stale
+        // Отказ прогона стоит дорого (регистрация плюс сканирование), поэтому у
+        // него свой перерыв — иначе сеть, где регистрация не проходит вовсе,
+        // получала бы новый сканер на каждом подключении.
+        val failedAt = runCatching { store.readBackfillFailureAt() }.getOrDefault(0L)
+        val cooldownLeftMs = if (failedAt <= 0L) {
+            0L
+        } else {
+            GENERATED_WARP_BACKFILL_RETRY_MS - (System.currentTimeMillis() - failedAt)
+        }
+        if (alreadyIssued || cooldownLeftMs > 0L || WarpProfileGenerator.isRunning()) {
+            generatedWarpBackfillPending.set(false)
+            return
+        }
+        startSafeServiceThread("NovaWarpGenerateBackfill") {
+            try {
+                Thread.sleep(PROTON_BACKFILL_SETTLE_MS)
+                if (currentState != STATE_CONNECTED || isUserStopped) return@startSafeServiceThread
+                // Повторная проверка после паузы — но с тем же правилом устаревания,
+                // иначе она отменяла бы именно перевыпуск: профили-то на месте.
+                val fresh = runCatching { store.read() }.getOrNull()
+                val freshIssuedAt = fresh?.profiles?.maxOfOrNull { it.createdAt } ?: 0L
+                val freshTooOld = freshIssuedAt > 0L &&
+                    System.currentTimeMillis() - freshIssuedAt > GENERATED_WARP_REISSUE_AFTER_MS
+                val freshAllFailed = fresh?.profiles?.isNotEmpty() == true &&
+                    fresh.profiles.all { it.failures > 0 }
+                if (fresh?.identity != null && fresh.profiles.isNotEmpty() &&
+                    !freshTooOld && !freshAllFailed
+                ) {
+                    return@startSafeServiceThread
+                }
+                LogManager.log(
+                    when {
+                        allFailed ->
+                            "WARP-генератор: ни одна личная точка входа не отвечает на этой сети, " +
+                                "а туннель поднят — ищем новые в фоне ($reason)."
+                        tooOld ->
+                            "WARP-генератор: личные профили выпущены давно, а туннель поднят — " +
+                                "обновляем их в фоне ($reason)."
+                        else ->
+                            "WARP-генератор: личных профилей нет, а туннель поднят — " +
+                                "выпускаем их в фоне ($reason)."
+                    }
+                )
+                WarpProfileGenerator.run(
+                    context = applicationContext,
+                    force = false,
+                    register = { onProgress ->
+                        WarpClient(
+                            applicationContext,
+                            LogManager::log,
+                            shouldAbort = { isUserStopped },
+                        ).register(onProgress)
+                    },
+                )
+                // Успех определяется по тому, что набор **обновился**, а не по тому,
+                // что он непуст.
+                //
+                // При перевыпуске старые профили никуда не деваются: сканер вернул
+                // пусто — `WarpProfileGenerator.run` просто не трогает хранилище.
+                // Проверка «профили есть» тогда объявляла бы удачу, обнуляла часовой
+                // перерыв и писала в журнал «выпущено N профилей» — а сердцебиение
+                // через минуту заводило бы прогон снова, и так по кругу.
+                val after = runCatching { store.read() }.getOrNull()
+                val afterIssuedAt = after?.profiles?.maxOfOrNull { it.createdAt } ?: 0L
+                val refreshed = after?.identity != null &&
+                    after.profiles.isNotEmpty() &&
+                    afterIssuedAt > issuedAt
+                if (refreshed) {
+                    store.writeBackfillFailureAt(0L)
+                    LogManager.log(
+                        "WARP-генератор: фоновый выпуск закончен — ${after.profiles.size} личных профилей, " +
+                            "они возглавят очередь на следующем подключении."
+                    )
+                } else {
+                    store.writeBackfillFailureAt(System.currentTimeMillis())
+                    LogManager.log(
+                        "WARP-генератор: фоновый выпуск не дал новых профилей. " +
+                            "Следующая попытка не раньше чем через час."
+                    )
+                }
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            } finally {
+                generatedWarpBackfillPending.set(false)
+            }
+        }
+    }
+
+    /**
      * Возвращает цикл на MASQUE после того, как ключ выпущен через временный туннель.
      *
      * Без этого шага ступень регистрации оставалась бы конечной станцией: ключ есть,
@@ -23288,19 +25196,50 @@ class NovaVpnService : OperaNativeVpnService() {
                             // «RU». Не знаем страну — честнее показать её пустой.
                             val previousIp = clientData.getLastExitIp().trim()
                             val sameExitAsBefore = primaryIp.isNotBlank() && primaryIp == previousIp
-                            val displayCountry = snapshot.country.ifBlank {
+                            val measuredCountry = snapshot.country.ifBlank {
                                 if (sameExitAsBefore) clientData.getLastExitCountry() else ""
+                            }
+                            // Страна узла Proton известна из самого профиля, и она
+                            // сильнее замера. Причина буквальная: на живой сессии
+                            // Proton бейдж показывал «AWG PROTON: RU», а страны RU у
+                            // Proton на бесплатном уровне нет ни в одном виде —
+                            // встроенный список это 50 узлов NL/US/CA/NO, а живой
+                            // отбирается по `Tier=0`. Значит «RU» приходило не от
+                            // Proton, а от замера, ушедшего мимо туннеля.
+                            val declaredCountry = protonProfileCountryForActiveEndpoint(clientData)
+                            val displayCountry = declaredCountry.ifBlank { measuredCountry }
+                            if (declaredCountry.isNotBlank() &&
+                                measuredCountry.isNotBlank() &&
+                                !declaredCountry.equals(measuredCountry, ignoreCase = true)
+                            ) {
+                                LogManager.log(
+                                    "Proton: узел объявлен как $declaredCountry, а замер показал " +
+                                        "$measuredCountry — показываем объявленную страну. " +
+                                        "Расхождение означает, что замер ушёл не через туннель."
+                                )
                             }
                             // Подставленное наблюдение не сохраняется: запись дала бы
                             // ему свежую отметку времени, и выход прошлой сессии стал
                             // бы «измеренным» — дальше он подставлялся бы сам себе.
+                            // Узел спрашиваем отдельным запросом и только при
+                            // включённом обходе: [ExitAddress] его не сообщает, а
+                            // молча оставить настройку без данных — это тихое «не
+                            // работает» (I4).
+                            val observedColo = snapshot.colo.ifBlank {
+                                if (snapshot.measured) {
+                                    observedExitColo(clientData, findCurrentVpnNetwork(connectivityManager))
+                                } else {
+                                    ""
+                                }
+                            }
                             if (primaryIp.isNotBlank() && snapshot.measured) {
                                 clientData.saveLastExitObservation(
                                     ip = primaryIp,
                                     country = displayCountry,
-                                    colo = snapshot.colo,
+                                    colo = observedColo,
                                 )
-                                reapplyDnsOrderForObservedCountry(clientData, displayCountry)
+                                reapplyDnsOrderForObservedCountry(displayCountry)
+                                maybeSwitchAwayFromAvoidedColo(clientData, observedColo)
                             }
                             if (snapshot.measured) {
                                 clientData.saveTunnelUiSnapshot(
@@ -23339,33 +25278,93 @@ class NovaVpnService : OperaNativeVpnService() {
     }
 
     private fun fetchExitSnapshot(network: android.net.Network?): ExitSnapshot? {
-        val fastTrace = fetchExitTraceViaSocket(
-            network,
-            listOf("1.1.1.1", "1.0.0.1"),
-            timeoutMs = if (network != null) 1200 else 1800,
-        )
-        if (fastTrace != null) {
-            return fastTrace
+        // Входы [ExitAddress] в их порядке: основной, потом запасной. Поддоменов
+        // `ipv4.`/`ipv6.` здесь больше нет — `/txt` у них отдаёт 404, то есть два
+        // запроса из трёх были заведомо пустыми. Семейство приходит полем ответа.
+        var badge: ExitSnapshot? = null
+        for ((index, url) in ExitAddress.URLS.withIndex()) {
+            badge = fetchExitObservationFromUrl(network, url) ?: continue
+            if (index > 0) {
+                LogManager.log(
+                    "Exit observation: основной источник адреса молчит, ответ взят у запасного ($url)."
+                )
+            }
+            break
         }
-        if (network != null) {
-            return null
-        }
-
-        val ipv4Trace = fetchExitTraceFromUrls(network, CloudflareTrace.IPV4_URLS)
-        val ipv6Trace = fetchExitTraceFromUrls(network, CloudflareTrace.IPV6_URLS)
-        val genericTrace = fetchExitTraceFromUrls(network, CloudflareTrace.HOSTNAME_URLS)
-
-        // Только Cloudflare: адрес и страна приходят одним ответом ([CloudflareTrace]).
-        val ipv4 = ipv4Trace?.ipv4.orEmpty().ifBlank { genericTrace?.ipv4.orEmpty() }
-        val ipv6 = ipv6Trace?.ipv6.orEmpty().ifBlank { genericTrace?.ipv6.orEmpty() }
-        val badgeTrace = ipv4Trace ?: ipv6Trace ?: genericTrace
-        if (ipv4.isBlank() && ipv6.isBlank() && badgeTrace?.country.orEmpty().isBlank()) return null
+        val ipv4 = badge?.ipv4.orEmpty()
+        val ipv6 = badge?.ipv6.orEmpty()
+        if (ipv4.isBlank() && ipv6.isBlank() && badge?.country.orEmpty().isBlank()) return null
         return ExitSnapshot(
             ipv4 = ipv4,
             ipv6 = ipv6,
-            country = badgeTrace?.country.orEmpty(),
-            colo = badgeTrace?.colo.orEmpty(),
+            country = badge?.country.orEmpty(),
+            // Узел Cloudflare этот источник не знает: его спрашивают отдельно и
+            // только когда включён обход нежелательного узла ([observedExitColo]).
+            colo = "",
         )
+    }
+
+    /**
+     * Страна узла Proton, на котором сейчас держится сессия.
+     *
+     * Ключ соединения — `entryIp:port` активной попытки: `WarpVerifiedConfig`
+     * страну не несёт, `toVerifiedConfigs` её теряет, и восстановить её можно
+     * только обратным поиском по `proton_profiles.json`.
+     *
+     * Пусто означает «это не Proton» либо «профиль не нашёлся» — и тогда решает
+     * замер, как раньше.
+     */
+    private fun protonProfileCountryForActiveEndpoint(clientData: ClientData): String {
+        if (!isPublishedTransport(currentTransportLabel, TRANSPORT_AWG_PROTON)) return ""
+        val host = activeEndpointHost.trim().trim('[', ']')
+        val port = activeEndpointPort
+        if (host.isEmpty() || port !in 1..65535) return ""
+        val profile = runCatching {
+            ProtonProfileStore(applicationContext).readProfiles().firstOrNull { candidate ->
+                candidate.entryIp.trim().trim('[', ']') == host && candidate.port == port
+            }
+        }.getOrNull() ?: return ""
+        return ProtonProfileStore.displayCountry(profile).takeIf { it != "??" }.orEmpty()
+    }
+
+    private fun fetchExitObservationFromUrl(
+        network: android.net.Network?,
+        url: String,
+    ): ExitSnapshot? {
+        val body = readTextFromUrlForExit(network, url) ?: return null
+        val parsed = ExitAddress.observe(url, body) ?: return null
+        val isV4 = ExitAddress.isIpv4(parsed.ip)
+        return ExitSnapshot(
+            ipv4 = if (isV4) parsed.ip else "",
+            ipv6 = if (isV4) "" else parsed.ip,
+            country = parsed.country,
+            colo = "",
+        )
+    }
+
+    /**
+     * Узел Cloudflare (`colo`) — отдельным вопросом и только когда он нужен.
+     *
+     * Адрес и страна теперь приходят из [ExitAddress], а `colo` он не сообщает.
+     * Промолчать было нельзя: обход нежелательного узла — включённая настройка, и
+     * пустой `colo` навсегда означал бы «узел неизвестен, оставляем», то есть
+     * настройка работала бы вхолостую и писала бы об этом в журнал как об успехе
+     * (I4). Поэтому здесь остаётся ровно один запрос к `/cdn-cgi/trace`, и только
+     * за `colo=`: адрес и страну он не отдаёт никому.
+     *
+     * Спрашивается лишь при включённой настройке — платить за него на каждом
+     * подключении незачем.
+     */
+    private fun observedExitColo(clientData: ClientData, network: android.net.Network?): String {
+        if (!clientData.isAvoidedColoSwitchEnabled()) return ""
+        val body = CloudflareTrace.HOSTNAME_URLS.firstNotNullOfOrNull { url ->
+            readTextFromUrlForExit(network, url)
+        } ?: return ""
+        return body.lineSequence()
+            .firstOrNull { it.startsWith("colo=") }
+            ?.substringAfter("=")
+            ?.trim()
+            .orEmpty()
     }
 
     /**
@@ -23382,12 +25381,17 @@ class NovaVpnService : OperaNativeVpnService() {
      */
     private fun fetchExitSnapshotViaVlessProxy(): ExitSnapshot? {
         val socksPort = vlessSocksPort.takeIf { it in 1..65535 } ?: return null
-        for (host in listOf("www.cloudflare.com", "cloudflare.com")) {
-            val body = readTextThroughSocks(socksPort, host, "/cdn-cgi/trace") ?: continue
-            val snapshot = parseExitTraceBody(body)
-            if (snapshot != null) return snapshot
-        }
-        return null
+        // `readTextThroughSocks` сам делает TLS на 443, поэтому имя [ExitAddress]
+        // работает здесь без изменений: путь через узел остаётся тем же.
+        val body = readTextThroughSocks(socksPort, EXIT_ADDRESS_HOST, EXIT_ADDRESS_PATH) ?: return null
+        val parsed = ExitAddress.parse(body) ?: return null
+        val isV4 = ExitAddress.isIpv4(parsed.ip)
+        return ExitSnapshot(
+            ipv4 = if (isV4) parsed.ip else "",
+            ipv6 = if (isV4) "" else parsed.ip,
+            country = parsed.country,
+            colo = "",
+        )
     }
 
     /** Разбор тела `cdn-cgi/trace`. */
@@ -23442,19 +25446,14 @@ class NovaVpnService : OperaNativeVpnService() {
 
     private fun fetchExitSnapshotViaOperaProxy(): ExitSnapshot? {
         val proxy = Proxy(Proxy.Type.HTTP, OperaProxyManager.getLoopbackProxyAddress(this))
-        // Только Cloudflare, зато с трёх входов: через HTTP-прокси проходят и
-        // литеральные адреса, и имена ([CloudflareTrace]).
-        val genericTrace = fetchExitTraceFromUrlsViaProxy(proxy, CloudflareTrace.HOSTNAME_URLS)
-        val ipv4Trace = fetchExitTraceFromUrlsViaProxy(proxy, CloudflareTrace.IPV4_URLS)
-        val ipv6Trace = fetchExitTraceFromUrlsViaProxy(proxy, CloudflareTrace.IPV6_URLS)
-        val ipv4 = ipv4Trace?.ipv4.orEmpty().ifBlank { genericTrace?.ipv4.orEmpty() }
-        val ipv6 = ipv6Trace?.ipv6.orEmpty().ifBlank { genericTrace?.ipv6.orEmpty() }
-        if (ipv4.isBlank() && ipv6.isBlank() && genericTrace?.country.orEmpty().isBlank()) return null
+        val body = readTextFromUrlViaProxyForExit(proxy, ExitAddress.URL_ANY) ?: return null
+        val parsed = ExitAddress.parse(body) ?: return null
+        val isV4 = ExitAddress.isIpv4(parsed.ip)
         return ExitSnapshot(
-            ipv4 = ipv4,
-            ipv6 = ipv6,
-            country = (ipv4Trace ?: genericTrace)?.country.orEmpty(),
-            colo = (ipv4Trace ?: genericTrace)?.colo.orEmpty(),
+            ipv4 = if (isV4) parsed.ip else "",
+            ipv6 = if (isV4) "" else parsed.ip,
+            country = parsed.country,
+            colo = "",
         )
     }
 

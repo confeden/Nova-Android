@@ -202,21 +202,66 @@ object ProtonProfileManager {
         leaseStore = store
         lastLoggedStep.set("")
         worker.execute {
+            // Заход мимо собственного туннеля живёт ровно столько, сколько прогон.
+            //
+            // Владелец попросил, чтобы профили получались и без VPN, и при
+            // поднятом — «как получится». Обычный путь при живом туннеле идёт
+            // внутрь него; этот клиент даёт тому же запросу второй шанс снаружи.
+            // Ставится здесь, а не в самом [ProtonApi], потому что там нет и не
+            // должно быть `Context`. Снимается в `finally`: привязка сделана к
+            // конкретной сети, и пережить смену сети она не должна.
+            ProtonApi.useBypassClient(buildBypassClient(appContext))
             val outcome = try {
                 run(appContext, store, owner, force)
             } catch (e: Exception) {
                 LogManager.log("Proton: прогон упал — ${e.message}")
                 Outcome(emptyList(), "Proton: ошибка — ${shortReason(e)}", false)
             } finally {
+                ProtonApi.useBypassClient(null)
                 activeLease.set(null)
                 leaseStore = null
                 store.releaseRunLease(owner)
+                // Мост до релея слушает порт на петле, и держать его дольше самой
+                // работы незачем: следующий прогон поднимет его заново за одно
+                // TLS-рукопожатие.
+                runCatching { ProtonRelay.shutdown() }
                 running.set(false)
             }
             publish(outcome.message)
             onFinished?.let { runCatching { it(outcome) } }
         }
         return true
+    }
+
+    /**
+     * Клиент, ходящий по сети под туннелем: и сокет, и разрешение имени.
+     *
+     * Одной `socketFactory` мало. Имя разрешает `Dns.SYSTEM`, то есть системный
+     * резолвер, а он при живом туннеле спрашивает **его** DNS — привязанный сокет
+     * тогда шёл бы на адрес, полученный изнутри туннеля. `Network.getAllByName`
+     * спрашивает резолвер самой этой сети, и обход получается настоящим.
+     *
+     * Сроки те же, что у прямых хостов в [ProtonApi]: хост, не открывший
+     * соединение за шесть секунд, не откроет его и за тридцать.
+     *
+     * `null` — сети под туннелем не нашлось (или VPN не поднят вовсе, и обходить
+     * нечего). Тогда всё работает как раньше.
+     */
+    private fun buildBypassClient(context: Context): okhttp3.OkHttpClient? {
+        val network = UnderlyingNetwork.select(context) ?: return null
+        return runCatching {
+            okhttp3.OkHttpClient.Builder()
+                .socketFactory(network.socketFactory)
+                .dns(object : okhttp3.Dns {
+                    override fun lookup(hostname: String): List<java.net.InetAddress> =
+                        network.getAllByName(hostname).toList()
+                })
+                .connectTimeout(6, TimeUnit.SECONDS)
+                .readTimeout(10, TimeUnit.SECONDS)
+                .callTimeout(12, TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
+                .build()
+        }.getOrNull()
     }
 
     /**
@@ -254,7 +299,7 @@ object ProtonProfileManager {
         // считать такой набор готовым значило бы навсегда закрепить неудачный
         // замер: следующий заход просто вернул бы его же.
         val measured = existing.any { it.pingMs > 0 }
-        if (!force && certAlive && existing.size >= TARGET_COUNT && measured) {
+        if (!force && !needsLiveNodes(store) && certAlive && existing.size >= TARGET_COUNT && measured) {
             // Их могло накопиться больше цели — оставляем лучшие и не ходим в сеть.
             val trimmed = existing.sortedBy { effectivePing(it) }.take(TARGET_COUNT)
             if (trimmed.size != existing.size) store.writeProfiles(trimmed)
@@ -268,6 +313,12 @@ object ProtonProfileManager {
 
         val device = account?.device ?: ProtonProfileStore.buildDeviceProfile()
         val seed = account?.seed?.takeIf { certAlive } ?: ProtonCrypto.randomSeed()
+
+        // Попытка отмечается здесь, до первого сетевого шага. Всё, что ниже, может
+        // выйти исключением, и тогда отметка ниже по тексту не выполнится вовсе —
+        // а `needsLiveNodes` останется истинным навсегда и заведёт этот же прогон
+        // через пятнадцать минут, и так весь сеанс.
+        store.writeNodesAttempt()
 
         val session = publishTicking("Proton: создаю сессию") {
             ProtonApi.createCredentiallessSession(device)
@@ -291,18 +342,26 @@ object ProtonProfileManager {
         // генератор на такой сети не доходил до конца никогда.
         val servers = if (liveServers.isNotEmpty()) {
             LogManager.log("Proton: получено ${liveServers.size} бесплатных узлов.")
+            // Момент попытки отмечается всегда, а источник — тот, что вышел. По этой
+            // паре следующий заход решает, стоит ли снова ходить за живым списком:
+            // без неё удавшийся прогон на встроенном списке выглядел как готовый
+            // навсегда, и живой список не появлялся до переустановки.
+            store.writeNodesSource(ProtonProfileStore.NODES_LIVE)
             liveServers
         } else {
             val bundled = ProtonNodeCatalog.load(context)
             if (bundled.isEmpty()) {
+                store.writeNodesSource(ProtonProfileStore.NODES_BUNDLED)
                 return Outcome(emptyList(), "Proton: серверы не выданы", false)
             }
             // Молчаливая подмена источника здесь читалась бы как живой список (I4),
             // а он старее и без нагрузки — по нему нельзя судить о загруженности.
             LogManager.log(
                 "Proton: список серверов от API не пришёл, берём встроенный — " +
-                    "${bundled.size} узлов из прошивки."
+                    "${bundled.size} узлов из прошивки. Живой список попробуем снова " +
+                    "не раньше чем через ${ProtonProfileStore.NODES_REFRESH_MS / 3_600_000} ч."
             )
+            store.writeNodesSource(ProtonProfileStore.NODES_BUNDLED)
             publish("Proton: беру встроенный список узлов")
             bundled
         }
@@ -360,6 +419,7 @@ object ProtonProfileManager {
                     port = ProtonProfileStore.PORTS[index % ProtonProfileStore.PORTS.size],
                     peerPublicKey = server.peerPublicKey,
                     pingMs = -1,
+                    pingSource = ProtonLatency.SOURCE_NONE,
                     load = server.load,
                     sni = sni,
                     // Параметры мусора — ровно те, что стоят на сайте по умолчанию
@@ -377,10 +437,16 @@ object ProtonProfileManager {
 
         if (!holdsLease(store, owner)) return preempted()
 
-        // Кандидаты уходят в файл, а мерит их служба: `protect()` есть только у
-        // `VpnService`, а незащищённый сокет ушёл бы внутрь поднятого туннеля и
-        // ранжировал бы профили по его каналу, а не по прямому пути до Proton.
-        store.writeProfiles(candidates)
+        // Кандидаты уходят в **свой** файл, а мерит их служба: `protect()` есть
+        // только у `VpnService`, а незащищённый сокет ушёл бы внутрь поднятого
+        // туннеля и ранжировал бы профили по его каналу, а не по прямому пути до
+        // Proton.
+        //
+        // Именно в свой, а не поверх рабочего списка: до этой правки восемьдесят
+        // неизмеренных кандидатов лежали в `proton_profiles.json` всё время замера,
+        // и очередь подключения, пересобранная в этом окне, строилась из них
+        // (см. `ProtonProfileStore.candidatesFile`).
+        store.writeCandidates(candidates)
         store.writeProbeState(
             ProtonProfileStore.ProbeState(
                 ProtonProfileStore.STATE_REQUESTED,
@@ -390,11 +456,37 @@ object ProtonProfileManager {
             )
         )
         publish("Proton: проверка 0/${candidates.size}")
-        requestProbe(context)
+        val probeRequested = requestProbe(context)
 
-        val selected = awaitProbe(store, candidates.size)
-        if (selected == null) {
-            return Outcome(emptyList(), "Proton: проверка не завершилась", false)
+        val probed = if (probeRequested) awaitProbe(store, candidates.size) else null
+
+        // Замер не дошёл до конца — но список-то выпущен, и выбрасывать его значит
+        // отдать пользователю «Proton не готов» там, где готово всё, кроме порядка.
+        // Раньше рабочий файл к этому моменту уже содержал кандидатов (их писали
+        // прямо в него), и неудача замера оставляла их на месте сама собой. Теперь
+        // кандидаты лежат отдельно, поэтому запасной путь нужен явный.
+        val selected = probed?.takeIf { it.isNotEmpty() } ?: run {
+            val fallback = candidates.sortedBy { it.load }.take(TARGET_COUNT)
+            LogManager.log(
+                if (!probeRequested) {
+                    "Proton: службу не удалось попросить о замере"
+                } else if (probed == null) {
+                    "Proton: замер не завершился за ${PROBE_WAIT_MS / 1000} с"
+                } else {
+                    "Proton: служба отказалась мерить (${store.readProbeState()?.state ?: "?"})"
+                } + " — сохраняем ${fallback.size} профилей в порядке нагрузки. " +
+                    "Порядок не по задержке, но список рабочий."
+            )
+            store.writeProfiles(fallback)
+            store.writeProbeState(
+                ProtonProfileStore.ProbeState(
+                    ProtonProfileStore.STATE_DONE,
+                    candidates.size,
+                    candidates.size,
+                    0,
+                )
+            )
+            return Outcome(fallback, "Proton: ${fallback.size} шт., замер не прошёл", true)
         }
 
         val alive = store.readProbeState()?.alive ?: 0
@@ -436,7 +528,25 @@ object ProtonProfileManager {
         val store = ProtonProfileStore(context)
         val account = store.readAccount() ?: return false
         if (account.certExpiresAt <= System.currentTimeMillis() + CERT_RENEW_MARGIN_MS) return false
-        return store.readProfiles().size >= TARGET_COUNT
+        if (store.readProfiles().size < TARGET_COUNT) return false
+        return !needsLiveNodes(store)
+    }
+
+    /**
+     * Пора ли снова пытаться получить **живой** список узлов.
+     *
+     * Тот же предикат стоит и в [run], и в [isPreparationComplete], и это не
+     * дублирование, а условие их согласия. Разойдись они — и получается вечный
+     * цикл: подготовка считает работу незаконченной и заводит прогон, прогон
+     * считает набор готовым и возвращается из кэша, не сходив в сеть и ничего не
+     * изменив, — и так на каждом сердцебиении службы, то есть раз в 45-120 с весь
+     * сеанс. Именно поэтому отметка времени пишется на **каждую** попытку, а не на
+     * удачную: без этого предикат никогда не перестал бы быть истинным.
+     */
+    private fun needsLiveNodes(store: ProtonProfileStore): Boolean {
+        if (store.readNodesSource() == ProtonProfileStore.NODES_LIVE) return false
+        val checkedAt = store.readNodesCheckedAt()
+        return System.currentTimeMillis() - checkedAt > ProtonProfileStore.NODES_REFRESH_MS
     }
 
     /** Итог прогона, у которого аренду забрал явный выбор пользователя. */
@@ -445,7 +555,16 @@ object ProtonProfileManager {
         return Outcome(emptyList(), "Proton: подготовку продолжает выбор пользователя", false)
     }
 
-    private fun requestProbe(context: Context) {
+    /**
+     * Просит службу померить кандидатов.
+     *
+     * @return false, если просьба не ушла. Отличать это обязательно: раньше отказ
+     *         только писался в журнал, а прогон всё равно уходил ждать ответа
+     *         службы **две минуты** — которого не будет, потому что мерить никто
+     *         не начинал. Две минуты «Proton: проверка 0/80» на экране, а затем
+     *         тот же запасной список, что можно было отдать сразу.
+     */
+    private fun requestProbe(context: Context): Boolean =
         runCatching {
             ContextCompat.startForegroundService(
                 context,
@@ -453,10 +572,11 @@ object ProtonProfileManager {
                     action = NovaVpnService.ACTION_PROBE_PROTON_PROFILES
                 },
             )
-        }.onFailure { error ->
+            true
+        }.getOrElse { error ->
             LogManager.log("Proton: не удалось попросить службу о замере — ${error.message}")
+            false
         }
-    }
 
     /**
      * Ждёт, пока служба домерит.

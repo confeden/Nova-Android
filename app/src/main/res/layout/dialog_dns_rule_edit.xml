@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Диалог добавления и правки резолвера.
+
+    Цвета взяты из темы, а не заданы числом: диалог рисуется в своём окне
+    `DayNight`, и белый текст на светлой теме системы стал бы невидимым —
+    в отличие от самого экрана, у которого фон всегда тёмный.
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingLeft="24dp"
+        android:paddingTop="8dp"
+        android:paddingRight="24dp"
+        android:paddingBottom="0dp">
+
+        <RadioGroup
+            android:id="@+id/rg_dns_rule_kind"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <!--
+                Кнопки «Обычный» здесь больше нет: незашифрованной остаётся ровно
+                одна ступень — резолвер провайдера, и она в списке уже стоит
+                последней. Добавить второй открытый резолвер значило бы вернуть
+                вырез маршрута к нему, то есть вернуть утечку имён наружу.
+            -->
+            <RadioButton
+                android:id="@+id/rb_dns_rule_doh"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="8dp"
+                android:fontFamily="sans-serif"
+                android:text="DoH" />
+
+            <RadioButton
+                android:id="@+id/rb_dns_rule_dot"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:fontFamily="sans-serif"
+                android:text="DoT" />
+        </RadioGroup>
+
+        <EditText
+            android:id="@+id/et_dns_rule_value"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:fontFamily="sans-serif"
+            android:hint="Адрес резолвера"
+            android:importantForAutofill="no"
+            android:inputType="textUri"
+            android:maxLines="2" />
+
+        <TextView
+            android:id="@+id/tv_dns_rule_value_error"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:fontFamily="sans-serif"
+            android:textColor="#E05252"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
+        <!--
+            Поля bootstrap здесь больше нет. Адреса, по которым дозваниваются до
+            имени резолвера, подставляет само приложение: свежим резолвом мимо VPN
+            при подключении, а для нашего сервера — из зашитого списка. Спрашивать
+            их у человека значило требовать знания, которого у него нет.
+        -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:fontFamily="sans-serif"
+            android:text="Адреса, по которым приложение дозванивается до имени резолвера, подставляются автоматически."
+            android:textColor="?android:attr/textColorSecondary"
+            android:textSize="11sp" />
+    </LinearLayout>
+</ScrollView>

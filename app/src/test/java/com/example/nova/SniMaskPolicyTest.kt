@@ -33,6 +33,79 @@ class SniMaskPolicyTest {
         preferredHosts = preferred,
     )
 
+    /**
+     * Отобранный набор стоит впереди поворота.
+     *
+     * Это и есть требование «чтобы все начинали с лучших имён». Поднять их в
+     * начало файла было мало: `rotate` смещает список по узлу, и имя из головы
+     * попадает в окно очереди примерно раз из девяти.
+     */
+    @Test
+    fun `отобранные имена идут первыми при любом узле`() {
+        val provenPools = pools.copy(
+            provenRussia = listOf("yastatic.net", "st.okcdn.ru"),
+            provenGlobal = listOf("gstatic.com"),
+        )
+        for (seed in listOf(0, 1, 7, 12345, -99)) {
+            val order = SniMaskPolicy.buildOrder(
+                SniMaskPolicy.Inputs(
+                    mode = SniMaskPolicy.MODE_AUTO,
+                    regime = SniMaskPolicy.Regime.BLACKLIST,
+                    customHosts = emptyList(),
+                    pools = provenPools,
+                    seed = seed,
+                    attempt = 0,
+                    blockedHosts = emptySet(),
+                    preferredHosts = emptyList(),
+                )
+            )
+            assertEquals("seed=$seed", listOf("yastatic.net", "st.okcdn.ru", "gstatic.com"), order.take(3))
+        }
+    }
+
+    /** Измеренное на устройстве старше отобранного при сборке. */
+    @Test
+    fun `выученное имя обгоняет отобранное`() {
+        val provenPools = pools.copy(provenRussia = listOf("yastatic.net"))
+        val order = SniMaskPolicy.buildOrder(
+            SniMaskPolicy.Inputs(
+                mode = SniMaskPolicy.MODE_AUTO,
+                regime = SniMaskPolicy.Regime.BLACKLIST,
+                customHosts = emptyList(),
+                pools = provenPools,
+                seed = 3,
+                attempt = 0,
+                blockedHosts = emptySet(),
+                preferredHosts = listOf("avito.ru"),
+            )
+        )
+        assertEquals("avito.ru", order.first())
+        assertEquals("yastatic.net", order[1])
+    }
+
+    /** В режиме белого списка зарубежные отобранные имена не появляются. */
+    @Test
+    fun `на белом списке отобранные зарубежные имена не берутся`() {
+        val provenPools = pools.copy(
+            provenRussia = listOf("yastatic.net"),
+            provenGlobal = listOf("gstatic.com"),
+        )
+        val order = SniMaskPolicy.buildOrder(
+            SniMaskPolicy.Inputs(
+                mode = SniMaskPolicy.MODE_AUTO,
+                regime = SniMaskPolicy.Regime.WHITELIST,
+                customHosts = emptyList(),
+                pools = provenPools,
+                seed = 5,
+                attempt = 0,
+                blockedHosts = emptySet(),
+                preferredHosts = emptyList(),
+            )
+        )
+        assertEquals("yastatic.net", order.first())
+        assertTrue(order.none { it == "gstatic.com" })
+    }
+
     @Test
     fun `на белом списке берутся только проверенные имена`() {
         val order = SniMaskPolicy.buildOrder(inputs(regime = SniMaskPolicy.Regime.WHITELIST))

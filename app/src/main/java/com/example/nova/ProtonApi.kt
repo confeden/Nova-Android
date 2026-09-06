@@ -52,6 +52,24 @@ object ProtonApi {
             .build()
     }
 
+    /**
+     * Клиент, ходящий мимо собственного туннеля, — если его кто-то поставил.
+     *
+     * Ставит его [ProtonProfileManager] на время прогона: у него есть `Context`, а
+     * у этого объекта нет и не должно быть. Снимается там же, в `finally`, — иначе
+     * клиент пережил бы смену сети и привязка указывала бы на исчезнувший
+     * интерфейс.
+     *
+     * Пусто — значит либо VPN не поднят и обходить нечего, либо сети под ним не
+     * нашлось. Тогда всё работает ровно как раньше.
+     */
+    @Volatile
+    private var bypassClient: OkHttpClient? = null
+
+    fun useBypassClient(client: OkHttpClient?) {
+        bypassClient = client
+    }
+
     class ProtonApiException(message: String) : Exception(message)
 
     /** Адрес, по которому можно попробовать запрос, вместе с клиентом для него. */
@@ -118,6 +136,119 @@ object ProtonApi {
      */
     @Volatile
     private var preferredDirectHost: String? = null
+
+    /**
+     * Релей уже отвечал в этом процессе.
+     *
+     * Значит прямой путь до API отсюда закрыт, и платить за него по 12 с на каждом
+     * шаге прогона незачем: со следующего вызова релей идёт **первым**. Признак
+     * процессный, а не сохранённый на диск, ровно по той же причине, что и
+     * [preferredDirectHost] — закрыт путь или нет, решает сеть, а она меняется.
+     */
+    @Volatile
+    private var relayProven = false
+
+    /**
+     * Про каждую причину «релея нет» говорим один раз за процесс, а не на каждом шаге.
+     *
+     * Причин три и они разные — ключ погашен, ключ не задан, мост не поднялся, — и
+     * один общий признак означал бы, что в журнал попадает только первая из них, а
+     * остальные две молчат навсегда (I4).
+     */
+    private val relayAbsenceLogged = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    private fun shouldLogRelayAbsence(reason: String): Boolean =
+        relayAbsenceLogged.putIfAbsent(reason, true) == null
+
+    /**
+     * Цели через релей: те же имена хостов Proton, только маршрут другой.
+     *
+     * Имя остаётся настоящим намеренно — TLS до Proton сквозной, релей видит лишь
+     * `CONNECT vpn-api.proton.me:443` и поток шифробайтов.
+     */
+    private fun relayTargets(): List<Target> {
+        val clients = ProtonRelay.clients()
+        if (clients.isEmpty()) return emptyList()
+        // Каждая полоса релея идёт к своему хосту Proton.
+        //
+        // Раньше обе шли к `preferredDirectHost ?: HOSTS.first()`, а в России
+        // `preferredDirectHost` не выставляется никогда — прямой путь туда и не
+        // открывается. То есть второй хост через релей был недостижим по
+        // построению, и две полосы проверяли одно и то же дважды.
+        return clients.mapIndexed { index, client ->
+            Target(client, HOSTS[index % HOSTS.size])
+        }
+    }
+
+    /**
+     * Заход через релеи.
+     *
+     * @return разобранный ответ, либо null — «этот путь не сработал», и вызывающий
+     *         обязан пойти дальше по своим ступеням, а не молча закончить.
+     */
+    private fun tryRelay(
+        path: String,
+        body: JSONObject?,
+        profile: ProtonDeviceProfile,
+        session: Session?,
+        record: (String, Boolean) -> Unit,
+        label: String,
+        elapsedMs: () -> Long,
+    ): JSONObject? {
+        if (NovaRelay.isOutdated()) {
+            // Ключ этой сборки погашен сервером: следующая попытка получит тот же
+            // `407` и потратит ещё один таймаут, чтобы узнать то же самое.
+            if (shouldLogRelayAbsence("outdated")) {
+                LogManager.log("Proton: релей не примет эту сборку. ${NovaRelay.OUTDATED_MESSAGE}.")
+            }
+            return null
+        }
+        val targets = relayTargets()
+        if (targets.isEmpty()) {
+            // Молчаливое «релея нет» неотличимо от «релей не помог» (I4), а лечение
+            // у них разное: одно — задать ключ сборки, другое — чинить сервер.
+            if (shouldLogRelayAbsence(if (ProtonRelay.isConfigured()) "no-bridge" else "no-key")) {
+                LogManager.log(
+                    if (!ProtonRelay.isConfigured()) {
+                        "Proton: релеи API не настроены — сборка без ключа. " +
+                            "Остаются прямые хосты и запасные узлы Proton."
+                    } else {
+                        // Ключ есть, а полос нет — значит ни один мост не встал на
+                        // петле. Раньше об этом не было ни строки, и снаружи это
+                        // выглядело как «релей молчит».
+                        "Proton: релеи настроены, но ни один локальный мост не поднялся — " +
+                            "заход через релей пропущен."
+                    }
+                )
+            }
+            return null
+        }
+        val winner = walk(targets, path, body, profile, session, record)
+        if (winner == null) {
+            LogManager.log("Proton $label: релеи не ответили, весь заход занял ${elapsedMs()} мс.")
+            // Признак «релей работает» снимается вместе с релеем.
+            //
+            // Он ставится один раз и раньше не снимался никогда, так что после
+            // смерти релея каждый следующий шаг начинал с него и платил полный
+            // `callTimeout` (30 с) на каждую полосу, прежде чем вспомнить про
+            // прямые хосты. «Работал десять минут назад» и «работает сейчас» —
+            // разные утверждения.
+            if (relayProven) {
+                relayProven = false
+                LogManager.log("Proton: релей перестал отвечать — со следующего шага снова начинаем с прямых хостов.")
+            }
+            return null
+        }
+        // Релей ответил — значит ключ принят, и висящее «обновите приложение»
+        // больше не соответствует действительности.
+        NovaRelay.clearOutdated()
+        if (!relayProven) {
+            relayProven = true
+            LogManager.log("Proton: API идёт через релей — прямой путь отсюда закрыт, дальше начинаем с него.")
+        }
+        LogManager.log("Proton $label: ответ через релей за ${elapsedMs()} мс.")
+        return winner.json
+    }
 
     private fun buildRequest(
         base: String,
@@ -254,6 +385,25 @@ object ProtonApi {
         val startedAt = System.nanoTime()
         val elapsedMs = { (System.nanoTime() - startedAt) / 1_000_000 }
 
+        // Заход через релей делается **не более одного раза за вызов**.
+        //
+        // Признак процессный (`relayProven`) для этого не годится: он снимается
+        // при неудаче прямо внутри `tryRelay`, и тогда проверки ниже видели
+        // «релей ещё не пробовали» и заводили тот же заход второй раз. Для POST
+        // (`credentialless`, регистрация ключа) это удвоение неидемпотентных
+        // запросов внутри одного шага.
+        var relayTried = false
+
+        // Релей впереди всего, как только в этом процессе выяснилось, что прямой
+        // путь закрыт. Иначе каждый шаг прогона снова платил бы полный таймаут
+        // прямых хостов — на российской сети это была самая заметная часть ожидания
+        // на чистой установке, и лечится она ровно тем же приёмом, что и
+        // `preferredDirectHost`: один раз выяснили — дальше не переспрашиваем.
+        if (relayProven) {
+            relayTried = true
+            tryRelay(path, body, profile, session, record, label, elapsedMs)?.let { return it }
+        }
+
         val direct = HOSTS.sortedByDescending { it == preferredDirectHost }
         val primary = ArrayList<Target>(direct.size + 1)
         alternativeHost?.let { primary += Target(ProtonDoh.pinnedClient, "https://$it") }
@@ -278,10 +428,24 @@ object ProtonApi {
         // резолвится и отвечает на ICMP, но TCP 443 не открывается. Штатный обход
         // самого Proton — запасные узлы из TXT-записи, см. [ProtonDoh].
         if (!transportFailure) {
+            // Запасные узлы Proton действительно повторят чужой ответ слово в
+            // слово — они ведут к тому же серверу. Релей не повторит: он меняет
+            // адрес, с которого запрос приходит, и путь до него.
+            //
+            // Раньше этот выход стоял ПЕРЕД релеем, и любой ответ со статусом
+            // уводил весь вызов в отказ, не попробовав релей ни разу. Самый
+            // вероятный случай — протухший `alternativeHost`: он восстанавливается
+            // из настроек, снятых на другой сети (`seedAlternativeHost`), и его
+            // `404` выглядит как «ответ сервера», хотя настоящий сервер этого
+            // ответа не давал.
             LogManager.log(
                 "Proton $label: прямые хосты отказали за ${elapsedMs()} мс без транспортной ошибки " +
-                    "($lastError) — это ответ сервера, обход его повторит слово в слово."
+                    "($lastError). Запасные узлы повторят тот же ответ, поэтому пробуем только релей."
             )
+            if (!relayTried) {
+                relayTried = true
+                tryRelay(path, body, profile, session, record, label, elapsedMs)?.let { return it }
+            }
             throw ProtonApiException(lastError)
         }
 
@@ -289,8 +453,18 @@ object ProtonApi {
         // минуты без единой записи, неотличимые от зависания (I4).
         LogManager.log(
             "Proton $label: прямые хосты не ответили за ${elapsedMs()} мс ($lastError), " +
-                "идём через запасные узлы."
+                "идём через релей и запасные узлы."
         )
+
+        // Релей раньше запасных узлов Proton намеренно. Запасные узлы — штатный
+        // обход самого Proton, но он держится на публичных DoH-резолверах, которые
+        // здесь блокируются, и на узлах, которые подвисают на ответах больше
+        // восьми килобайт (P3). Релей не зависит ни от того, ни от другого.
+        if (!relayTried) {
+            relayTried = true
+            tryRelay(path, body, profile, session, record, label, elapsedMs)?.let { return it }
+        }
+
         val candidates = ProtonDoh.resolveAlternativeHosts(HOSTS.first().substringAfter("://"))
             .map { Target(ProtonDoh.pinnedClient, "https://$it") }
         walk(candidates, path, body, profile, session, record)?.let { winner ->
@@ -306,6 +480,29 @@ object ProtonApi {
             "Proton $label: не ответил ни один из ${candidates.size} запасных узлов, " +
                 "весь шаг занял ${elapsedMs()} мс."
         )
+
+        // Последний заход — по сети **под** туннелем.
+        //
+        // Владелец попросил, чтобы профили получались в любых условиях: и без VPN,
+        // и при поднятом. Всё выше идёт обычным маршрутом, то есть при живом
+        // туннеле — внутри него; если закрыто именно там (чужой выход Proton
+        // иногда закрывает сам), тот же запрос снаружи может пройти. Обратный
+        // случай — закрыто снаружи, открыто изнутри — уже покрыт: тогда отвечает
+        // первый же заход.
+        //
+        // Стоит последним намеренно: гарантии, что привязка к нижележащей сети
+        // уведёт трафик мимо туннеля, нет (это решает система), и платить за неё
+        // на каждом шаге, когда работает обычный путь, незачем.
+        bypassClient?.let { bypass ->
+            LogManager.log("Proton $label: пробуем по сети под туннелем, минуя собственный VPN.")
+            walk(direct.map { Target(bypass, it) }, path, body, profile, session, record)?.let { winner ->
+                LogManager.log(
+                    "Proton $label: ответ мимо собственного VPN через " +
+                        "${winner.base.substringAfter("://")} за ${elapsedMs()} мс."
+                )
+                return winner.json
+            }
+        }
         throw ProtonApiException(lastError)
     }
 

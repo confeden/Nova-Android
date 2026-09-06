@@ -49,39 +49,51 @@
                 android:textSize="16sp"
                 android:textStyle="bold" />
 
-            <EditText
-                android:id="@+id/et_global_fallback_dns"
+            <TextView
+                android:id="@+id/tv_dns_rules_hint"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:background="@drawable/bg_settings_button"
-                android:hint="DoH/DoT через запятую"
-                android:inputType="text"
-                android:padding="12dp"
-                android:textColor="#FFFFFF"
-                android:textColorHint="#8A8A8A" />
+                android:layout_marginTop="8dp"
+                android:text="Резолверы опрашиваются сверху вниз, все — шифрованные. Последняя строка — открытый резолвер провайдера: он отвечает, только когда не ответил ни один защищённый, и его можно выключить. Потяните строку за ручку слева, чтобы изменить порядок; нажмите — чтобы изменить адрес."
+                android:textColor="#AAAAAA"
+                android:textSize="12sp" />
 
-            <EditText
-                android:id="@+id/et_global_primary_dns"
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/rv_dns_rules"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
+                android:layout_height="240dp"
                 android:layout_marginTop="10dp"
-                android:background="@drawable/bg_settings_button"
-                android:hint="Обычный DNS через запятую"
-                android:inputType="text"
-                android:padding="12dp"
-                android:textColor="#FFFFFF"
-                android:textColorHint="#8A8A8A" />
+                android:background="@drawable/bg_settings_item"
+                android:backgroundTint="#14FFFFFF"
+                android:clipToPadding="false"
+                android:overScrollMode="ifContentScrolls"
+                android:paddingTop="6dp"
+                android:paddingBottom="6dp" />
 
-            <Switch
-                android:id="@+id/sw_global_plain_fallback"
+            <TextView
+                android:id="@+id/btn_add_dns_rule"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
+                android:layout_height="48dp"
                 android:layout_marginTop="10dp"
-                android:checked="true"
-                android:text="Fallback на обычный DNS"
+                android:background="@drawable/bg_settings_action_dark"
+                android:gravity="center"
+                android:paddingHorizontal="12dp"
+                android:text="Добавить резолвер"
                 android:textColor="#FFFFFF"
-                android:textSize="14sp" />
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btn_reset_dns_rules"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="8dp"
+                android:background="?android:attr/selectableItemBackground"
+                android:padding="8dp"
+                android:text="Сбросить к умолчаниям"
+                android:textColor="#50C878"
+                android:textSize="13sp" />
 
             <RadioGroup
                 android:id="@+id/rg_dns_route_mode"

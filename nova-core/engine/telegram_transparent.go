@@ -22,8 +22,8 @@ import (
 	"syscall"
 	"time"
 
-	wgtun "github.com/amnezia-vpn/amneziawg-go/tun"
-	wgnetstack "github.com/amnezia-vpn/amneziawg-go/tun/netstack"
+	wgtun "github.com/amnezia-vpn/amneziawg-go/v3/tun"
+	wgnetstack "github.com/amnezia-vpn/amneziawg-go/v3/tun/netstack"
 	utls "github.com/refraction-networking/utls"
 
 	"nova-core/cfws"
@@ -400,6 +400,11 @@ type telegramTransparentProxy struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
+
+	// Жив ли насос netstack → Android TUN. Смысл тот же, что и у релея обхода
+	// доменов: см. domainBypassPumpRetries — перехват без насоса вешает
+	// туннель целиком под AndroidTUN.mu.
+	pumpAlive atomic.Bool
 }
 
 type osFileAdapter struct {
@@ -444,6 +449,7 @@ func newTelegramTransparentProxy(file *os.File, mtu int) (*telegramTransparentPr
 	}
 	proxy.profile.Store(getTelegramTransparentProxyConfig().profile)
 
+	proxy.pumpAlive.Store(true)
 	proxy.wg.Add(1)
 	go proxy.pumpPacketsToAndroidTun()
 
@@ -457,6 +463,10 @@ func (p *telegramTransparentProxy) setProfile(profile telegramTransparentProfile
 }
 
 func (p *telegramTransparentProxy) maybeHandle(packet []byte) (bool, error) {
+	// Насос мёртв — перехват вешает туннель (см. domainBypassPumpRetries).
+	if !p.pumpAlive.Load() {
+		return false, nil
+	}
 	cfg := getTelegramTransparentProxyConfig()
 	p.setProfile(cfg.profile)
 	if !cfg.enabled || cfg.profile == telegramTransparentOff {
@@ -575,6 +585,22 @@ func telegramTransparentFlowBypassKey(targetIP string, targetPort int) string {
 	return targetIP + ":" + strconv.Itoa(targetPort)
 }
 
+// rememberTelegramTransparentFlowBypassIfUnknownDC — обход только для целей без
+// известного дата-центра.
+//
+// Ключ обхода — пара «адрес:порт», без порта клиента, поэтому запись гасит
+// перехват для ВСЕХ соединений к этому адресу разом. У известного узла Telegram
+// это рикошет: рядом идёт живой MTProto-поток через релей, и его следующие
+// пакеты уйдут в туннель, где такого TCP-соединения нет. Для неизвестного
+// адреса всё наоборот — там перехват держится только на порту (7300-7310
+// захватываются для любого хоста), и чужому приложению обход нужен.
+func rememberTelegramTransparentFlowBypassIfUnknownDC(targetIP string, targetPort int, duration time.Duration, reason string) {
+	if transparentTargetDCHint(targetIP) > 0 {
+		return
+	}
+	rememberTelegramTransparentFlowBypass(targetIP, targetPort, duration, reason)
+}
+
 func rememberTelegramTransparentFlowBypass(targetIP string, targetPort int, duration time.Duration, reason string) {
 	key := telegramTransparentFlowBypassKey(targetIP, targetPort)
 	if key == "" || duration <= 0 {
@@ -662,9 +688,11 @@ func (p *telegramTransparentProxy) close() {
 
 func (p *telegramTransparentProxy) pumpPacketsToAndroidTun() {
 	defer p.wg.Done()
+	defer p.pumpAlive.Store(false)
 	buff := make([][]byte, 1)
 	buff[0] = make([]byte, p.mtu+256)
 	sizes := make([]int, 1)
+	failures := 0
 	for {
 		select {
 		case <-p.ctx.Done():
@@ -676,27 +704,48 @@ func (p *telegramTransparentProxy) pumpPacketsToAndroidTun() {
 			if errors.Is(err, os.ErrClosed) || errors.Is(err, net.ErrClosed) {
 				return
 			}
-			select {
-			case <-p.ctx.Done():
+			if p.pumpGaveUp(&failures, "read from netstack", err) {
 				return
-			default:
-				log.Printf("Telegram transparent relay read failed: %v", err)
-				time.Sleep(25 * time.Millisecond)
-				continue
 			}
+			continue
 		}
 		if n <= 0 || sizes[0] <= 0 {
 			continue
 		}
 		packet := append([]byte(nil), buff[0][:sizes[0]]...)
 		if err := p.file.Write(packet); err != nil {
-			if errors.Is(err, os.ErrClosed) {
+			if errors.Is(err, os.ErrClosed) || errors.Is(err, net.ErrClosed) {
 				return
 			}
-			log.Printf("Telegram transparent relay write-to-android failed: %v", err)
-			return
+			if p.pumpGaveUp(&failures, "write to Android TUN", err) {
+				return
+			}
+			continue
 		}
+		failures = 0
 	}
+}
+
+// pumpGaveUp — то же, что у релея обхода доменов, и по той же причине.
+func (p *telegramTransparentProxy) pumpGaveUp(failures *int, what string, cause error) bool {
+	select {
+	case <-p.ctx.Done():
+		return true
+	default:
+	}
+	*failures++
+	if *failures < domainBypassPumpRetries {
+		log.Printf("Telegram transparent relay %s failed (%d/%d): %v", what, *failures, domainBypassPumpRetries, cause)
+		time.Sleep(domainBypassPumpRetryDelay)
+		return false
+	}
+	log.Printf(
+		"Telegram transparent relay %s failed %d times in a row (%v) — relay stops capturing, traffic returns to the tunnel",
+		what, *failures, cause,
+	)
+	p.pumpAlive.Store(false)
+	go p.close()
+	return true
 }
 
 func (p *telegramTransparentProxy) acceptLoop(listener net.Listener) {
@@ -747,26 +796,22 @@ func (p *telegramTransparentProxy) handleConn(conn net.Conn) {
 	_ = conn.SetReadDeadline(time.Now().Add(12 * time.Second))
 	if _, err := io.ReadFull(conn, initPacket); err != nil {
 		log.Printf("Telegram transparent relay init read failed for %s:%d: %v", targetIP, targetPort, err)
+		// Молча выйти отсюда нельзя: перехват останется, и протокол, где первым
+		// говорит сервер, будет висеть здесь по двенадцать секунд на каждой
+		// попытке — бесконечно. Помечаем цель обходной на тех же условиях, что
+		// и не-MTProto: у известного дата-центра это был бы рикошет по живому
+		// потоку.
+		rememberTelegramTransparentFlowBypassIfUnknownDC(targetIP, targetPort, 90*time.Second, "init-read-failed")
 		return
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 
 	initInfo, ok := transparentInitInfoFromPacket(initPacket)
 	if !ok {
-		if shouldProxyTelegramMediaTLS(targetIP, targetPort) {
-			if telegramTransparentMediaDebugBudget.Add(-1) >= 0 {
-				log.Printf(
-					"Telegram transparent relay media TLS fallback for %s:%d via %s:%d",
-					targetIP,
-					targetPort,
-					transparentPreferredTCPUpstream(targetIP),
-					targetPort,
-				)
-			}
-			transparentTCPFallback(p.ctx, conn, targetIP, targetPort, initPacket)
-			return
-		}
-
+		// Не MTProto — значит не наше дело. Поток запоминается как обходной, и
+		// повторная попытка клиента уходит обычным путём, через туннель.
+		// Пересылать его самим отсюда нельзя: единственный доступный здесь
+		// набор — `protectedDialer`, то есть мимо туннеля и без обфускации.
 		if telegramTransparentInitPreviewBudget.Add(-1) >= 0 {
 			log.Printf(
 				"Telegram transparent relay bypass learned for %s:%d: init is not obfuscated MTProto, head=%x",
@@ -777,7 +822,7 @@ func (p *telegramTransparentProxy) handleConn(conn net.Conn) {
 		} else {
 			log.Printf("Telegram transparent relay bypass learned for %s:%d: init is not obfuscated MTProto", targetIP, targetPort)
 		}
-		rememberTelegramTransparentFlowBypass(targetIP, targetPort, 90*time.Second, "non-mtproto-init")
+		rememberTelegramTransparentFlowBypassIfUnknownDC(targetIP, targetPort, 90*time.Second, "non-mtproto-init")
 		return
 	}
 
@@ -1073,6 +1118,17 @@ var telegramIPv4Ranges = []telegramIPv4Range{
 	{lo: mustIPv4ToUint32("149.154.160.0"), hi: mustIPv4ToUint32("149.154.175.255")},
 	{lo: mustIPv4ToUint32("91.105.192.0"), hi: mustIPv4ToUint32("91.105.193.255")},
 	{lo: mustIPv4ToUint32("91.108.0.0"), hi: mustIPv4ToUint32("91.108.255.255")},
+	// Сверено со списком Nova PC (`ip/telegram.txt`, версия 1.39). Первый из
+	// трёх не косметика: в `telegramTransparentExactTargets` уже объявлен
+	// `95.161.76.100`, но без своего диапазона он не проходил проверку
+	// принадлежности Telegram и не перехватывался никогда.
+	{lo: mustIPv4ToUint32("95.161.76.0"), hi: mustIPv4ToUint32("95.161.76.255")},
+	// Ещё два диапазона из списка ПК — `185.104.210.0/24` и `185.138.252.0/22` —
+	// намеренно НЕ добавлены. Признать адрес телеграмовским значит начать его
+	// перехватывать, а подсказки о дата-центре для них нет ни в
+	// `transparentTargetDCHintForMode`, ни в `telegramTransparentExactTargets`:
+	// релей взял бы поток, которому не может выбрать маршрут. Пока классификации
+	// нет, эти адреса честнее оставить обычному туннелю.
 	// Telegram CDN for APK updates
 	{lo: mustIPv4ToUint32("194.221.250.0"), hi: mustIPv4ToUint32("194.221.250.255")},
 }
@@ -2121,46 +2177,6 @@ func pumpTransparentWSToClient(
 	}
 }
 
-func transparentTCPFallback(ctx context.Context, client net.Conn, targetIP string, targetPort int, initPacket []byte) {
-	upstreamIP := transparentPreferredTCPUpstream(targetIP)
-	remote, err := protectedDialer(10*time.Second).DialContext(ctx, "tcp", net.JoinHostPort(upstreamIP, strconv.Itoa(targetPort)))
-	if err != nil {
-		log.Printf("Telegram transparent TCP fallback failed for %s via %s:%d: %v", targetIP, upstreamIP, targetPort, err)
-		return
-	}
-	defer safeCloseConn(remote)
-	setTcpNoDelay(remote)
-	if _, err := remote.Write(initPacket); err != nil {
-		log.Printf("Telegram transparent TCP fallback init write failed for %s via %s:%d: %v", targetIP, upstreamIP, targetPort, err)
-		return
-	}
-	bridgeTransparentTCP(ctx, client, remote)
-}
-
-func bridgeTransparentTCP(ctx context.Context, client net.Conn, remote net.Conn) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go func() {
-		<-ctx.Done()
-		safeCloseConn(client)
-		safeCloseConn(remote)
-	}()
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	copyPipe := func(dst net.Conn, src net.Conn) {
-		defer wg.Done()
-		defer cancel()
-		buffer := make([]byte, 64*1024)
-		_, _ = io.CopyBuffer(dst, src, buffer)
-	}
-
-	go copyPipe(remote, client)
-	go copyPipe(client, remote)
-	wg.Wait()
-}
-
 func safeCloseConn(conn net.Conn) {
 	if conn == nil {
 		return
@@ -2709,21 +2725,25 @@ func transparentLikelyMediaTarget(targetIP string, targetPort int, dcHint int) b
 	return false
 }
 
-func shouldProxyTelegramMediaTLS(targetIP string, targetPort int) bool {
-	return true
-}
-
-func transparentPreferredTCPUpstream(targetIP string) string {
-	targetIP = strings.TrimSpace(targetIP)
-	if targetIP == "" {
-		return targetIP
-	}
-	if dcHint := transparentTargetDCHint(targetIP); dcHint > 0 {
-		if canonical := transparentCanonicalIPv4(dcHint); canonical != "" {
-			return canonical
-		}
-	}
-	return targetIP
+// shouldProxyTelegramMediaTLS — перехватывать ли медиа-поток Telegram.
+//
+// Всегда нет, и это не осторожность, а починка утечки. Функция возвращала
+// безусловное `true`, и любой поток в диапазонах Telegram, чьи первые 64 байта
+// не оказались обфусцированным MTProto (то есть обычный TLS к медиа и CDN),
+// уходил в `transparentTCPFallback` — а тот набирает `protectedDialer`, то есть
+// **мимо туннеля**, и пересылает байты как есть. Снаружи это выглядело как
+// работающий VPN, при котором медиасервер Telegram видит настоящий адрес
+// пользователя, а трафик не защищён ничем.
+//
+// Соседний комментарий в `shouldBypassTelegramTransparentFlow` всё это время
+// описывал правильное поведение — «Keep them on the normal VPN path», — но
+// `true` отсюда его отменял. На ПК ответ тот же: медиа идёт общим прокси, а не
+// в MTProto-релей.
+//
+// Параметры оставлены в сигнатуре: решение может стать адресным, и менять
+// тогда придётся только тело.
+func shouldProxyTelegramMediaTLS(_ string, _ int) bool {
+	return false
 }
 
 func transparentCanonicalDomainCandidates(dc int, isMedia bool) []string {

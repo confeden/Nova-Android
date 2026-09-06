@@ -1,3 +1,23 @@
+gstatic.com
+www.gstatic.com
+connectivitycheck.gstatic.com
+dl.google.com
+clients2.google.com
+storage.googleapis.com
+fonts.gstatic.com
+android.googleapis.com
+is1-ssl.mzstatic.com
+updates.cdn-apple.com
+swscan.apple.com
+gateway.icloud.com
+edge.microsoft.com
+download.windowsupdate.com
+ctldl.windowsupdate.com
+ocsp.digicert.com
+cdn.jsdelivr.net
+unpkg.com
+api.samsungcloudsolution.com
+hicloud.com
 speedtest.net
 cloudflare.com
 google.com
@@ -6,9 +26,6 @@ apple.com
 amazon.com
 netflix.com
 youtube.com
-facebook.com
-instagram.com
-twitter.com
 bing.com
 yahoo.com
 wikipedia.org
@@ -25,9 +42,7 @@ cisco.com
 oracle.com
 ibm.com
 salesforce.com
-spotify.com
 twitch.tv
-discord.com
 telegram.org
 zoom.us
 akamaihd.net
@@ -37,8 +52,6 @@ jsdelivr.net
 google-analytics.com
 googletagmanager.com
 googleadservices.com
-gstatic.com
-gstatic.com
 googleapis.com
 recaptcha.net
 microsoftonline.com
@@ -51,15 +64,9 @@ paypal.com
 stripe.com
 shopify.com
 coinbase.com
-binance.com
 kraken.com
-okx.com
 deribit.com
-bybit.com
-huobi.com
 gemini.com
-kucoin.com
-bitfinex.cm
 yahoo.co.jp
 baidu.com
 qq.com
@@ -93,8 +100,6 @@ duckduckgo.com
 deepl.com
 openai.com
 anthropic.com
-meta.com
-roblox.com
 minecraft.net
 epicgames.com
 unrealengine.com
@@ -104,7 +109,6 @@ xbox.com
 nintendo.com
 steampowered.com
 store.steampowered.com
-epicgames.com
 ubisoft.com
 ea.com
 blizzard.com
@@ -117,7 +121,6 @@ whatsapp.com
 wechat.com
 vk.com
 ok.ru
-linkedin.com
 medium.com
 blogger.com
 wordpress.com
@@ -129,7 +132,6 @@ dailymotion.com
 soundcloud.com
 shazam.com
 deezer.com
-apple-music.com
 hulu.com
 disneyplus.com
 primevideo.com
@@ -166,7 +168,6 @@ walmart.com
 target.com
 costco.com
 etsy.com
-alibaba.com
 aliexpress.com
 shein.com
 asos.com
@@ -194,7 +195,6 @@ revolut.com
 n26.com
 cloudflarestream.com
 cloudflarestatus.com
-cloudflare-dns.com
 cloudflareinsights.com
 fastlylabs.com
 edgekey.net
@@ -214,7 +214,6 @@ ec2.amazonaws.com
 cloudfront.net
 azure.com
 azureedge.net
-googlecloud.com
 gvt1.com
 googleapis.cn
 oraclecloud.com
@@ -236,9 +235,6 @@ newrelic.com
 datadoghq.com
 sentry.io
 bugsnag.com
-cloudflarewarp.com
-wireguard.com
-openvpn.net
 ipify.org
 geoip.com
 maxmind.com
@@ -257,11 +253,8 @@ grammarly.com
 mailchimp.com
 sendgrid.com
 twilio.com
-cloudflareclient.com
 cloudflaregateway.com
 cloudflareapi.com
 cloudflareworkers.com
-cloudflarezero.com
-cloudflareaccess.com
 cloudflarepages.com
 cloudflareimages.com

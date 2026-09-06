@@ -76,11 +76,40 @@ class NovaTileService : TileService() {
                     NovaVpnService.EXTRA_REAPPLY_SPLIT_APPS,
                     ArrayList(clientData.getSplitApps())
                 )
+                // «Прямой поток» едет тем же путём: настройки процесса `:vpn` своей
+                // копией не обновляются, и без этих extras выбор человека до службы
+                // просто не доезжает.
+                putStringArrayListExtra(
+                    NovaVpnService.EXTRA_REAPPLY_DIRECT_APPS,
+                    ArrayList(clientData.getDirectApps()),
+                )
+                putStringArrayListExtra(
+                    NovaVpnService.EXTRA_REAPPLY_DIRECT_EXCLUDED,
+                    ArrayList(clientData.getDirectAppsExcluded()),
+                )
+                putExtra(
+                    NovaVpnService.EXTRA_REAPPLY_RUSSIAN_DIRECT_ENABLED,
+                    clientData.isRussianDirectAppsEnabled(),
+                )
                 putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_ENABLED, clientData.getTrafficMaskEnabled())
                 putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_MODE, clientData.getTrafficMaskMode())
                 putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_HOST, clientData.getTrafficMaskHost())
                 putExtra(NovaVpnService.EXTRA_REAPPLY_SNI_MASK_MODE, clientData.getSniMaskMode())
                 putExtra(NovaVpnService.EXTRA_REAPPLY_SNI_MASK_LIST, clientData.getSniCustomListRaw())
+                // «Обход по доменам» — по той же причине: список, записанный экраном, в
+                // процессе `:vpn` не виден, и без extras он бы сохранялся и не действовал.
+                putExtra(
+                    NovaVpnService.EXTRA_REAPPLY_DOMAIN_BYPASS_ENABLED,
+                    clientData.isDomainBypassEnabled(),
+                )
+                putExtra(
+                    NovaVpnService.EXTRA_REAPPLY_DOMAIN_BYPASS_ZONES,
+                    clientData.getDomainBypassZonesRaw(),
+                )
+                putExtra(
+                    NovaVpnService.EXTRA_REAPPLY_DOMAIN_BYPASS_CUSTOM,
+                    clientData.getDomainBypassCustomRaw(),
+                )
             }
             ContextCompat.startForegroundService(this, intent)
 

@@ -72,4 +72,52 @@
         <item name="android:thumbTextPadding">0dp</item>
         <item name="android:background">@null</item>
     </style>
+
+    <!--
+        Кнопка селектора протокола/региона на главном экране.
+
+        Кружок радиокнопки убран (`android:button="@null"`), а выбор показывает
+        обводка — та же зелёная рамка, что у бейджа страны (`bg_region_chip.xml`).
+        Так попросил владелец, и заодно это снимает старую жалобу: кружок с
+        подписью не читался как одна кнопка.
+
+        Отступы больше не нулевые: рамка вокруг текста без внутреннего поля
+        упирается в буквы. Внешний отступ снизу нужен трём полосам — без него
+        строки слипаются.
+    -->
+    <style name="NovaMainRegionChip">
+        <item name="android:layout_width">wrap_content</item>
+        <!--
+            Высота фиксирована, а не `wrap_content`. Так попросил владелец, и это
+            же снимает мелкую неровность: подпись «MASQUE» выше подписи «EU» на
+            пару пикселей, и ряды выглядели ступенькой. Фиксированная высота
+            заодно делает форму предсказуемо овальной — радиус скругления в
+            `bg_region_chip.xml` равен её половине.
+        -->
+        <item name="android:layout_height">36dp</item>
+        <item name="android:layout_marginEnd">8dp</item>
+        <item name="android:layout_marginBottom">5dp</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:button">@null</item>
+        <item name="android:background">@drawable/bg_region_chip</item>
+        <item name="android:gravity">center</item>
+        <item name="android:minWidth">72dp</item>
+        <item name="android:paddingStart">14dp</item>
+        <item name="android:paddingEnd">14dp</item>
+        <item name="android:textColor">#FFFFFF</item>
+        <item name="android:textSize">11sp</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+
+    <!--
+        Кнопка подрегиона в строке под селектором: «Регион: EU US» для Opera и
+        список стран для Proton. Высота та же, что у основной кнопки — владелец
+        попросил одинаковые; отличается только шириной, потому что подписи короче.
+    -->
+    <style name="NovaSubRegionChip" parent="NovaMainRegionChip">
+        <item name="android:layout_marginEnd">6dp</item>
+        <item name="android:minWidth">52dp</item>
+        <item name="android:paddingStart">12dp</item>
+        <item name="android:paddingEnd">12dp</item>
+    </style>
 </resources>

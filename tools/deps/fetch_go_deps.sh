@@ -21,7 +21,7 @@ patches_dir="$root_dir/tools/deps/patches"
 
 # путь|репозиторий|коммит|патч (патч необязателен)
 deps=(
-    "tools/amneziawg-go|https://github.com/amnezia-vpn/amneziawg-go|12a012205e3c444be02aba91a840455f74c127e1|amneziawg-go.patch"
+    "tools/amneziawg-go|https://github.com/amnezia-vpn/amneziawg-go|b5928efb6ca19f0153958460c3d141f04abc5c2e|amneziawg-go.patch"
     "tools/warp-plus|https://github.com/bepass-org/warp-plus|f70ea7e4f193717c73f9a4357cbc98d6944b36bb|warp-plus.patch"
     "build/deps/usque|https://github.com/Diniboy1123/usque|d0eb96e7e5c56cce6cf34a7f8d75abbedba58fef|"
     "build/deps/gvisor|https://github.com/google/gvisor|af7a19336e551af6f2fa050e1749bc5d2f1eeea5|gvisor.patch"
@@ -32,8 +32,19 @@ for entry in "${deps[@]}"; do
     target="$root_dir/$rel"
 
     if [ -d "$target/.git" ]; then
-        echo "== $rel: уже на месте, пропускаем"
-        continue
+        # Сверяем ревизию, а не только наличие каталога.
+        #
+        # Прежний страж пропускал любой уже склонированный каталог, поэтому
+        # смена пина в этом файле ничего не меняла на машине, где скрипт хоть раз
+        # отработал: сборка молча продолжала идти на старой версии, а патч не
+        # переналагался. Ровно это и случилось бы при переходе amneziawg-go на 3.x.
+        have="$(git -C "$target" rev-parse HEAD 2>/dev/null || true)"
+        if [ "$have" = "$commit" ]; then
+            echo "== $rel: уже на пине $commit, пропускаем"
+            continue
+        fi
+        echo "== $rel: на месте $have, а нужен $commit — пересоздаём"
+        rm -rf "$target"
     fi
 
     echo "== $rel: клонируем $repo"

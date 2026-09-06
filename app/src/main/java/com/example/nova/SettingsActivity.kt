@@ -64,7 +64,11 @@ import java.util.TimeZone
 
 import androidx.appcompat.app.AppCompatActivity
 
+import androidx.appcompat.widget.SwitchCompat
+
 import androidx.core.content.ContextCompat
+
+import androidx.lifecycle.lifecycleScope
 
 import androidx.core.widget.NestedScrollView
 
@@ -198,6 +202,40 @@ class SettingsActivity : AppCompatActivity() {
 
     }
 
+    /**
+     * Опрос хода выпуска своих профилей WARP.
+     *
+     * Прогон живёт в процессе `:vpn` и сообщает о себе файлом (I2) — слушателя, как
+     * у Proton, здесь нет и быть не может, поэтому остаётся опрос. Свой Handler, а
+     * не общий `uiRefreshHandler`: этот опрос заводится и гасится по собственному
+     * поводу (начался и кончился прогон), и делить с ним очередь чужих обновлений
+     * значило бы снимать их вместе со своими.
+     */
+    private val warpGenerateHandler = Handler(Looper.getMainLooper())
+
+    /** Опрос заведён и не остановлен. Экран между `onResume` и `onPause`. */
+    private var warpGeneratePolling = false
+
+    /**
+     * Момент нажатия кнопки выпуска.
+     *
+     * Между `startForegroundService` и первой записью `running` помещается запуск
+     * процесса `:vpn`, а на холодном старте это заметно дольше одного шага опроса.
+     * Без этой отсрочки первый же опрос читал бы состояние **прошлого** прогона,
+     * гасил опрос и отпирал кнопку — нажатие выглядело бы как не сделавшее ничего,
+     * а под кнопкой висел бы итог позапрошлого выпуска.
+     */
+    private var warpGenerateRequestedAtMs = 0L
+
+    /** Начальная расстановка переключателей WARP не должна выглядеть как нажатие. */
+    private var suppressWarpGenerateSwitchCallback = false
+
+    private val warpGenerateRefreshRunnable = Runnable {
+
+        if (!isFinishing && !isDestroyed) refreshWarpGenerateState()
+
+    }
+
     
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -265,10 +303,6 @@ class SettingsActivity : AppCompatActivity() {
 
     private var protocolReapplyHandledInPlace = false
 
-    @Volatile
-
-    private var controlledReapplyPending = false
-
     private val splitReapplyRunnable = Runnable {
 
         splitReapplyHandledInPlace = false
@@ -334,6 +368,7 @@ class SettingsActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
 
         LogManager.setAppContext(this)
+        NovaRelay.attach(this)
 
         setContentView(R.layout.activity_settings)
 
@@ -399,15 +434,18 @@ class SettingsActivity : AppCompatActivity() {
 
         val rbExitRu = findViewById<RadioButton>(R.id.rb_exit_ru)
 
-        val rbExitEu = findViewById<RadioButton>(R.id.rb_exit_eu)
+        val rbExitOpera = findViewById<RadioButton>(R.id.rb_exit_opera)
 
-        val rbExitUs = findViewById<RadioButton>(R.id.rb_exit_us)
+        val rbExitTor = findViewById<RadioButton>(R.id.rb_exit_tor)
 
         val rbExitMasque = findViewById<RadioButton>(R.id.rb_exit_masque)
 
         val rbExitProton = findViewById<RadioButton>(R.id.rb_exit_proton)
 
-        val protocolButtons = listOf(rbExitAuto, rbExitRu, rbExitMasque, rbExitEu, rbExitUs, rbExitProton)
+        // Порядок — из [ConnectionSelectorPolicy]. Здесь он был выписан вручную и
+        // не совпадал с порядком в разметке (`masque` третий в коде, пятый в XML),
+        // а таких копий было четыре.
+        val protocolButtons = ConnectionSelectorPolicy.BUTTON_IDS.mapNotNull { findViewById<RadioButton>(it) }
 
         val rowShareRelease = findViewById<TextView>(R.id.row_share_release)
 
@@ -443,6 +481,14 @@ class SettingsActivity : AppCompatActivity() {
         val rowMainBackground = findViewById<LinearLayout>(R.id.row_main_background)
 
         val rowDnsSettings = findViewById<LinearLayout>(R.id.row_dns_settings)
+
+        val rowNotificationSettings = findViewById<LinearLayout>(R.id.row_notification_settings)
+
+        val rowDomainBypass = findViewById<LinearLayout>(R.id.row_domain_bypass)
+
+        val rowDirectFlow = findViewById<LinearLayout>(R.id.row_direct_flow)
+
+        val rowAddWidget = findViewById<LinearLayout>(R.id.row_add_widget)
 
         val rowSniMask = findViewById<LinearLayout>(R.id.row_sni_mask)
 
@@ -492,7 +538,7 @@ class SettingsActivity : AppCompatActivity() {
 
         rowShareRelease.setOnClickListener {
 
-            shareReleaseLink()
+            openDownloadPage()
 
         }
 
@@ -640,9 +686,9 @@ class SettingsActivity : AppCompatActivity() {
 
             rbExitRu,
 
-            rbExitEu,
+            rbExitOpera,
 
-            rbExitUs,
+            rbExitTor,
 
             swTrafficMask,
 
@@ -776,6 +822,8 @@ class SettingsActivity : AppCompatActivity() {
 
         updateLocalProxySummary(tvLocalProxyNote)
 
+        setupWarpGenerateCard()
+
         rowWarpConfigs.setOnClickListener {
 
             startActivity(Intent(this, WarpConfigsActivity::class.java))
@@ -791,6 +839,46 @@ class SettingsActivity : AppCompatActivity() {
         rowDnsSettings.setOnClickListener {
 
             startActivity(Intent(this, DnsSettingsActivity::class.java))
+
+        }
+
+        rowNotificationSettings.setOnClickListener {
+
+            startActivity(Intent(this, NotificationSettingsActivity::class.java))
+
+        }
+
+        rowDomainBypass.setOnClickListener {
+
+            startActivity(Intent(this, DomainBypassActivity::class.java))
+
+        }
+
+        rowDirectFlow.setOnClickListener {
+
+            startActivity(Intent(this, DirectFlowActivity::class.java))
+
+        }
+
+        rowAddWidget.setOnClickListener {
+
+            // Часть лаунчеров закрепление по запросу не поддерживает вовсе, и до
+            // Android 8 системного запроса нет. Молчать в этом случае нельзя:
+            // нажатие без видимого следа читается как поломка.
+
+            if (!NovaWidgetProvider.requestPin(this)) {
+
+                Toast.makeText(
+
+                    this,
+
+                    "Лаунчер не умеет добавлять виджет сам. Долгое нажатие на рабочем столе, раздел «Виджеты», Nova",
+
+                    Toast.LENGTH_LONG,
+
+                ).show()
+
+            }
 
         }
 
@@ -1061,15 +1149,45 @@ class SettingsActivity : AppCompatActivity() {
 
         }
 
+        val swShowSystemApps = findViewById<android.widget.Switch>(R.id.sw_show_system_apps)
+
+        swShowSystemApps.isChecked = clientData.isShowSystemAppsEnabled()
+
+        swShowSystemApps.setOnCheckedChangeListener { _, checked ->
+
+            clientData.setShowSystemAppsEnabled(checked)
+
+            submitFilteredApps()
+
+        }
+
         if (initialSplitMode != 0) {
 
             val cachedApps = AppCacheManager.peekInstalledApps(this, initialSplitApps)
 
             if (cachedApps.isNotEmpty()) {
 
+                // Список рисуется сразу, а отметки «идёт мимо туннеля» доезжают
+                // следом: `DirectAppsPolicy` опрашивает `PackageManager` по
+                // каждому пакету закрытого списка, и после возврата из «Прямого
+                // потока» его кэш сброшен — то есть здесь стоял бы десяток
+                // биндер-вызовов до первого кадра (I13).
+
                 allApps = cachedApps
 
                 submitFilteredApps()
+
+                scope.launch {
+
+                    val marked = withContext(Dispatchers.IO) { markDirectApps(cachedApps) }
+
+                    if (isFinishing || isDestroyed) return@launch
+
+                    allApps = marked
+
+                    submitFilteredApps()
+
+                }
 
             }
 
@@ -1143,7 +1261,13 @@ class SettingsActivity : AppCompatActivity() {
 
             val savedSelection = clientData.getSplitApps()
 
-            allApps = AppCacheManager.getInstalledApps(this@SettingsActivity, savedSelection)
+            val loaded = AppCacheManager.getInstalledApps(this@SettingsActivity, savedSelection)
+
+            // `getInstalledApps` возвращает управление уже на главном потоке, а
+            // `markDirectApps` — это опрос `PackageManager` по каждому пакету
+            // закрытого списка. Без переключения он шёл бы там же (I13).
+
+            allApps = withContext(Dispatchers.IO) { markDirectApps(loaded) }
 
             submitFilteredApps()
 
@@ -1287,11 +1411,32 @@ class SettingsActivity : AppCompatActivity() {
 
 
 
+    /**
+     * Помечает приложения, которые уходят мимо туннеля независимо от галочки.
+     *
+     * Набор считается один раз на весь список: [DirectAppsPolicy] опрашивает
+     * `PackageManager` про каждое имя, и делать это на каждую строку значило бы
+     * сотни обращений при прокрутке.
+     */
+    private fun markDirectApps(items: List<AppItem>): List<AppItem> {
+
+        val direct = DirectAppsPolicy.resolve(this, clientData)
+
+        if (direct.isEmpty()) return items
+
+        items.forEach { item -> item.isDirect = item.packageName in direct }
+
+        return items
+
+    }
+
     private fun submitFilteredApps(query: String = etSearch.text?.toString().orEmpty()) {
 
         if (!::adapter.isInitialized) return
 
         val lowered = query.lowercase()
+
+        val showSystem = clientData.isShowSystemAppsEnabled()
 
         val filtered = if (lowered.isBlank()) {
 
@@ -1300,6 +1445,14 @@ class SettingsActivity : AppCompatActivity() {
         } else {
 
             allApps.filter { it.label.lowercase().contains(lowered) || it.packageName.lowercase().contains(lowered) }
+
+        }.filter { item ->
+
+            // Уже выбранное приложение из списка не исчезает, даже если оно
+            // системное: иначе галочка стояла бы у пункта, которого не видно, и
+            // снять её было бы нечем.
+
+            showSystem || !item.isSystem || item.isSelected
 
         }.sortedWith(compareByDescending<AppItem> { it.isSelected }.thenBy { it.label.lowercase() })
 
@@ -1318,6 +1471,8 @@ class SettingsActivity : AppCompatActivity() {
         uiRefreshHandler.removeCallbacks(trafficMaskRefreshRunnable)
 
         uiRefreshHandler.removeCallbacks(manualUpdateRefreshRunnable)
+
+        stopWarpGeneratePolling()
 
         reapplyHandler.removeCallbacks(splitReapplyRunnable)
 
@@ -1407,6 +1562,15 @@ class SettingsActivity : AppCompatActivity() {
 
         super.onResume()
 
+        // Снимок раздельного туннелирования переснимается при каждом возврате на
+        // экран. Он снят в onCreate, а список правит и соседний экран «Прямой
+        // поток» — и правит уже применённо, сам отдавая изменение живому сеансу.
+        // Со старым снимком onPause сравнивал бы «как было до открытия Настроек»
+        // с «как стало после чужой правки» и применял бы то же самое второй раз:
+        // на Opera это stop-then-start туннеля за чужую галочку.
+        initialSplitMode = clientData.getSplitMode()
+        initialSplitApps = clientData.getSplitApps()
+
         AppUpdateManager.resumePendingInstallIfAllowed(this)
 
         val swBackground = findViewById<Switch>(R.id.sw_background)
@@ -1433,21 +1597,7 @@ class SettingsActivity : AppCompatActivity() {
 
             findViewById(R.id.rg_exit_region),
 
-            listOf(
-
-                findViewById(R.id.rb_exit_auto),
-
-                findViewById(R.id.rb_exit_ru),
-
-                findViewById(R.id.rb_exit_masque),
-
-                findViewById(R.id.rb_exit_eu),
-
-                findViewById(R.id.rb_exit_us),
-
-                findViewById(R.id.rb_exit_proton),
-
-            ),
+            ConnectionSelectorPolicy.BUTTON_IDS.mapNotNull { findViewById<RadioButton>(it) },
 
             findViewById(R.id.tv_exit_last),
 
@@ -1468,6 +1618,16 @@ class SettingsActivity : AppCompatActivity() {
         uiRefreshHandler.removeCallbacks(manualUpdateRefreshRunnable)
 
         uiRefreshHandler.post(manualUpdateRefreshRunnable)
+
+        // Один шаг опроса заводится всегда: он же и рисует итог прошлого прогона,
+        // а продолжится только если прогон действительно идёт.
+        startWarpGeneratePolling()
+
+        // Профили могли появиться, пока экрана не было: от этого зависит, что
+        // написано на кнопке — «сгенерировать» или «обновить».
+        refreshIssuedProfilesState()
+
+        refreshTorBridgeStatus()
 
     }
 
@@ -1502,6 +1662,8 @@ class SettingsActivity : AppCompatActivity() {
         super.onDestroy()
 
         reapplyHandler.removeCallbacks(splitReapplyRunnable)
+
+        stopWarpGeneratePolling()
 
         unregisterPackageChangesReceiver()
 
@@ -1869,29 +2031,13 @@ class SettingsActivity : AppCompatActivity() {
 
     private fun launchDirectReapply(toastMessage: String) {
 
-        val desiredBackend = resolveDesiredBackendForCurrentPreferences()
+        // Порядок живёт в [SessionReapply]: главный экран делает то же самое, и
 
-        clientData.saveServiceState(
+        // вторая копия — это ровно тот способ, которым случается G49.
 
-            NovaVpnService.STATE_CONNECTING,
-
-            desiredBackend,
-
-        )
-
-        clientData.markSoftReapplyPending()
-
-        runCatching {
-
-            ContextCompat.startForegroundService(this, buildReapplyIntent(this))
+        if (SessionReapply.launchDirect(this, clientData)) {
 
             Toast.makeText(this, toastMessage, Toast.LENGTH_SHORT).show()
-
-        }.onFailure { error ->
-
-            clientData.clearSoftReapplyPending()
-
-            LogManager.log("Не удалось мягко применить изменения VPN: ${error.message}")
 
         }
 
@@ -1901,213 +2047,30 @@ class SettingsActivity : AppCompatActivity() {
 
     private fun launchControlledOperaReapply(toastMessage: String) {
 
-        if (controlledReapplyPending) {
+        // Ожидание остановки переживает экран: настройки можно закрыть сразу
 
-            LogManager.log("Мягкий Opera restart уже запланирован. Просто обновили настройки и дождёмся нового запуска.")
+        // после нажатия, а запустить сеанс заново всё равно надо (I18, G83).
 
-            return
+        // Поэтому и часы, и признак «опрос уже идёт» живут в [SessionReapply], а
 
-        }
+        // не в этой активности.
 
-        controlledReapplyPending = true
-
-        val desiredBackend = resolveDesiredBackendForCurrentPreferences()
-
-        clientData.saveServiceState(
-
-            NovaVpnService.STATE_CONNECTING,
-
-            desiredBackend,
-
-        )
-
-        clientData.markSoftReapplyPending(35000L)
-
-        val appContext = applicationContext
-
-        runCatching {
-
-            LogManager.log("Активный Opera-сеанс меняем через безопасный stop-then-start из основного процесса.")
-
-            ContextCompat.startForegroundService(
-
-                this,
-
-                Intent(this, NovaVpnService::class.java).apply {
-
-                    action = NovaVpnService.ACTION_STOP_FOR_SOFT_RESTART
-
-                }
-
-            )
+        if (SessionReapply.launchControlledOperaRestart(this, clientData)) {
 
             Toast.makeText(this, toastMessage, Toast.LENGTH_SHORT).show()
 
-            scheduleControlledOperaRestartPoll(appContext, 0)
-
-        }.onFailure { error ->
-
-            controlledReapplyPending = false
-
-            clientData.clearSoftReapplyPending()
-
-            LogManager.log("Не удалось запустить безопасный Opera restart: ${error.message}")
-
         }
 
     }
 
 
 
-    private fun scheduleControlledOperaRestartPoll(appContext: Context, attempt: Int) {
 
-        reapplyHandler.postDelayed({
 
-            val serviceStopped = clientData.getServiceState() == NovaVpnService.STATE_STOPPED
 
-            val novaVpnStillVisible = hasActiveNovaSystemVpn(appContext)
+    private fun shouldUseControlledOperaRestartReapply(): Boolean =
 
-            if ((serviceStopped && !novaVpnStillVisible) || attempt >= 28) {
-
-                scheduleControlledOperaRestartLaunch(appContext)
-
-            } else {
-
-                scheduleControlledOperaRestartPoll(appContext, attempt + 1)
-
-            }
-
-        }, if (attempt == 0) 220L else 160L)
-
-    }
-
-
-
-    private fun scheduleControlledOperaRestartLaunch(appContext: Context) {
-
-        reapplyHandler.postDelayed({
-
-            controlledReapplyPending = false
-
-            clientData.markSoftReapplyPending(25000L)
-
-            runCatching {
-
-                LogManager.log("Старый Opera VPN полностью остановлен. Запускаем новый connect-сеанс в чистом процессе.")
-
-                ContextCompat.startForegroundService(appContext, buildReapplyIntent(appContext))
-
-            }.onFailure { error ->
-
-                clientData.clearSoftReapplyPending()
-
-                LogManager.log("Не удалось заново запустить VPN после безопасного Opera restart: ${error.message}")
-
-            }
-
-        }, 800L)
-
-    }
-
-
-
-    private fun buildReapplyIntent(context: Context): Intent {
-
-        return Intent(context, NovaVpnService::class.java).apply {
-
-            action = NovaVpnService.ACTION_REAPPLY_CURRENT_SESSION
-
-            putExtra(NovaVpnService.EXTRA_EXIT_REGION, clientData.getExitRegionPreference())
-
-            putExtra(
-
-                NovaVpnService.EXTRA_IMPORTED_CONFIG_SOURCE_ENABLED,
-
-                clientData.isImportedWarpOnlyModeEnabled()
-
-            )
-
-            putExtra(
-
-                NovaVpnService.EXTRA_IMPORTED_PROTOCOL_PREFERENCE,
-
-                clientData.getImportedProtocolPreference()
-
-            )
-
-            putExtra(NovaVpnService.EXTRA_REAPPLY_SPLIT_MODE, clientData.getSplitMode())
-
-            putStringArrayListExtra(
-
-                NovaVpnService.EXTRA_REAPPLY_SPLIT_APPS,
-
-                ArrayList(clientData.getSplitApps())
-
-            )
-
-            putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_ENABLED, clientData.getTrafficMaskEnabled())
-
-            putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_MODE, clientData.getTrafficMaskMode())
-
-            putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_HOST, clientData.getTrafficMaskHost())
-
-        }
-
-    }
-
-
-
-    private fun shouldUseControlledOperaRestartReapply(): Boolean {
-
-        val persistedBackend = clientData.getServiceBackend().trim().uppercase()
-
-        if (persistedBackend.startsWith(NovaVpnService.BACKEND_OPERA)) return true
-
-
-
-        val restartKind = clientData.getRestartSession()
-
-            ?.kind
-
-            ?.trim()
-
-            ?.uppercase()
-
-            .orEmpty()
-
-        if (restartKind == "OPERA") return true
-
-
-
-        val cm = getSystemService(ConnectivityManager::class.java)
-
-        val activeOperaVpn = cm?.allNetworks?.any { network ->
-
-            val caps = cm.getNetworkCapabilities(network) ?: return@any false
-
-            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return@any false
-
-            extractVpnTransportLabel(caps)
-
-                .orEmpty()
-
-                .contains("NovaOperaVPN", ignoreCase = true)
-
-        } == true
-
-        if (activeOperaVpn) return true
-
-
-
-        return resolveDesiredBackendForCurrentPreferences()
-
-            .trim()
-
-            .uppercase()
-
-            .startsWith(NovaVpnService.BACKEND_OPERA) && hasActiveNovaSystemVpn()
-
-    }
+        SessionReapply.needsControlledOperaRestart(this, clientData)
 
 
 
@@ -2227,19 +2190,6 @@ class SettingsActivity : AppCompatActivity() {
 
 
 
-    private fun resolveDesiredBackendForCurrentPreferences(): String {
-
-        return if (clientData.shouldUseWarpTransport()) {
-
-            NovaVpnService.BACKEND_WARP
-
-        } else {
-
-            "${NovaVpnService.BACKEND_OPERA}-${clientData.getPreferredOperaLabel()}"
-
-        }
-
-    }
 
 
 
@@ -2571,6 +2521,23 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun applyLiquidSwitchTint(switch: Switch) {
+
+        switch.thumbTintList = ContextCompat.getColorStateList(this, R.color.switch_thumb_tint_liquid)
+
+        switch.trackTintList = ContextCompat.getColorStateList(this, R.color.switch_track_tint_liquid)
+
+    }
+
+    /**
+     * То же самое для `SwitchCompat`.
+     *
+     * Перегрузка, а не общий тип: `SwitchCompat` наследуется от `CompoundButton`, а
+     * не от платформенного `Switch`, и в соседнюю функцию не проходит. Списки
+     * состояний те же самые — геометрия и палитра переключателей подобраны вручную
+     * после того, как обновление appcompat поменяло умолчания библиотеки, и выводить
+     * их заново нельзя.
+     */
+    private fun applyLiquidSwitchTint(switch: SwitchCompat) {
 
         switch.thumbTintList = ContextCompat.getColorStateList(this, R.color.switch_thumb_tint_liquid)
 
@@ -3047,15 +3014,19 @@ class SettingsActivity : AppCompatActivity() {
 
         return when (region?.trim()?.lowercase()) {
 
-            "eu" -> "EU"
+            // Кнопка теперь одна и называется OPERA, а подрегион уточняется рядом:
+            // «EU» без слова Opera читалось как отдельный транспорт.
+            "eu" -> "OPERA EU"
 
-            "us" -> "US"
+            "us" -> "OPERA US"
 
             "ru" -> "WARP"
 
             "masque" -> "MASQUE"
 
             "proton" -> "AWG Proton"
+
+            "tor" -> "TOR"
 
             else -> "AUTO"
 
@@ -3294,7 +3265,40 @@ class SettingsActivity : AppCompatActivity() {
 
         if (!started) {
 
-            LogManager.log("Proton: прогон уже идёт, повторно не запускаем.")
+            // Прогон уже идёт — а признаки «идёт регистрация» только что выставил
+            // этот вызов, и снять их будет некому: обработчик итога принадлежит
+            // тому, первому прогону, и наш `onFinished` не вызовут вовсе.
+            //
+            // Дефект, который это чинит: жёлтая «РЕГИСТРАЦИЯ PROTON» на главном
+            // экране оставалась навсегда, а первичная кнопка была заперта в
+            // «ОТКЛЮЧИТЬ» — то есть повторный вход в настройки при живом прогоне
+            // ломал экран до перезапуска приложения.
+            //
+            // Признаки не снимаются, а **переподвешиваются** на идущий прогон:
+            // снять их здесь значило бы отменить настоящую подготовку, которая
+            // никуда не делась.
+            LogManager.log("Proton: прогон уже идёт — подписываемся на его итог, второй не заводим.")
+
+            ProtonProfileManager.addListener(object : ProtonProfileManager.StatusListener {
+
+                override fun onStatus(text: String) {
+
+                    if (ProtonProfileManager.isRunning()) return
+
+                    ProtonProfileManager.removeListener(this)
+
+                    // Идущий прогон закончился, а его собственный обработчик уже
+                    // снял бы признаки сам. Снимаем только то, что могло остаться
+                    // от нашего вызова, и только когда подготовка больше не идёт.
+                    if (!ProtonProfileManager.isPreparationRequested()) {
+
+                        clientData.setProtonPreparationRequested(false)
+
+                    }
+
+                }
+
+            })
 
         }
 
@@ -3307,24 +3311,11 @@ class SettingsActivity : AppCompatActivity() {
         region: String,
     ) {
 
-        // Порядок — тот же, что у `protocolButtons`. «proton» назван явно: без него
-        // возврат к уже выбранному Proton уводил переключатель в «Авто», то есть
-        // отказ выпуска молча менял бы транспорт (I1) — тот же случай, что G49.
-        val index = when (region) {
-
-            "ru" -> 1
-
-            "masque" -> 2
-
-            "eu" -> 3
-
-            "us" -> 4
-
-            "proton" -> 5
-
-            else -> 0
-
-        }
+        // Позиция — из [ConnectionSelectorPolicy]. Здесь лежала четвёртая копия
+        // порядка, позиционной картой индексов; «proton» в ней приходилось называть
+        // явно, иначе возврат к уже выбранному Proton уводил переключатель в «Авто»,
+        // то есть отказ выпуска молча менял транспорт (I1) — тот же случай, что G49.
+        val index = ConnectionSelectorPolicy.indexOf(region)
 
         buttons.getOrNull(index)?.let { button ->
 
@@ -3457,17 +3448,12 @@ class SettingsActivity : AppCompatActivity() {
         // `getOrNull(5)` и переставал перенастраивать селектор вовсе, а в режиме
         // протоколов PROTON оставался видимым с чужим оформлением — на устройстве
         // это выглядело как зелёная кнопка «PROTON» в списке протоколов.
-        val buttons = listOfNotNull(
-            findViewById<RadioButton>(R.id.rb_exit_auto),
-            findViewById<RadioButton>(R.id.rb_exit_ru),
-            findViewById<RadioButton>(R.id.rb_exit_masque),
-            findViewById<RadioButton>(R.id.rb_exit_eu),
-            findViewById<RadioButton>(R.id.rb_exit_us),
-            findViewById<RadioButton>(R.id.rb_exit_proton),
-        )
-        if (buttons.size < 6) {
+        // Порядок и состав — из [ConnectionSelectorPolicy], а не выписаны здесь.
+        val buttons = ConnectionSelectorPolicy.BUTTON_IDS.mapNotNull { findViewById<RadioButton>(it) }
+        if (buttons.size < ConnectionSelectorPolicy.SIZE) {
             LogManager.log(
-                "Селектор протокола/региона не перенастроен: найдено ${buttons.size} кнопок из 6."
+                "Селектор протокола/региона не перенастроен: найдено ${buttons.size} " +
+                    "кнопок из ${ConnectionSelectorPolicy.SIZE}."
             )
             return
         }
@@ -3500,6 +3486,25 @@ class SettingsActivity : AppCompatActivity() {
 
 
 
+    /**
+     * Ставит отметку на кнопку, которую велит [ConnectionSelectorPolicy].
+     *
+     * Обработчик снимается перед этим у вызывающего: программная простановка
+     * отметки неотличима от нажатия пользователя, и без снятия она запускала бы
+     * применение региона.
+     */
+    private fun checkSelectedRegionButton(radioGroup: RadioGroup, buttons: List<RadioButton>) {
+        val index = ConnectionSelectorPolicy.selectedIndex(
+            storedRegion = clientData.getExitRegionPreference(),
+            // Идущая подготовка Proton сильнее записанного региона: предпочтение
+            // до успеха хранит прежний транспорт, и любая перерисовка — по
+            // broadcast или начавшаяся регистрация устройства — отбрасывала бы
+            // кнопку назад посреди выпуска.
+            protonPreparationRequested = ProtonProfileManager.isPreparationRequested(),
+        )
+        buttons.getOrNull(index)?.let { radioGroup.check(it.id) }
+    }
+
     private fun configureRegionSelector(
 
         titleView: TextView,
@@ -3518,11 +3523,11 @@ class SettingsActivity : AppCompatActivity() {
 
         val rbExitMasque = buttons.getOrNull(2) ?: return
 
-        val rbExitEu = buttons.getOrNull(3) ?: return
+        val rbExitOpera = buttons.getOrNull(3) ?: return
 
-        val rbExitUs = buttons.getOrNull(4) ?: return
+        val rbExitProton = buttons.getOrNull(4) ?: return
 
-        val rbExitProton = buttons.getOrNull(5) ?: return
+        val rbExitTor = buttons.getOrNull(5) ?: return
 
         // Название общее для обеих половин списка: WARP, MASQUE и AWG Proton — это
         // протоколы, EU и US — регионы, и «Выбор региона» половину из них не
@@ -3549,17 +3554,11 @@ class SettingsActivity : AppCompatActivity() {
 
         }
 
-        rbExitAuto.text = "AUTO"
-
-        rbExitRu.text = "WARP"
-
-        rbExitMasque.text = "MASQUE"
-
-        rbExitEu.text = "EU"
-
-        rbExitUs.text = "US"
-
-        rbExitProton.text = "PROTON"
+        // Подписи — из [ConnectionSelectorPolicy], в порядке кнопок: этот же
+        // список нужен главному экрану, и вторая копия разошлась бы молча.
+        buttons.forEachIndexed { index, button ->
+            button.text = ConnectionSelectorPolicy.LABELS.getOrNull(index).orEmpty()
+        }
 
 
 
@@ -3571,36 +3570,22 @@ class SettingsActivity : AppCompatActivity() {
             it.alpha = 1f
         }
 
-        val operaTransportSupported = OperaProxyManager.isSupportedOnDevice(this)
-
-        if (!operaTransportSupported) {
-
-            rbExitEu.isEnabled = false
-
-            rbExitUs.isEnabled = false
-
-            rbExitEu.alpha = 0.45f
-
-            rbExitUs.alpha = 0.45f
-
-            if (initialExitRegionPreference == "eu" || initialExitRegionPreference == "us") {
-
-                clientData.setExitRegionPreference("auto")
-
-                initialExitRegionPreference = "auto"
-
-                Toast.makeText(
-
-                    this,
-
-                    "EU/US недоступны на этом устройстве: встроенный Opera runtime не поддерживается.",
-
-                    Toast.LENGTH_LONG
-
-                ).show()
-
-            }
-
+        // Что можно нажать — решает [ConnectionSelectorPolicy], одинаково для
+        // обоих экранов. Здесь остаётся только применить решение к кнопкам.
+        val availability = ConnectionSelectorPolicy.availability(
+            operaSupported = OperaProxyManager.isSupportedOnDevice(this),
+            deviceRegistrationInProgress = clientData.isDeviceRegistrationInProgress(),
+            storedRegion = initialExitRegionPreference,
+        )
+        buttons.forEachIndexed { index, button ->
+            val allowed = availability.enabled.getOrNull(index) ?: true
+            button.isEnabled = allowed
+            button.alpha = if (allowed) 1f else ConnectionSelectorPolicy.DISABLED_ALPHA
+        }
+        availability.rewriteStoredTo?.let { fallback ->
+            clientData.setExitRegionPreference(fallback)
+            initialExitRegionPreference = fallback
+            Toast.makeText(this, ConnectionSelectorPolicy.OPERA_UNSUPPORTED_TOAST, Toast.LENGTH_LONG).show()
         }
 
 
@@ -3612,30 +3597,13 @@ class SettingsActivity : AppCompatActivity() {
         // выдают: регистрация начинается заново, а снаружи это выглядит как
         // «MASQUE не включается». Запрет временный и снимается сам — флаг живёт
         // в состоянии службы и обнуляется на её остановке.
-        if (clientData.isDeviceRegistrationInProgress()) {
-            buttons.forEach {
-                it.isEnabled = false
-                it.alpha = 0.45f
-            }
-            summaryView.text =
-                "Идёт регистрация устройства — выбор протокола станет доступен, когда она закончится."
+        if (availability.lockReason.isNotBlank()) {
+            // Кнопки уже погашены выше, из того же решения. Здесь остаётся сказать,
+            // почему, и снять обработчик — иначе программная простановка отметки
+            // ниже сработала бы как выбор пользователя.
+            summaryView.text = availability.lockReason
             radioGroup.setOnCheckedChangeListener(null)
-            // Идущая подготовка Proton сильнее записанного региона и здесь тоже:
-            // предпочтение до успеха хранит прежний транспорт, и регистрация
-            // устройства, начавшаяся посреди выпуска, отбрасывала кнопку назад ровно
-            // так же, как это делала перерисовка по broadcast.
-            if (ProtonProfileManager.isPreparationRequested()) {
-                radioGroup.check(rbExitProton.id)
-            } else {
-                when (clientData.getExitRegionPreference()) {
-                    "eu" -> radioGroup.check(rbExitEu.id)
-                    "us" -> radioGroup.check(rbExitUs.id)
-                    "ru" -> radioGroup.check(rbExitRu.id)
-                    "masque" -> radioGroup.check(rbExitMasque.id)
-                    "proton" -> radioGroup.check(rbExitProton.id)
-                    else -> radioGroup.check(rbExitAuto.id)
-                }
-            }
+            checkSelectedRegionButton(radioGroup, buttons)
             return
         }
 
@@ -3649,47 +3617,65 @@ class SettingsActivity : AppCompatActivity() {
         // прочитанный из ещё старого предпочтения, отбрасывал кнопку назад.
         val protonPreparationVisible = ProtonProfileManager.isPreparationRequested()
 
-        if (protonPreparationVisible) {
+        checkSelectedRegionButton(radioGroup, buttons)
 
-            radioGroup.check(rbExitProton.id)
+        // Обработчик держим в поле: ветка TOR обязана вернуть отметку на прежнюю
+        // кнопку, а `check()` неотличим от нажатия и зашёл бы сюда заново.
+        regionSelectorListener = RadioGroup.OnCheckedChangeListener { _, checkedId ->
 
-        } else {
+            // Значение берётся по позиции кнопки из [ConnectionSelectorPolicy], а
+            // не перечислением идентификаторов: перечисление здесь и было той
+            // шестой копией порядка, из-за которой новая кнопка молча уезжала в
+            // «Авто» (G49). OPERA — одна кнопка на два значения службы, и какое
+            // из них записать, решает запомненный подрегион.
+            val chipIndex = buttons.indexOfFirst { it.id == checkedId }
 
-            when (clientData.getExitRegionPreference()) {
-
-                "eu" -> radioGroup.check(rbExitEu.id)
-
-                "us" -> radioGroup.check(rbExitUs.id)
-
-                "ru" -> radioGroup.check(rbExitRu.id)
-
-                "masque" -> radioGroup.check(rbExitMasque.id)
-
-                "proton" -> radioGroup.check(rbExitProton.id)
-
-                else -> radioGroup.check(rbExitAuto.id)
-
+            val chipValue = if (chipIndex >= 0) {
+                ConnectionSelectorPolicy.valueAt(chipIndex)
+            } else {
+                "auto"
             }
 
-        }
-
-        radioGroup.setOnCheckedChangeListener { _, checkedId ->
-
-            val value = when (checkedId) {
-
-                rbExitEu.id -> "eu"
-
-                rbExitUs.id -> "us"
-
-                rbExitRu.id -> "ru"
-
-                rbExitMasque.id -> "masque"
-
-                rbExitProton.id -> "proton"
-
-                else -> "auto"
-
+            if (chipValue == ConnectionSelectorPolicy.CHIP_TOR) {
+                // Транспорта Tor ещё нет. Записать `tor` регионом значило бы
+                // отправить службу перебирать пустоту, поэтому кнопка только
+                // запускает сбор мостов и говорит об этом словами (I4).
+                LogManager.log("Настройки: выбран TOR — транспорта ещё нет, запускаем обновление мостов.")
+                // Решение о сборе и счётчик мостов читаются в рабочем потоке: оба
+                // трогают `tor_bridges.json`, а это блокирующее чтение (I13). И
+                // читаются **вместе**: поле `torBridgeCount` обновляется только на
+                // `onResume`, поэтому повторное нажатие после успешного сбора
+                // показывало бы «мостов пока нет», хотя они только что собраны.
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val started = TorBridgeManager.refreshInBackground(
+                        this@SettingsActivity,
+                        reason = "выбор TOR в настройках",
+                    )
+                    val known = TorBridgeManager.snapshot(this@SettingsActivity).bridges.size
+                    withContext(Dispatchers.Main) {
+                        if (isFinishing || isDestroyed) return@withContext
+                        torBridgeCount = known
+                        summaryView.visibility = View.VISIBLE
+                        summaryView.text = ConnectionSelectorPolicy.torNoticeFor(started, known)
+                    }
+                }
+                // Отметку возвращаем на прежнюю кнопку **со снятым обработчиком**.
+                //
+                // `RadioGroup.check` неотличим от нажатия и заходит в этот же
+                // обработчик заново: со снятой отметки, потом с новой. То есть
+                // нажатие на TOR второй раз выполняло бы ветку прежнего региона —
+                // гасило только что написанную строку, отменяло идущий выпуск
+                // Proton и могло запустить незаказанное переподключение.
+                radioGroup.setOnCheckedChangeListener(null)
+                checkSelectedRegionButton(radioGroup, buttons)
+                radioGroup.setOnCheckedChangeListener(regionSelectorListener)
+                return@OnCheckedChangeListener
             }
+
+            val value = ConnectionSelectorPolicy.storedValueForChip(
+                chipValue,
+                clientData.getOperaSubRegionPreference(),
+            )
 
             if (value == "proton") {
 
@@ -3735,6 +3721,17 @@ class SettingsActivity : AppCompatActivity() {
 
                 updateExitSummary(summaryView)
 
+                // Кнопка выпуска перерисовывается **здесь**, а не только на
+                // следующем проходе селектора.
+                //
+                // Её вид зависит от выбранного региона: для Cloudflare-режимов она
+                // называется «Сгенерировать/Обновить свои профили Cloudflare», для
+                // Proton — своё, для Opera её нет вовсе. Пока перерисовку делал
+                // только `configureRegionSelector`, смена региона оставляла кнопку
+                // в прежнем виде до ухода с экрана и возврата: выбрал WARP — кнопки
+                // нет, хотя она к нему и относится.
+                bindProtonRefreshButton(summaryView, visible = true)
+
                 if (value != initialExitRegionPreference) {
 
                     maybeApplyRegionChangeImmediately(value)
@@ -3745,6 +3742,8 @@ class SettingsActivity : AppCompatActivity() {
 
         }
 
+        radioGroup.setOnCheckedChangeListener(regionSelectorListener)
+
         // Строка статуса показывается только в режиме Proton. В остальных режимах
         // она скрыта в разметке — блок «Выбор региона» рассчитан на две строки, и
         // третья наезжала бы на соседнюю карточку.
@@ -3754,6 +3753,11 @@ class SettingsActivity : AppCompatActivity() {
         // перезаписывал в той же посылке главного потока — до кадра дело не
         // доходило, и пользователь видел откатившуюся кнопку без единого слова.
         val pendingProtonMessage = protonPendingMessage
+
+        // Видимость решает сама кнопка: она теперь общая для Proton и личных
+        // профилей Cloudflare, и «показывать только на PROTON» прятало бы её там,
+        // где она как раз и нужна.
+        bindProtonRefreshButton(summaryView, visible = true)
 
         if (protonPreparationVisible || clientData.getExitRegionPreference() == "proton") {
 
@@ -3780,6 +3784,504 @@ class SettingsActivity : AppCompatActivity() {
 
 
 
+    /**
+     * Кнопка «Обновить профили Proton»: видимость, состояние и обработчик.
+     *
+     * Зачем она есть. Пусковое событие у выпуска ровно одно — **смена** региона на
+     * PROTON, — а `RadioGroup` о нажатии на уже выбранную кнопку не сообщает. То
+     * есть повторить выпуск было буквально нечем: прогон, доехавший до конца на
+     * встроенном списке узлов из прошивки (а из России `/vpn/logicals` подвисает,
+     * P3), оставался таким до переустановки приложения.
+     *
+     * Состояние читается из синглтона, а не из поля экрана: прогон переживает и
+     * поворот, и уход из настроек, и вернувшийся пользователь обязан увидеть
+     * кнопку запертой, если выпуск ещё идёт.
+     */
+    private fun bindProtonRefreshButton(summaryView: TextView, visible: Boolean) {
+
+        val button = findViewById<TextView>(R.id.btn_proton_refresh) ?: return
+
+        // Вид источника решает [ProfileIssueLabels], а не место вызова: кнопка
+        // одна на два источника, и подпись раньше была написана трижды.
+        val kind = if (!visible) {
+            ProfileIssueLabels.Kind.NONE
+        } else {
+            ProfileIssueLabels.kindFor(
+                storedRegion = clientData.getExitRegionPreference(),
+                protonPreparationRequested = ProtonProfileManager.isPreparationRequested(),
+            )
+        }
+
+        if (kind == ProfileIssueLabels.Kind.NONE) {
+
+            button.visibility = View.GONE
+
+            button.setOnClickListener(null)
+
+            return
+
+        }
+
+        button.visibility = View.VISIBLE
+
+        val busy = when (kind) {
+            ProfileIssueLabels.Kind.PROTON -> ProtonProfileManager.isRunning()
+            // Личные профили Cloudflare выпускает процесс `:vpn`, и его
+            // `isRunning()` из интерфейса не виден вовсе — состояние приходит
+            // файлом, который опрашивает [refreshWarpGenerateState].
+            else -> warpGenerateBusy
+        }
+
+        val exists = when (kind) {
+            ProfileIssueLabels.Kind.PROTON -> protonProfilesExist
+            else -> generatedCloudflareProfilesExist
+        }
+
+        button.isEnabled = !busy
+
+        button.alpha = if (busy) 0.5f else 1f
+
+        button.text = ProfileIssueLabels.label(kind, exists, busy)
+
+        button.setOnClickListener {
+            if (kind == ProfileIssueLabels.Kind.PROTON) {
+                startProtonProfileRefresh(button, summaryView)
+            } else {
+                startWarpProfileGeneration(force = false)
+            }
+        }
+
+    }
+
+    /**
+     * Есть ли уже выпущенные профили — ответ с диска, положенный в поле.
+     *
+     * Читать `warp_generated.json` и `proton_profiles.json` прямо в
+     * [bindProtonRefreshButton] нельзя: он зовётся из приёмника состояния службы,
+     * то есть на каждом кадре, и это был бы блокирующий ввод-вывод в главном
+     * потоке (I13).
+     */
+    private var generatedCloudflareProfilesExist = false
+    private var protonProfilesExist = false
+
+    /** Обработчик группы региона — чтобы его можно было снять и вернуть. */
+    private var regionSelectorListener: RadioGroup.OnCheckedChangeListener? = null
+
+    /** Сколько мостов Tor уже собрано — для честной надписи под селектором. */
+    private var torBridgeCount = 0
+
+    /** Идёт ли выпуск личных профилей Cloudflare — по файлу состояния из `:vpn`. */
+    private var warpGenerateBusy = false
+
+    private fun refreshIssuedProfilesState() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val cloudflare = runCatching {
+                val snapshot = WarpGeneratedStore(this@SettingsActivity).read()
+                snapshot.identity != null && snapshot.profiles.isNotEmpty()
+            }.getOrDefault(false)
+            val proton = runCatching {
+                ProtonProfileStore(this@SettingsActivity).readProfiles().isNotEmpty()
+            }.getOrDefault(false)
+            withContext(Dispatchers.Main) {
+                if (isFinishing || isDestroyed) return@withContext
+                if (cloudflare == generatedCloudflareProfilesExist && proton == protonProfilesExist) {
+                    return@withContext
+                }
+                generatedCloudflareProfilesExist = cloudflare
+                protonProfilesExist = proton
+                refreshConnectionSelector()
+            }
+        }
+    }
+
+
+    /**
+     * Повторный выпуск профилей Proton по явной просьбе.
+     *
+     * Чего он намеренно **не** делает, в отличие от [startProtonProfilePreparation]:
+     *
+     * - не пишет `proton_preparation.json`. Этот файл — единственный источник жёлтой
+     *   «РЕГИСТРАЦИЯ PROTON» на главном экране, и он же гасит там адрес выхода и
+     *   бейдж страны. Над живым сеансом это читалось бы как «связь пропала», хотя
+     *   обновляется только список;
+     * - не трогает регион и не переподключается. `connectToFastestProtonProfile`
+     *   на живой сессии не «переставляет» её на лучший узел, а через
+     *   `ACTION_REAPPLY_CURRENT_SESSION` роняет туннель и собирает заново — цена,
+     *   которую пользователь не заказывал, нажимая «обновить». Новый порядок
+     *   применится сам на ближайшем подключении или на «следующем профиле».
+     *
+     * Признак `preparationRequested` тоже не ставится: он решает, применять ли итог
+     * прогона к региону и подключению, а здесь применять нечего.
+     */
+    private fun startProtonProfileRefresh(button: TextView, summaryView: TextView) {
+
+        if (ProtonProfileManager.isRunning()) {
+
+            LogManager.log("Proton: обновление не начали — выпуск уже идёт.")
+
+            Toast.makeText(this, "Выпуск профилей Proton уже идёт", Toast.LENGTH_SHORT).show()
+
+            return
+
+        }
+
+        detachProtonStatusListener()
+
+        protonPendingMessage = null
+
+        summaryView.visibility = View.VISIBLE
+
+        val listener = ProtonProfileManager.StatusListener { text ->
+
+            protonPendingMessage = text
+
+            summaryView.post { summaryView.text = text }
+
+        }
+
+        protonStatusListener = listener
+
+        ProtonProfileManager.addListener(listener)
+
+        button.isEnabled = false
+
+        button.alpha = 0.5f
+
+        button.text = "Профили Proton выпускаются…"
+
+        LogManager.log(
+            "Proton: пользователь попросил обновить профили — выпускаем заново, " +
+                "регион и подключение не трогаем."
+        )
+
+        val started = ProtonProfileManager.ensureProfiles(this, force = true) { outcome ->
+
+            // Итог пишется в журнал из рабочего потока, а не из посылки на вид: к
+            // концу минутного прогона экрана обычно уже нет, и посылка не выполнится
+            // вовсе (I18).
+            protonPendingMessage = outcome.message
+
+            LogManager.log(
+                if (outcome.ready) {
+                    "Proton: обновление закончено — ${outcome.message}. " +
+                        "Новый порядок применится на ближайшем подключении."
+                } else {
+                    "Proton: обновление не удалось — ${outcome.message}."
+                }
+            )
+
+            runOnUiThread {
+
+                if (isFinishing || isDestroyed) return@runOnUiThread
+
+                button.isEnabled = true
+
+                button.alpha = 1f
+
+                button.text = ProfileIssueLabels.label(
+                    ProfileIssueLabels.Kind.PROTON,
+                    exists = true,
+                    busy = false,
+                )
+
+                summaryView.text = outcome.message
+
+                Toast.makeText(this, outcome.message, Toast.LENGTH_LONG).show()
+
+            }
+
+        }
+
+        if (!started) {
+
+            LogManager.log("Proton: обновление не начали — выпуск уже ведёт другой процесс.")
+
+            button.isEnabled = true
+
+            button.alpha = 1f
+
+            button.text = "Обновить профили Proton"
+
+        }
+
+    }
+
+
+    /**
+     * Карточка «Свои профили WARP»: кнопка выпуска и два переключателя.
+     *
+     * Обе настройки читаются с рабочего потока. Это не осторожность впрок: первое
+     * обращение к `SharedPreferences` тянет с диска весь файл настроек, а карточка
+     * собирается в `onCreate` — то есть ровно в том кадре, который пользователь
+     * ждёт после нажатия «Настройки».
+     *
+     * Обработчики ставятся сразу, а положение приезжает позже под флагом
+     * [suppressWarpGenerateSwitchCallback]: без флага начальная расстановка была бы
+     * неотличима от нажатия и писала бы в журнал «пользователь включил» на каждом
+     * заходе на экран.
+     */
+    private fun setupWarpGenerateCard() {
+
+        val swAvoidColo = findViewById<SwitchCompat>(R.id.sw_avoid_moscow_colo) ?: return
+
+        applyLiquidSwitchTint(swAvoidColo)
+
+        // Переключателя «использовать свои профили» здесь больше нет: личные
+        // профили используются в первую очередь всегда. Кнопка выпуска переехала
+        // в карточку выбора протокола и переименовывается по состоянию
+        // ([bindProtonRefreshButton]).
+
+        swAvoidColo.setOnCheckedChangeListener { _, isChecked ->
+
+            if (suppressWarpGenerateSwitchCallback) return@setOnCheckedChangeListener
+
+            lifecycleScope.launch(Dispatchers.IO) {
+
+                clientData.setAvoidedColoSwitchEnabled(isChecked)
+
+                LogManager.log(
+                    if (isChecked) {
+                        "Узел Cloudflare: обход нежелательных узлов " +
+                            "(${ExitColoPolicy.DEFAULT_AVOIDED.joinToString(", ")}) включён."
+                    } else {
+                        "Узел Cloudflare: обход нежелательных узлов выключен."
+                    }
+                )
+
+            }
+
+        }
+
+        lifecycleScope.launch(Dispatchers.IO) {
+
+            val avoidColo = clientData.isAvoidedColoSwitchEnabled()
+
+            withContext(Dispatchers.Main) {
+
+                if (isFinishing || isDestroyed) return@withContext
+
+                suppressWarpGenerateSwitchCallback = true
+
+                swAvoidColo.isChecked = avoidColo
+
+                suppressWarpGenerateSwitchCallback = false
+
+            }
+
+        }
+
+        refreshTorBridgeStatus()
+
+    }
+
+    /** Строка о мостах Tor в карточке личных профилей. */
+    private fun refreshTorBridgeStatus() {
+        val view = findViewById<TextView>(R.id.tv_tor_bridges_status) ?: return
+        lifecycleScope.launch(Dispatchers.IO) {
+            val text = TorBridgeManager.summary(this@SettingsActivity)
+            val count = TorBridgeManager.snapshot(this@SettingsActivity).bridges.size
+            withContext(Dispatchers.Main) {
+                if (isFinishing || isDestroyed) return@withContext
+                torBridgeCount = count
+                view.visibility = View.VISIBLE
+                view.text = text
+            }
+        }
+    }
+
+
+    /**
+     * Просьба выпустить свои профили WARP.
+     *
+     * Работу делает процесс `:vpn`, и не для удобства: сканер точек входа открывает
+     * сотни UDP-сокетов и обязан помечать их `protect()`, а `GlobalProtector` ставит
+     * служба. Из процесса интерфейса те же сокеты ушли бы в туннель, который они как
+     * раз и проверяют.
+     *
+     * @param force перерегистрировать личность, даже если она уже выдана. Обычное
+     *        нажатие передаёт `false`: личность одна на все профили, и менять её
+     *        ради нового списка точек входа незачем.
+     */
+    private fun startWarpProfileGeneration(force: Boolean) {
+
+        // Кнопка теперь общая с Proton и живёт в карточке выбора протокола.
+        val button = findViewById<TextView>(R.id.btn_proton_refresh) ?: return
+
+        val status = findViewById<TextView>(R.id.tv_warp_generate_status)
+
+        LogManager.log(
+            "WARP-генератор: пользователь попросил выпустить свои профили " +
+                "(перерегистрация личности: ${if (force) "да" else "нет"})."
+        )
+
+        val launched = runCatching {
+
+            ContextCompat.startForegroundService(
+                this,
+                Intent(this, NovaVpnService::class.java).apply {
+                    action = NovaVpnService.ACTION_GENERATE_WARP_PROFILES
+                    putExtra(NovaVpnService.EXTRA_WARP_GENERATE_FORCE, force)
+                }
+            )
+
+        }
+
+        // Отказ здесь молчать не должен: с фоновым запуском службы система отказывает
+        // по своим правилам, и запертая кнопка без единого слова была бы неотличима
+        // от начавшегося прогона (I4).
+        launched.onFailure { error ->
+
+            LogManager.log("WARP-генератор: службу не удалось разбудить — ${error.message}")
+
+            Toast.makeText(this, "Не удалось начать выпуск профилей WARP", Toast.LENGTH_LONG).show()
+
+            return
+
+        }
+
+        warpGenerateRequestedAtMs = System.currentTimeMillis()
+
+        warpGenerateBusy = true
+
+        button.isEnabled = false
+
+        button.alpha = 0.5f
+
+        button.text = ProfileIssueLabels.label(
+            ProfileIssueLabels.Kind.CLOUDFLARE,
+            exists = generatedCloudflareProfilesExist,
+            busy = true,
+        )
+
+        status?.visibility = View.VISIBLE
+
+        status?.text = "WARP: запускаю выпуск"
+
+        startWarpGeneratePolling()
+
+    }
+
+
+    private fun startWarpGeneratePolling() {
+
+        warpGeneratePolling = true
+
+        warpGenerateHandler.removeCallbacks(warpGenerateRefreshRunnable)
+
+        warpGenerateHandler.post(warpGenerateRefreshRunnable)
+
+    }
+
+
+    private fun stopWarpGeneratePolling() {
+
+        warpGeneratePolling = false
+
+        warpGenerateHandler.removeCallbacks(warpGenerateRefreshRunnable)
+
+    }
+
+
+    /**
+     * Один шаг опроса: прочитать состояние прогона и перерисовать карточку.
+     *
+     * Чтение файла — с рабочего потока: он лежит в `filesDir`, его пишет чужой
+     * процесс, и читать его каждые полторы секунды на главном потоке значило бы
+     * ставить кадры экрана в зависимость от чужой записи.
+     *
+     * Опрос гаснет сам, как только состояние перестало быть `running`: `done`,
+     * `failed` и `idle` дальше не меняются, и продолжать читать файл ради того же
+     * ответа незачем.
+     */
+    private fun refreshWarpGenerateState() {
+
+        val button = findViewById<TextView>(R.id.btn_proton_refresh) ?: return
+
+        val status = findViewById<TextView>(R.id.tv_warp_generate_status) ?: return
+
+        lifecycleScope.launch(Dispatchers.IO) {
+
+            val progress = WarpProfileGenerator.readProgress(this@SettingsActivity)
+
+            val exists = runCatching {
+                val snapshot = WarpGeneratedStore(this@SettingsActivity).read()
+                snapshot.identity != null && snapshot.profiles.isNotEmpty()
+            }.getOrDefault(generatedCloudflareProfilesExist)
+
+            withContext(Dispatchers.Main) {
+
+                if (isFinishing || isDestroyed) return@withContext
+
+                generatedCloudflareProfilesExist = exists
+
+                val running = progress.state == WarpProfileGenerator.STATE_RUNNING
+
+                if (running) warpGenerateRequestedAtMs = 0L
+
+                val awaitingStart = !running &&
+                    warpGenerateRequestedAtMs != 0L &&
+                    System.currentTimeMillis() - warpGenerateRequestedAtMs < 20_000L
+
+                if (!running && !awaitingStart) warpGenerateRequestedAtMs = 0L
+
+                val busy = running || awaitingStart
+
+                warpGenerateBusy = busy
+
+                // Кнопка общая с Proton: пока выбран Proton, её текстом
+                // распоряжается его ветка, и переписывать здесь значило бы драться
+                // за один вид двумя писателями.
+                val kind = ProfileIssueLabels.kindFor(
+                    storedRegion = clientData.getExitRegionPreference(),
+                    protonPreparationRequested = ProtonProfileManager.isPreparationRequested(),
+                )
+
+                if (kind == ProfileIssueLabels.Kind.CLOUDFLARE) {
+
+                    button.isEnabled = !busy
+
+                    button.alpha = if (busy) 0.5f else 1f
+
+                    button.text = ProfileIssueLabels.label(kind, exists, busy)
+
+                }
+
+                // Пока прогон о себе не заявил, показываем своё слово, а не итог
+                // прошлого: «выпущено 50 профилей» сразу под только что нажатой
+                // кнопкой читается как мгновенный успех.
+                val message = if (awaitingStart) "WARP: запускаю выпуск" else progress.message
+
+                if (message.isBlank()) {
+
+                    status.visibility = View.GONE
+
+                } else {
+
+                    status.visibility = View.VISIBLE
+
+                    status.text = message
+
+                }
+
+                if (!busy || !warpGeneratePolling) {
+
+                    stopWarpGeneratePolling()
+
+                    return@withContext
+
+                }
+
+                warpGenerateHandler.removeCallbacks(warpGenerateRefreshRunnable)
+
+                warpGenerateHandler.postDelayed(warpGenerateRefreshRunnable, 1500L)
+
+            }
+
+        }
+
+    }
+
+
     private fun configureImportedProtocolSelector(
 
         titleView: TextView,
@@ -3791,6 +4293,10 @@ class SettingsActivity : AppCompatActivity() {
         summaryView: TextView,
 
     ) {
+
+        // В режиме импортированных профилей регион не выбирают, и кнопка Proton
+        // здесь не к чему относиться: без этого она осталась бы от прошлой отрисовки.
+        bindProtonRefreshButton(summaryView, visible = false)
 
         titleView.text = "Выбор протокола"
 
@@ -4000,21 +4506,35 @@ class SettingsActivity : AppCompatActivity() {
 
 
 
-    private fun shareReleaseLink() {
+    /**
+     * Открывает страницу загрузки на сайте.
+     *
+     * Раньше здесь был `ACTION_SEND` — «поделиться ссылкой». Владелец попросил
+     * вести прямо на сайт: кнопка называется «Скачать последнюю версию», и
+     * выбор мессенджера вместо страницы был бы обещанием не той работы.
+     *
+     * Отсутствие браузера обрабатывается вслух (I4): молчаливый `return` здесь
+     * неотличим от «нажатие не сработало».
+     */
+    private fun openDownloadPage() {
 
-        val link = "https://github.com/confeden/Nova-Android/releases"
+        val link = "https://nova-app.eu/download/#nova-android"
 
-        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+        try {
 
-            type = "text/plain"
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link)).apply {
 
-            putExtra(Intent.EXTRA_SUBJECT, "Nova Android")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
-            putExtra(Intent.EXTRA_TEXT, link)
+            })
+
+        } catch (e: Exception) {
+
+            LogManager.log("Настройки: страницу загрузки открыть не удалось — ${e.message}")
+
+            Toast.makeText(this, "Не удалось открыть $link", Toast.LENGTH_LONG).show()
 
         }
-
-        startActivity(Intent.createChooser(shareIntent, "Поделиться Nova"))
 
     }
 
@@ -4106,7 +4626,9 @@ class SettingsActivity : AppCompatActivity() {
 
 
 
-        rowManualUpdateCheck.isEnabled = progress.state != UpdateDownloadProgress.State.CHECKING
+        // Нажимать нечего, пока идёт то, что нажатие и запустило бы: проверка,
+        // загрузка или установка. Ровно тем и глушатся повторные нажатия.
+        rowManualUpdateCheck.isEnabled = !progress.isBusy
 
         rowManualUpdateCheck.alpha = if (rowManualUpdateCheck.isEnabled) 1f else 0.8f
 
@@ -4125,6 +4647,8 @@ class SettingsActivity : AppCompatActivity() {
         rowManualUpdateCheck.text = when (progress.state) {
 
             UpdateDownloadProgress.State.CHECKING -> "Проверяем обновления..."
+
+            UpdateDownloadProgress.State.INSTALLING -> "Устанавливаем обновление..."
 
             UpdateDownloadProgress.State.READY -> "Обновить приложение"
 
@@ -4145,6 +4669,8 @@ class SettingsActivity : AppCompatActivity() {
             UpdateDownloadProgress.State.DOWNLOADING,
 
             UpdateDownloadProgress.State.PAUSED,
+
+            UpdateDownloadProgress.State.INSTALLING,
 
             UpdateDownloadProgress.State.CHECKING -> {
 

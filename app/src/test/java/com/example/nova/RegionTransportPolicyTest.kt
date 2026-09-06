@@ -89,3 +89,59 @@ class RegionTransportPolicyTest {
         assertFalse(RegionTransportPolicy.allowsMasqueTransport("vless"))
     }
 }
+
+/**
+ * Словарь выходов пинуется тестом, потому что он уже разъезжался.
+ *
+ * `NovaVpnService` держал собственную копию без `masque` и `vless`, и служба
+ * разжаловала явный выбор в «Авто» — а «Авто» разрешает подмену транспорта.
+ * Снаружи это выглядело как «выбрал MASQUE, подключился голландский Opera».
+ */
+class RegionVocabularyTest {
+
+    @org.junit.Test
+    fun `every selectable region survives normalization`() {
+        for (region in listOf("auto", "ru", "eu", "us", "masque", "vless", "proton")) {
+            org.junit.Assert.assertEquals(region, RegionTransportPolicy.normalizeKnown(region))
+            org.junit.Assert.assertEquals(region, RegionTransportPolicy.normalizeKnown(region.uppercase()))
+            org.junit.Assert.assertEquals(region, RegionTransportPolicy.normalizeKnown("  $region  "))
+        }
+    }
+
+    @org.junit.Test
+    fun `an unknown or empty region falls back to auto`() {
+        for (value in listOf(null, "", "   ", "atlantis", "EU2")) {
+            org.junit.Assert.assertEquals("auto", RegionTransportPolicy.normalizeKnown(value))
+        }
+    }
+
+    /**
+     * Нормализация не должна отменять запрет подмены: явный выбор, прошедший
+     * через `normalizeKnown`, обязан остаться явным.
+     */
+    @org.junit.Test
+    fun `an explicit choice stays explicit after normalization`() {
+        for (region in listOf("ru", "eu", "us", "masque", "vless", "proton")) {
+            val normalized = RegionTransportPolicy.normalizeKnown(region)
+            org.junit.Assert.assertTrue(region, RegionTransportPolicy.isExplicitChoice(normalized))
+        }
+        org.junit.Assert.assertFalse(RegionTransportPolicy.isExplicitChoice(RegionTransportPolicy.normalizeKnown("auto")))
+    }
+
+    /** MASQUE и VLESS не должны разрешать подмену на Opera. */
+    @org.junit.Test
+    fun `masque and vless never allow an opera substitution`() {
+        for (region in listOf("masque", "vless", "proton", "ru")) {
+            org.junit.Assert.assertFalse(
+                region,
+                RegionTransportPolicy.allowsOperaTransport(RegionTransportPolicy.normalizeKnown(region)),
+            )
+        }
+        for (region in listOf("eu", "us", "auto")) {
+            org.junit.Assert.assertTrue(
+                region,
+                RegionTransportPolicy.allowsOperaTransport(RegionTransportPolicy.normalizeKnown(region)),
+            )
+        }
+    }
+}

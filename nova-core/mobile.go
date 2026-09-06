@@ -85,6 +85,26 @@ func SetDnsInterceptPolicy(enabled bool, mediaUpstreamsCSV string, defaultUpstre
 	)
 }
 
+// SetDomainBypassPolicy configures whole-zone and per-domain bypass.
+//
+// zonesCSV holds top-level zones such as "ru,su", domainsCSV holds explicit
+// domains such as "ozon.ru,vk.com", and cyrillic enables every Cyrillic zone.
+// Both lists accept commas, spaces, tabs and newlines as separators.
+//
+// The core learns addresses from the DNS answers it already intercepts and
+// relays matching TCP flows on ports 80 and 443 through a protected socket, so
+// a policy change applies to a live session without a reconnect. Changing the
+// rules drops everything learned under the previous rules.
+func SetDomainBypassPolicy(enabled bool, zonesCSV string, domainsCSV string, cyrillic bool) {
+	novaengine.SetDomainBypassPolicy(enabled, zonesCSV, domainsCSV, cyrillic)
+}
+
+// GetDomainBypassStats returns newline-separated key=value counters:
+// learned, relayed, installed, listeners, dropped, quicSkipped.
+func GetDomainBypassStats() string {
+	return novaengine.GetDomainBypassStats()
+}
+
 // SetTrafficCamouflageHost configures a neutral fake-template host that can be
 // reused by transport-specific obfuscation paths such as MASQUE fake QUIC bursts.
 func SetTrafficCamouflageHost(host string) {

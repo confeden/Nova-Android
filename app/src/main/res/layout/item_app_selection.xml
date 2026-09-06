@@ -12,13 +12,35 @@
         android:layout_height="40dp"
         android:layout_marginEnd="12dp"/>
 
-    <TextView
-        android:id="@+id/tv_name"
+    <LinearLayout
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_weight="1"
-        android:textColor="#FFFFFF"
-        android:textSize="16sp"/>
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/tv_name"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"/>
+
+        <!--
+            Подпись у тех приложений, которые уходят мимо туннеля всегда.
+            Без неё галочка у банка выглядела бы как то, что она решает, — а
+            решает её закрытый список, а не пользователь.
+        -->
+        <TextView
+            android:id="@+id/tv_app_direct"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:letterSpacing="0.05"
+            android:text="direct"
+            android:textColor="#FFD166"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:visibility="gone"/>
+    </LinearLayout>
 
     <CheckBox
         android:id="@+id/cb_select"

@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Виджет: рамка со скруглёнными углами, внутри две круглые кнопки без подписей.
+
+    Подписей нет намеренно — на две ячейки они не помещаются, не искажая круги, а
+    смысл кнопок читается по значку и цвету: питание слева, перемотка профиля
+    справа.
+
+    Тело виджета прозрачное: рисуется только градиентная рамка и сами кнопки,
+    сквозь остальное видны обои. Кнопки при этом непрозрачные — иначе значок в
+    круге терялся бы на светлых обоях.
+
+    Корень растянут на всю ячейку, рамка внутри — высотой по содержимому. Так
+    виджет выглядит одинаково и в выделенной ему ячейке, и после растягивания:
+    рамка тянется по ширине, а по высоте остаётся прежней и стоит по центру,
+    вместо того чтобы превращаться в пустую коробку.
+
+    Обрезки больше нет, потому что размеры в `widget_nova_info.xml` объявлены по
+    реальному содержимому — 12+52+16+52+12 = 144dp в ширину и 12+52+12 = 76dp в
+    высоту, — а не по формуле «две ячейки на одну». Прежние 110x40dp были меньше
+    самих кнопок, и лаунчер честно резал то, что не поместилось.
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:id="@+id/widget_frame"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center_vertical"
+        android:background="@drawable/bg_widget_frame"
+        android:gravity="center"
+        android:orientation="horizontal"
+        android:padding="12dp">
+
+        <ImageView
+            android:id="@+id/widget_btn_power"
+            android:layout_width="52dp"
+            android:layout_height="52dp"
+            android:background="@drawable/bg_widget_power_off"
+            android:contentDescription="Подключить или отключить Nova"
+            android:padding="13dp"
+            android:src="@drawable/ic_widget_power" />
+
+        <ImageView
+            android:id="@+id/widget_btn_next"
+            android:layout_width="52dp"
+            android:layout_height="52dp"
+            android:layout_marginStart="16dp"
+            android:background="@drawable/bg_widget_next"
+            android:contentDescription="Следующий профиль"
+            android:padding="14dp"
+            android:src="@drawable/ic_widget_next" />
+    </LinearLayout>
+</FrameLayout>

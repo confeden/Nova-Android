@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Круг «подключено»: тот же неоново-зелёный, что и у активного состояния экрана. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+
+    <gradient
+        android:angle="270"
+        android:startColor="#FF4BE3A6"
+        android:endColor="#FF0E7350"
+        android:type="linear" />
+
+    <stroke
+        android:width="1.5dp"
+        android:color="#FF8CF0C0" />
+</shape>

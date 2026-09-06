@@ -47,10 +47,20 @@ object SniMaskPolicy {
      * @param russia большой российский список
      * @param global зарубежный список
      */
+    /**
+     * @param white проверенные российские имена (`white.sni`) — их и берём первыми
+     * @param russia большой российский список
+     * @param global зарубежный список
+     * @param provenRussia короткий отобранный список российских имён, с которых
+     *        начинают **все**
+     * @param provenGlobal то же для зарубежных сетей
+     */
     data class Pools(
         val white: List<String> = emptyList(),
         val russia: List<String> = emptyList(),
         val global: List<String> = emptyList(),
+        val provenRussia: List<String> = emptyList(),
+        val provenGlobal: List<String> = emptyList(),
     )
 
     /**
@@ -145,22 +155,33 @@ object SniMaskPolicy {
             inputs.pools.global.map(::normalizeHost).filter { it.isNotBlank() }.distinct(),
             inputs.seed,
         )
+        // Отобранные имена идут **впереди поворота** — иначе их не видно.
+        //
+        // Поворот по узлу (`rotate`) перемешивает список так, что имя из головы
+        // файла попадает в окно из 64 кандидатов примерно раз из девяти. Поэтому
+        // «поднять имена наверх списка» само по себе не делает ничего: чтобы с них
+        // начинали все, они обязаны стоять до поворота, ровно там же, где стоят
+        // выученные на устройстве имена. Выученные при этом остаются старше:
+        // измеренное на этой сети сильнее отобранного при сборке.
+        val proven = provenFor(inputs)
         if (inputs.regime == Regime.WHITELIST) {
             // Только `white`. Откат на большой российский список — лишь когда
             // проверенных имён нет вовсе: пустая очередь хуже неточной.
             val pool = rotate(white.ifEmpty { russia }, inputs.seed)
-            return (promoteFrom(pool, learned) + pool).distinct().take(MAX_ORDER)
+            return (promoteFrom(pool, learned) + proven + pool).distinct().take(MAX_ORDER)
         }
         val domestic = rotate((white + russia).distinct(), inputs.seed)
         if (foreign.isEmpty()) {
-            return (promoteFrom(domestic, learned) + domestic).distinct().take(MAX_ORDER)
+            return (promoteFrom(domestic, learned) + proven + domestic).distinct().take(MAX_ORDER)
         }
-        if (domestic.isEmpty()) return (promoteFrom(foreign, learned) + foreign).distinct().take(MAX_ORDER)
+        if (domestic.isEmpty()) {
+            return (promoteFrom(foreign, learned) + proven + foreign).distinct().take(MAX_ORDER)
+        }
         // Выученные имена ищутся во **всём** наборе, а не в уже обрезанной очереди.
         // Пока подъём делался после чередования, имя искалось среди 64 кандидатов,
         // а взято оно из пятисот с лишним — и на устройстве не поднималось ни разу,
         // хотя записывалось исправно.
-        val front = promoteFrom(domestic + foreign, learned)
+        val front = promoteFrom(domestic + foreign, learned) + proven
         // Чередование начинается с российского имени: «сначала российские, потом
         // зарубежные» — правило владельца, и на сети с белым списком ошибиться в
         // эту сторону дешевле.
@@ -173,6 +194,24 @@ object SniMaskPolicy {
             i++
         }
         return (front + interleaved).distinct().take(MAX_ORDER)
+    }
+
+    /**
+     * Отобранные имена для этого режима сети.
+     *
+     * В режиме белого списка зарубежные имена не работают вовсе — «даже Google
+     * не открывается», — поэтому туда попадают только российские. В остальных
+     * случаях идут оба списка, российские первыми: это правило владельца, и
+     * ошибиться в эту сторону дешевле.
+     *
+     * Поворота здесь нет намеренно: смысл списка в том, что **все** начинают с
+     * одних и тех же имён, а разнообразие даёт хвост очереди.
+     */
+    private fun provenFor(inputs: Inputs): List<String> {
+        val russia = inputs.pools.provenRussia.map(::normalizeHost).filter { it.isNotBlank() }
+        if (inputs.regime == Regime.WHITELIST) return russia.distinct()
+        val global = inputs.pools.provenGlobal.map(::normalizeHost).filter { it.isNotBlank() }
+        return (russia + global).distinct()
     }
 
     /** Выученные имена, встречающиеся в наборе, в порядке их заслуг. */
@@ -200,6 +239,11 @@ object SniMaskPolicy {
 
     private fun sourceOf(host: String, inputs: Inputs): String = when {
         inputs.mode == MODE_CUSTOM -> "custom"
+        // «Отобранный» проверяется первым: иначе имя из этого набора, попавшее
+        // заодно в `white.sni`, писалось бы в журнал как «white», и по строке
+        // «набор …» нельзя было бы понять, сработал ли новый список.
+        inputs.pools.provenRussia.any { normalizeHost(it) == host } -> "proven"
+        inputs.pools.provenGlobal.any { normalizeHost(it) == host } -> "proven"
         inputs.pools.white.any { normalizeHost(it) == host } -> "white"
         inputs.pools.global.any { normalizeHost(it) == host } -> "global"
         else -> "russia"

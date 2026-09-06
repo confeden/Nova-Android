@@ -394,6 +394,25 @@ class WarpClient(
                 }
             }
 
+            // Последняя ступень — свой релей в Швеции.
+            //
+            // `api.cloudflareclient.com` в России режется по SNI (замер на МегаФон
+            // LTE: десять секунд и ни одного ответа), а всё, что выше, пробует
+            // обойти это с адреса самого пользователя. Релей меняет не адрес
+            // туннеля, а только адрес одного вызова API: точка входа WARP
+            // (`engage.cloudflareclient.com:2408`) в список разрешённых имён не
+            // внесена и внесена не будет, так что туннель по-прежнему набирается
+            // напрямую. Ставим её последней, а не первой: пока прямой путь
+            // работает, ключ должен выдаваться с адреса пользователя.
+            if (!shouldAbort()) {
+                reportProgress(96, "Пробуем регистрацию через собственный релей API...")
+                tryRelayRegistration(bodyString, privateKey, publicKey)?.let {
+                    recordProfileOutcome(success = true)
+                    reportProgress(100)
+                    return it
+                }
+            }
+
             logger("Все obfuscated/proxy способы регистрации исчерпаны. Прямой plain HTTPS fallback отключён.")
             recordProfileOutcome(success = false)
             lastException?.let { logger("Ошибка сети/регистрации: ${it.message}") }
@@ -1009,6 +1028,81 @@ class WarpClient(
         } catch (_: Exception) {
             false
         }
+    }
+
+    /**
+     * Регистрация Cloudflare через собственный релей в Швеции.
+     *
+     * Мост — свой, а не общий с Proton: [ProtonRelay] гасит свои мосты в конце
+     * прогона профилей, и разделяемый экземпляр означал бы, что закончившийся
+     * прогон Proton обрывает регистрацию посреди запроса (об этом прямо
+     * предупреждает KDoc [TlsRelayBridge]).
+     *
+     * Учётные данные добавляет OkHttp, а не мост: мост слушает порт на петле, и
+     * если бы он подставлял ключ сам, этот порт стал бы открытым прокси для
+     * соседних приложений.
+     *
+     * @return конфигурация или null — «этот путь не сработал». Молчаливый выход
+     *         неотличим от «мы даже не пробовали» (I4), поэтому каждый исход
+     *         пишется в журнал.
+     */
+    private fun tryRelayRegistration(
+        bodyString: String,
+        privateKey: String,
+        publicKey: String,
+    ): WarpConfig? {
+        if (!NovaRelay.isConfigured()) {
+            logger("Релей API не настроен — регистрация Cloudflare через него пропущена.")
+            return null
+        }
+        if (NovaRelay.isOutdated()) {
+            logger("Релей API: ${NovaRelay.OUTDATED_MESSAGE}.")
+            return null
+        }
+        val bridge = TlsRelayBridge("warp-relay")
+        val credential = okhttp3.Credentials.basic(NovaRelay.keyId(), NovaRelay.password())
+        try {
+            NovaRelay.ENDPOINTS.forEachIndexed { index, (host, port) ->
+                if (shouldAbort()) return null
+                val endpoint = bridge.start("https://$host:$port", logger) ?: run {
+                    logger("Релей ${NovaRelay.describe(index)}: мост не поднялся, пробуем следующий.")
+                    return@forEachIndexed
+                }
+                val client = OkHttpClient.Builder()
+                    .proxy(Proxy(Proxy.Type.HTTP, InetSocketAddress(endpoint.localHost, endpoint.localPort)))
+                    .proxyAuthenticator { _, response ->
+                        if (NovaRelay.noteFromResponse(response, "Cloudflare")) null
+                        else if (response.request.header("Proxy-Authorization") != null) null
+                        else response.request.newBuilder()
+                            .header("Proxy-Authorization", credential)
+                            .build()
+                    }
+                    .connectTimeout(8L, TimeUnit.SECONDS)
+                    .readTimeout(20L, TimeUnit.SECONDS)
+                    .callTimeout(30L, TimeUnit.SECONDS)
+                    .build()
+                try {
+                    val responseText = executeRegistrationRequest(client, bodyString)
+                    NovaRelay.clearOutdated()
+                    logger("Регистрация Cloudflare прошла через релей ${NovaRelay.describe(index)}.")
+                    return parseRegistrationResponse(
+                        responseText = responseText,
+                        privateKey = privateKey,
+                        publicKey = publicKey,
+                        sourceLabel = "nova-relay-${NovaRelay.describe(index)}",
+                    )
+                } catch (e: Exception) {
+                    if (NovaRelay.isOutdated()) {
+                        logger("Релей API: ${NovaRelay.OUTDATED_MESSAGE}.")
+                        return null
+                    }
+                    logger("Релей ${NovaRelay.describe(index)}: регистрация не прошла — ${e.message}")
+                }
+            }
+        } finally {
+            runCatching { bridge.stop(logger) }
+        }
+        return null
     }
 
     private fun buildOperaProxyHttpClient(retryMode: Boolean): OkHttpClient {

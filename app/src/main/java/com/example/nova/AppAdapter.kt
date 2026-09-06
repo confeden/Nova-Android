@@ -20,6 +20,7 @@ class AppAdapter(private val onToggle: (String, Boolean) -> Unit) : RecyclerView
     class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
         val icon: ImageView = view.findViewById(R.id.iv_icon)
         val name: TextView = view.findViewById(R.id.tv_name)
+        val direct: TextView = view.findViewById(R.id.tv_app_direct)
         val check: CheckBox = view.findViewById(R.id.cb_select)
     }
 
@@ -33,11 +34,18 @@ class AppAdapter(private val onToggle: (String, Boolean) -> Unit) : RecyclerView
         val item = items[position]
         holder.name.text = item.label
         AppCacheManager.bindIcon(holder.icon, item)
-        
+
+        // Прямое приложение галочкой не управляется: его уводит мимо туннеля
+        // закрытый список, и включённая галочка обещала бы обратное. Оба
+        // состояния выставляются явно — вид переиспользуется.
+        holder.direct.visibility = if (item.isDirect) View.VISIBLE else View.GONE
+        holder.check.isEnabled = !item.isDirect
+        holder.check.alpha = if (item.isDirect) 0.4f else 1f
+
         // Avoid listener firing during recycle
         holder.check.setOnCheckedChangeListener(null)
         holder.check.isChecked = item.isSelected
-        
+
         holder.check.setOnCheckedChangeListener { _, isChecked ->
             item.isSelected = isChecked
             onToggle(item.packageName, isChecked)

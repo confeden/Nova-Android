@@ -41,6 +41,17 @@ data class ProtonProfile(
     val port: Int,
     val peerPublicKey: String,
     val pingMs: Int,
+    /**
+     * Чем измерен [pingMs]: [ProtonLatency.SOURCE_HANDSHAKE], [ProtonLatency.SOURCE_TCP]
+     * или пусто — не измерен вовсе.
+     *
+     * Значения по умолчанию здесь намеренно нет. Поле обязано быть заполнено на
+     * каждом месте сборки профиля: молчаливый умолчательный источник — это ровно
+     * тот дефект, из-за которого «в журнале записано, в выгрузке ноль» (G12), а
+     * здесь он был бы хуже — «лучший 61 мс» читался бы как подтверждённое
+     * рукопожатие там, где на самом деле измерен только TCP-отклик.
+     */
+    val pingSource: String,
     val load: Int,
     val sni: String,
     val junkCount: Int,
@@ -62,6 +73,25 @@ class ProtonProfileStore(context: Context) {
     private val appContext = context.applicationContext
     private val accountFile = AtomicFile(File(appContext.filesDir, "proton_account.json"))
     private val profilesFile = AtomicFile(File(appContext.filesDir, "proton_profiles.json"))
+
+    /**
+     * Кандидаты на замер — отдельным файлом, а не поверх рабочего списка.
+     *
+     * Дефект, который это чинит. Прогон писал восемьдесят **неизмеренных**
+     * кандидатов прямо в `proton_profiles.json`, а замер переписывал файл ранжированной
+     * полусотней только в конце — то есть до двух минут (`PROBE_WAIT_MS`) рабочий
+     * список приложения состоял из восьмидесяти записей с `pingMs = -1` на девяти
+     * портах по кругу. Всё это время очередь подключения строится из него:
+     * `protonVerifiedConfigs` читает файл с трёхсекундным кэшем и никакой инвалидации
+     * по изменению файла не имеет. Любая пересборка очереди в этом окне — повтор,
+     * реапплай, «следующий профиль», переподключение при смене сети — брала
+     * неизмеренный набор, в котором текущий рабочий узел мог оказаться на другом
+     * порту или отсутствовать вовсе.
+     *
+     * Пока замер шёл ровно от выбора региона, окно закрывалось само. С кнопкой
+     * «обновить» и фоновой подготовкой при живом туннеле оно стало обычным делом.
+     */
+    private val candidatesFile = AtomicFile(File(appContext.filesDir, "proton_candidates.json"))
     private val probeFile = AtomicFile(File(appContext.filesDir, "proton_probe.json"))
     private val runLeaseFile = AtomicFile(File(appContext.filesDir, "proton_run.json"))
 
@@ -213,10 +243,79 @@ class ProtonProfileStore(context: Context) {
         }
     }
 
+    /**
+     * Откуда взят список узлов последнего прогона: [NODES_LIVE] или [NODES_BUNDLED].
+     *
+     * Зачем это хранится. Прогон, у которого `/vpn/logicals` не ответил, честно
+     * доходит до конца на встроенных пятидесяти узлах — и получается **готовый**
+     * набор: личность есть, сертификат жив, профилей ровно пятьдесят. После этого
+     * `isPreparationComplete` говорила «готово», фоновая подготовка больше не
+     * заходила никогда, а живой список с нагрузкой не появлялся до переустановки.
+     * Снаружи это ровно то, на что жалуются: «повторить процесс нельзя».
+     *
+     * Один признак «взяли встроенный» проблему не решает: без отметки времени
+     * условие «встроенный ⇒ не готово» превращается в полный прогон каждые
+     * пятнадцать минут до конца сеанса на сети, где живой список недостижим в
+     * принципе, — тот же капкан, из-за которого из готовности намеренно исключён
+     * замер. Поэтому пара: источник и момент последней **попытки**.
+     *
+     * @return [NODES_LIVE], [NODES_BUNDLED] или пусто — попыток ещё не было.
+     */
+    fun readNodesSource(): String =
+        readAtomically(accountFile)
+            ?.let { runCatching { JSONObject(it).optString("nodes_source") }.getOrDefault("") }
+            .orEmpty()
+            .trim()
+
+    /** Когда список узлов последний раз пытались обновить. 0 — никогда. */
+    fun readNodesCheckedAt(): Long =
+        readAtomically(accountFile)
+            ?.let { runCatching { JSONObject(it).optLong("nodes_checked_at", 0L) }.getOrDefault(0L) }
+            ?: 0L
+
+    /**
+     * Отмечает попытку получить список узлов — **любую**, удачную и нет.
+     *
+     * Момент пишется всегда, а не только при успехе: иначе на сети без живого
+     * списка отметка не сдвигалась бы никогда, и повтор шёл бы на каждом
+     * сердцебиении.
+     */
+    fun writeNodesSource(source: String, atMs: Long = System.currentTimeMillis()) =
+        mutateAccountJson { json ->
+            json.put("nodes_source", source)
+            json.put("nodes_checked_at", atMs)
+            true
+        }
+
+    /**
+     * Отмечает, что попытка началась, ещё не зная её источника.
+     *
+     * [writeNodesSource] стоит **после** `/vpn/logicals`, поэтому прогон, умерший
+     * раньше — на сессии, на сети, на прерывании, — отметку не сдвигал вовсе. Для
+     * `needsLiveNodes` это означало «пора снова», и фоновая добивка заводила
+     * прогон каждые пятнадцать минут весь сеанс на любой сети, где не поднимается
+     * сессия. Ровно ту трату батареи, ради предотвращения которой отметка и
+     * заведена.
+     */
+    fun writeNodesAttempt(atMs: Long = System.currentTimeMillis()) =
+        mutateAccountJson { json ->
+            json.put("nodes_checked_at", atMs)
+            true
+        }
+
     // --- профили ------------------------------------------------------------
 
-    fun readProfiles(): List<ProtonProfile> {
-        val raw = readAtomically(profilesFile)
+    fun readProfiles(): List<ProtonProfile> = readProfileList(profilesFile)
+
+    fun writeProfiles(profiles: List<ProtonProfile>) = writeProfileList(profilesFile, profiles)
+
+    /** Кандидаты на замер: их читает служба, а пишет тот, кто ведёт прогон. */
+    fun readCandidates(): List<ProtonProfile> = readProfileList(candidatesFile)
+
+    fun writeCandidates(profiles: List<ProtonProfile>) = writeProfileList(candidatesFile, profiles)
+
+    private fun readProfileList(file: AtomicFile): List<ProtonProfile> {
+        val raw = readAtomically(file)
         if (raw.isNullOrBlank()) return emptyList()
         return runCatching {
             val array = JSONObject(raw).optJSONArray("items") ?: return emptyList()
@@ -236,6 +335,10 @@ class ProtonProfileStore(context: Context) {
                             port = port,
                             peerPublicKey = peer,
                             pingMs = json.optInt("ping_ms", -1),
+                            // Профили, записанные прошлой версией, источника не
+                            // несут. Пусто — «неизвестно чем измерено», и это
+                            // честнее, чем назначить им рукопожатие задним числом.
+                            pingSource = json.optString("ping_source"),
                             load = json.optInt("load", 100),
                             sni = json.optString("sni"),
                             junkCount = json.optInt("jc", 4),
@@ -250,7 +353,7 @@ class ProtonProfileStore(context: Context) {
         }.getOrDefault(emptyList())
     }
 
-    fun writeProfiles(profiles: List<ProtonProfile>) {
+    private fun writeProfileList(file: AtomicFile, profiles: List<ProtonProfile>) {
         val array = JSONArray()
         profiles.forEach { profile ->
             array.put(
@@ -262,6 +365,7 @@ class ProtonProfileStore(context: Context) {
                     put("port", profile.port)
                     put("peer_public_key", profile.peerPublicKey)
                     put("ping_ms", profile.pingMs)
+                    put("ping_source", profile.pingSource)
                     put("load", profile.load)
                     put("sni", profile.sni)
                     put("jc", profile.junkCount)
@@ -272,11 +376,12 @@ class ProtonProfileStore(context: Context) {
                 }
             )
         }
-        writeAtomically(profilesFile, JSONObject().put("items", array).toString())
+        writeAtomically(file, JSONObject().put("items", array).toString())
     }
 
     fun clearProfiles() {
         runCatching { profilesFile.delete() }
+        runCatching { candidatesFile.delete() }
     }
 
     // --- состояние замера ---------------------------------------------------
@@ -410,12 +515,50 @@ class ProtonProfileStore(context: Context) {
      * основной не разобрался: недописанный файл даёт `null` и пропущенный тик
      * опроса — это самовосстанавливается, потеря записи — нет.
      */
-    private fun readAtomically(file: AtomicFile): String? {
+    /**
+     * Все пять файлов хранилища — JSON, поэтому проверка целостности общая.
+     *
+     * Особенно важно для `proton_account.json`: [mutateAccountJson] на неразобранном
+     * тексте заводит **пустой** объект и записывает его поверх — то есть обрывок
+     * чужой записи стирал бы личность вместе с ключом и сертификатом.
+     */
+    private fun readAtomically(file: AtomicFile): String? = readAtomically(file, ::isParsableJson)
+
+    /**
+     * То же, но с проверкой того, что прочитанное вообще разбирается.
+     *
+     * «Непустой» — не то же, что «целый». `AtomicFile.startWrite()` переименовывает
+     * основной файл в `.bak` и обрезает основной, поэтому читатель, попавший в это
+     * окно, получает **обрывок** JSON: непустой, и потому прежняя проверка
+     * принимала его и уходила разбирать. Разбор падал, а вызывающий получал пустой
+     * список, неотличимый от «профилей нет». Замок здесь не спасает — писать может
+     * другой процесс.
+     *
+     * Поэтому решает [valid]: обрывок отвергается, и тогда берётся `.bak`, который
+     * в этот самый момент и есть последняя целая копия.
+     */
+    private fun readAtomically(file: AtomicFile, valid: (String) -> Boolean): String? {
         val base = runCatching { file.baseFile.readText(Charsets.UTF_8) }.getOrNull()
-        if (!base.isNullOrBlank()) return base
+        if (!base.isNullOrBlank() && valid(base)) return base
         val backup = File(file.baseFile.path + ".bak")
-        return runCatching { backup.takeIf { it.exists() }?.readText(Charsets.UTF_8) }.getOrNull()
+        val fromBackup = runCatching {
+            backup.takeIf { it.exists() }?.readText(Charsets.UTF_8)
+        }.getOrNull()
+        if (!fromBackup.isNullOrBlank() && valid(fromBackup)) {
+            if (!base.isNullOrBlank()) {
+                LogManager.log(
+                    "Proton store: ${file.baseFile.name} прочитан обрывком (шла чужая запись) — " +
+                        "взяли резервную копию."
+                )
+            }
+            return fromBackup
+        }
+        return null
     }
+
+    /** Разбирается ли текст как JSON-объект. */
+    private fun isParsableJson(raw: String): Boolean =
+        runCatching { JSONObject(raw) }.isSuccess
 
     private fun writeAtomically(file: AtomicFile, payload: String) {
         // Один замок на процесс: двенадцать потоков пробы пишут `proton_probe.json`
@@ -510,6 +653,27 @@ class ProtonProfileStore(context: Context) {
             profile.country.uppercase(Locale.US).takeIf { it.length == 2 } ?: "??"
 
         /**
+         * Поднимает профили выбранной страны наверх списка.
+         *
+         * Именно поднимает, а не отбирает. Отбор опустошил бы очередь ровно тогда,
+         * когда узлов выбранной страны не осталось — а свободный уровень Proton это
+         * десять стран, из которых на PL всего один логикал: «выбрал Польшу и
+         * перестал подключаться» было бы честным следствием отбора и совершенно
+         * ненужным пользователю. Порядок внутри каждой половины сохраняется — он
+         * уже задан замером задержки.
+         *
+         * Пустая страна означает «любая» и не меняет ничего.
+         */
+        fun orderByCountry(profiles: List<ProtonProfile>, country: String): List<ProtonProfile> {
+            val wanted = country.trim().uppercase(Locale.US).takeIf { it.length == 2 } ?: return profiles
+            val (preferred, rest) = profiles.partition {
+                it.country.trim().uppercase(Locale.US) == wanted
+            }
+            if (preferred.isEmpty()) return profiles
+            return preferred + rest
+        }
+
+        /**
          * Переводит профили в записи, которые понимает перебор службы.
          *
          * `userImported = true` здесь не косметика: именно по нему цикл подключения
@@ -525,9 +689,25 @@ class ProtonProfileStore(context: Context) {
         fun toVerifiedConfigs(
             profiles: List<ProtonProfile>,
             privateKeyBase64: String,
+            preferredCountry: String = "",
         ): List<WarpVerifiedConfig> {
             if (privateKeyBase64.isBlank()) return emptyList()
+            // `preferredCountry` больше не влияет на ранг и оставлен ради
+            // совместимости вызовов.
+            //
+            // Сначала выбранная страна выражалась прибавкой ста тысяч
+            // миллисекунд к `qualityAvgPingMs` — и не работала. Очередь в
+            // `buildUserImportedWarpAttemptSet` сортирует сначала по `promotedAt`,
+            // потом по накопленному качеству эндпоинта, потом по числу удачных
+            // проб, и только четвёртым ключом по средней задержке: у узла с
+            // историей успехов штраф не отыгрывался никогда. Хуже того, число
+            // писалось в поле реальной задержки, откуда его читает и статистика.
+            // Страна теперь отдельный, самый первый ключ сортировки — в самой
+            // очереди, а не в подделанном пинге.
+            @Suppress("UNUSED_PARAMETER")
+            val ignoredPreferredCountry = preferredCountry
             return profiles.mapIndexed { index, profile ->
+                val rank = profile.pingMs.takeIf { it > 0 }?.toDouble() ?: 0.0
                 WarpVerifiedConfig(
                     id = "proton|${profile.entryIp}|${profile.port}",
                     engine = "wireguard",
@@ -544,14 +724,48 @@ class ProtonProfileStore(context: Context) {
                     userImported = true,
                     qualityProbeCount = 1,
                     qualityPingSuccesses = if (profile.pingMs > 0) 1 else 0,
-                    qualityAvgPingMs = profile.pingMs.takeIf { it > 0 }?.toDouble() ?: 0.0,
+                    qualityAvgPingMs = rank,
                     qualityLastCheckedAt = profile.createdAt,
                     preferredSni = profile.sni,
                 )
             }
         }
 
+        /**
+         * Страна узла по его точке входа — для сортировки очереди подключения.
+         *
+         * Ключ `host:port` совпадает с тем, чем узел опознаётся в
+         * `WarpVerifiedConfig`, поэтому очередь может спросить страну, ничего не
+         * зная про формат профилей Proton.
+         */
+        fun countryByEndpoint(profiles: List<ProtonProfile>): Map<String, String> {
+            val map = HashMap<String, String>(profiles.size)
+            profiles.forEach { profile ->
+                val host = profile.entryIp.trim().trim('[', ']')
+                if (host.isEmpty()) return@forEach
+                map["$host:${profile.port}"] = profile.country.trim().uppercase(Locale.US)
+            }
+            return map
+        }
+
         const val ENDPOINT_SOURCE = "proton"
+
+        /** Список узлов пришёл живым из `/vpn/logicals` — с нагрузкой и оценкой. */
+        const val NODES_LIVE = "live"
+
+        /** Список узлов взят из прошивки: API не ответил. */
+        const val NODES_BUNDLED = "bundled"
+
+        /**
+         * Как часто прогон пробует заменить встроенный список живым.
+         *
+         * Шесть часов, а не пятнадцать минут фоновой подготовки: живой список
+         * недостижим не «сейчас», а на всей этой сети (P3), и повторять полный
+         * прогон каждые четверть часа значило бы жечь батарею ради одного и того же
+         * ответа. И не «никогда»: сеть меняется, релей чинится, и застрять на
+         * прошивочном списке до переустановки нельзя — ровно на это и жалуются.
+         */
+        const val NODES_REFRESH_MS = 6L * 60 * 60 * 1000
 
         const val STATE_REQUESTED = "requested"
         const val STATE_RUNNING = "running"

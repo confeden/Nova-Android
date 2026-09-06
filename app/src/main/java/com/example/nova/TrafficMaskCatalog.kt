@@ -11,6 +11,19 @@ object TrafficMaskCatalog {
     @Volatile
     private var cachedWhiteHosts: List<String>? = null
 
+    /**
+     * Короткие отобранные наборы — с них начинают все.
+     *
+     * Отдельными файлами, а не головой большого списка: голову всё равно
+     * поворачивает `SniMaskPolicy.rotate`, и имя из неё попадает в окно очереди
+     * примерно раз из девяти. Чтобы «все начинали с лучших», набор должен стоять
+     * **до** поворота, а значит быть отдельной сущностью и в данных тоже.
+     */
+    @Volatile
+    private var cachedProvenRussiaHosts: List<String>? = null
+    @Volatile
+    private var cachedProvenGlobalHosts: List<String>? = null
+
     fun getHosts(context: Context): List<String> {
         return getRussiaHosts(context)
     }
@@ -33,6 +46,20 @@ object TrafficMaskCatalog {
         cachedWhiteHosts?.let { return it }
         val result = loadHosts(context, "white.sni", fallbackToDefault = false)
         cachedWhiteHosts = result
+        return result
+    }
+
+    fun getProvenRussiaHosts(context: Context): List<String> {
+        cachedProvenRussiaHosts?.let { return it }
+        val result = loadHosts(context, "proven_ru.sni", fallbackToDefault = false)
+        cachedProvenRussiaHosts = result
+        return result
+    }
+
+    fun getProvenGlobalHosts(context: Context): List<String> {
+        cachedProvenGlobalHosts?.let { return it }
+        val result = loadHosts(context, "proven_global.sni", fallbackToDefault = false)
+        cachedProvenGlobalHosts = result
         return result
     }
 

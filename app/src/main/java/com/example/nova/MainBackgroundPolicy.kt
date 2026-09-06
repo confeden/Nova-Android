@@ -26,10 +26,20 @@ object MainBackgroundPolicy {
             android.os.Process.is64Bit()
     }
 
+    /**
+     * Во что превращается запрошенный режим на этом устройстве.
+     *
+     * Замена анимации — **пустой фон**, а не картинка. Устройства, которые не
+     * тянут анимацию, — это старые телефоны, и полноэкранная картинка стоит им
+     * заметно дороже пустоты: она держит в памяти растр размером с экран и
+     * перерисовывается под всем остальным. Картинка при этом никуда не делась,
+     * она остаётся третьим вариантом в настройках — просто её теперь выбирают, а
+     * не получают молча вместо анимации.
+     */
     fun effectiveMode(context: Context, requested: String?): String {
         val normalized = normalize(requested)
         return if (normalized == MODE_ANIMATION && !isAnimationSupported(context)) {
-            MODE_IMAGE
+            MODE_NONE
         } else {
             normalized
         }

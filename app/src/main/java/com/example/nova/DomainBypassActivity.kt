@@ -345,6 +345,17 @@ class DomainBypassActivity : AppCompatActivity() {
         if (!stats.dnsInterceptEnabled) {
             return "Перехват DNS выключен — адреса зон учить неоткуда. Включите шифрованный DNS."
         }
+        if (stats.learned == 0 && privateDnsMode().isNotEmpty()) {
+            // Измерено на Pixel 4a (Android 14) 2026-09-06: при «Частном DNS» в
+            // режиме «Автоматически» ядро не выучило ни одного адреса, при
+            // «Выключено» — восемнадцать и семь перелитых потоков. Системный
+            // резолвер шифрует запросы сам, открытого UDP/53 в туннеле не
+            // появляется, и учиться не на чем. Показывать в этом случае ноль без
+            // объяснения — то же самое, что промолчать (I4).
+            return "Выучено адресов: 0. Похоже, мешает «Частный DNS» (${privateDnsMode()}): " +
+                "система шифрует запросы сама, и ядру их не видно. Отключите его в настройках " +
+                "Android → Сеть и интернет → Частный DNS."
+        }
         return buildString {
             append("Выучено адресов: ${stats.learned} из $MAX_LEARNED_ADDRESSES")
             append(", потоков мимо туннеля: ${stats.relayed}")
@@ -354,6 +365,27 @@ class DomainBypassActivity : AppCompatActivity() {
             // для него обход не действует. Слово «пакетов» здесь обязательно —
             // «QUIC через туннель: 40000» иначе читается как сорок тысяч сбоев.
             if (stats.quicSkipped > 0) append(", пакетов QUIC мимо обхода: ${stats.quicSkipped}")
+        }
+    }
+
+    /**
+     * Режим «Частного DNS», если он включён.
+     *
+     * Читается из настроек системы, а не из `LinkProperties`: при поднятом VPN
+     * активная сеть — наша, и `isPrivateDnsActive` описывал бы её, а не то, что
+     * выбрал человек. Значение и есть то, что он видит на экране Android.
+     *
+     * @return пустая строка, когда «Частный DNS» выключен.
+     */
+    private fun privateDnsMode(): String {
+        val raw = runCatching {
+            android.provider.Settings.Global.getString(contentResolver, "private_dns_mode")
+        }.getOrNull()?.trim().orEmpty()
+        return when (raw.lowercase()) {
+            "", "off" -> ""
+            "opportunistic" -> "Автоматически"
+            "hostname" -> "имя узла провайдера"
+            else -> raw
         }
     }
 

@@ -133,4 +133,17 @@ class DiagnosticLogSanitizerTest {
         assertTrue(sanitized.contains("<phone>"))
         assertFalse(sanitized.contains("999"))
     }
+
+    @Test
+    fun `международный номер с двумя нулями скрывается`() {
+        val sanitized = DiagnosticLogSanitizer.sanitize("звонил 00 44 20 7946 0958 утром")
+        assertTrue(sanitized.contains("<phone>"))
+        assertFalse(sanitized.contains("7946"))
+    }
+
+    @Test
+    fun `список портов номером не считается`() {
+        val line = "Ports 80 443 853 1080 open"
+        assertEquals(line, DiagnosticLogSanitizer.sanitize(line))
+    }
 }

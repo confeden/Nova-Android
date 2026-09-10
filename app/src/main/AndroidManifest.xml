@@ -201,6 +201,17 @@
                 android:value="VPN service for secure connectivity" />
         </service>
 
+        <!--
+            Служба tor объявлена ещё раз ради одного атрибута: она обязана жить в
+            том же процессе `:vpn`, что и туннель. В процессе приложения её
+            SOCKS-порт был бы недостижим для tun2proxy, а obfs4 из ядра Go живёт
+            именно здесь — оба конца цепочки должны быть в одном процессе.
+        -->
+        <service
+            android:name="org.torproject.jni.TorService"
+            android:process=":vpn"
+            android:exported="false" />
+
         <service
             android:name=".NovaTileService"
             android:icon="@drawable/ic_qs_nova"
@@ -240,6 +251,21 @@
             <meta-data
                 android:name="android.appwidget.provider"
                 android:resource="@xml/widget_nova_info" />
+        </receiver>
+
+        <!--
+            Кнопки уведомления. Не экспортирован намеренно: намерение приходит
+            только от нашего же уведомления, и давать чужим приложениям способ
+            погасить туннель одной посылкой незачем. Процесс не указан — значит
+            основной, а он тут обязателен: останов снимает признаки через
+            SharedPreferences, а они кэшируются попроцессно (I2).
+        -->
+        <receiver
+            android:name=".NovaNotificationActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.example.nova.notification.DISCONNECT" />
+            </intent-filter>
         </receiver>
 
         <receiver

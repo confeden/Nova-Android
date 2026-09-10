@@ -46,7 +46,7 @@
                 android:fontFamily="sans-serif-medium"
                 android:minWidth="58dp"
                 android:text="DoH"
-                android:textColor="#50C878"
+                android:textColor="?attr/novaAccent"
                 android:textSize="12sp"
                 android:textStyle="bold" />
 
@@ -60,7 +60,7 @@
                 android:fontFamily="sans-serif"
                 android:maxLines="2"
                 android:text="https://dns.example.com/dns-query"
-                android:textColor="#FFFFFF"
+                android:textColor="?attr/novaTextTitle"
                 android:textSize="15sp" />
         </LinearLayout>
 
@@ -73,7 +73,7 @@
             android:fontFamily="sans-serif"
             android:maxLines="2"
             android:text="bootstrap: 1.1.1.1"
-            android:textColor="#8A8A8A"
+            android:textColor="?attr/novaTextHint"
             android:textSize="11sp"
             android:visibility="gone" />
     </LinearLayout>

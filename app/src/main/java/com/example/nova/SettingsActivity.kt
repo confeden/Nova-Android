@@ -364,6 +364,9 @@ class SettingsActivity : AppCompatActivity() {
 
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Тему ставим до super.onCreate: позже окно уже создано со старым фоном,
+        // и выбор доехал бы только до следующего открытия экрана.
+        NovaTheme.apply(this)
 
         super.onCreate(savedInstanceState)
 
@@ -725,7 +728,13 @@ class SettingsActivity : AppCompatActivity() {
 
 
 
+        setupGroupHeadings()
+
+        setupAppThemeRow()
+
         setupAwgAdaptationRow()
+
+        setupTunnelMtuRow()
 
         swAutoUpdate.isChecked = initialAutoAppUpdate
 
@@ -898,7 +907,9 @@ class SettingsActivity : AppCompatActivity() {
 
             tvOperaApiProxyNote.text = if (value.isBlank()) {
 
-                "Не задан: вызовы API идут обычным порядком"
+                // «Не задан» без продолжения читалось как «вызовы идут никуда»:
+                // на деле не задан только *свой* прокси, а ходят они через наш.
+                "Свой не задан — используется прокси Nova"
 
             } else {
 
@@ -935,13 +946,12 @@ class SettingsActivity : AppCompatActivity() {
                 .setTitle("Прокси для вызовов API Opera")
 
                 .setMessage(
-                    "Через него идут только вызовы API SurfEasy: сам туннель набирается " +
-                        "напрямую, страна выхода не меняется.\n\n" +
+                    "При регистрации Nova ходит в API Opera через свой прокси " +
+                        "relay.nova-app.eu. Здесь можно указать вместо него свой личный.\n\n" +
                         "Форматы: 1.2.3.4:1080 (SOCKS5), socks5://1.2.3.4:1080, " +
-                        "http://логин:пароль@1.2.3.4:3128.\n\n" +
-                        "Лучше указывать IP-адрес: имя хоста opera-proxy резолвит сам, " +
-                        "а на Android его резолвер не работает.\n\n" +
-                        "Пустое поле — прежнее поведение."
+                        "http://логин:пароль@1.2.3.4:3128. Лучше указывать IP-адрес: имя хоста " +
+                        "opera-proxy резолвит сам, а на Android его резолвер не работает.\n\n" +
+                        "Пустое поле — прокси Nova."
                 )
 
                 .setView(input)
@@ -956,7 +966,7 @@ class SettingsActivity : AppCompatActivity() {
 
                 .setNegativeButton("Отмена", null)
 
-                .show()
+                .showNova()
 
         }
 
@@ -2419,7 +2429,7 @@ class SettingsActivity : AppCompatActivity() {
 
     private fun checkBatteryOptimization(switch: Switch) {
 
-        val green = android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#13A10E"))
+        val green = android.content.res.ColorStateList.valueOf(NovaTheme.color(this, R.attr.novaAccent))
 
         val grey = android.content.res.ColorStateList.valueOf(android.graphics.Color.GRAY)
 
@@ -2477,25 +2487,43 @@ class SettingsActivity : AppCompatActivity() {
 
     
 
+    /**
+     * Просит у Android снять ограничение фона — и не молчит, если не открылось.
+     *
+     * Два экрана, а не один. `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` — это
+     * диалог «разрешить?», и на части оболочек его нет вовсе или он подменён
+     * вендорным списком; тогда `startActivity` бросает
+     * `ActivityNotFoundException`, и до этой правки нажатие не делало **ничего**
+     * (I4). Запасной путь — общий список Android
+     * (`ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS`): он есть всегда, и именно в
+     * нём стоит тот признак, который читает переключатель.
+     */
     private fun requestBatteryOptimization() {
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
 
-            val intent = Intent()
+        val pm = getSystemService(PowerManager::class.java)
 
-            val pm = getSystemService(PowerManager::class.java)
+        if (pm.isIgnoringBatteryOptimizations(packageName)) return
 
-            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+        val direct = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+            .setData(Uri.parse("package:$packageName"))
 
-                intent.action = Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+        if (runCatching { startActivity(direct) }.isSuccess) return
 
-                intent.data = Uri.parse("package:$packageName")
+        LogManager.log("Батарея: диалог запроса недоступен — открываем общий список Android.")
 
-                startActivity(intent)
+        val list = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
 
-            }
+        if (runCatching { startActivity(list) }.isSuccess) {
+
+            Toast.makeText(this, "Найдите Nova в списке и выберите «Не оптимизировать»", Toast.LENGTH_LONG).show()
+
+            return
 
         }
+
+        Toast.makeText(this, "Экран ограничений батареи недоступен на этой прошивке", Toast.LENGTH_LONG).show()
 
     }
 
@@ -2583,7 +2611,7 @@ class SettingsActivity : AppCompatActivity() {
 
                 ds.isUnderlineText = true
 
-                ds.color = android.graphics.Color.parseColor("#50C878") // Malachite Green
+                ds.color = NovaTheme.color(this@SettingsActivity, R.attr.novaAccent)
 
                 ds.clearShadowLayer() // Remove any shadow
 
@@ -2811,7 +2839,7 @@ class SettingsActivity : AppCompatActivity() {
 
             .setPositiveButton("Понятно", null)
 
-            .show()
+            .showNova()
 
     }
 
@@ -2856,11 +2884,14 @@ class SettingsActivity : AppCompatActivity() {
 
             val overrides = clientData.getAwgI1Overrides()
 
+            // Каждое состояние зовёт нажать: без этого единственный способ узнать,
+            // что строка вообще открывается, — угадать. Раньше подсказка была
+            // только у непустого списка, то есть ровно тогда, когда и так понятно.
             summary.text = when {
 
-                !clientData.isAwgI1AdaptationEnabled() -> "Выключено"
+                !clientData.isAwgI1AdaptationEnabled() -> "Выключено — нажмите, чтобы узнать, что это"
 
-                overrides.isEmpty() -> "Включено, подбор ещё не начинался"
+                overrides.isEmpty() -> "Подбор ещё не начинался — нажмите, чтобы посмотреть"
 
                 else -> "Подобрано профилей: ${overrides.size} — нажмите, чтобы посмотреть"
 
@@ -2892,49 +2923,387 @@ class SettingsActivity : AppCompatActivity() {
 
     }
 
-    private fun showAwgAdaptationDetails(onChanged: () -> Unit) {
 
-        val overrides = clientData.getAwgI1Overrides().values.sortedByDescending { it.updatedAt }
 
-        val body = if (overrides.isEmpty()) {
+    /**
+     * Ползунок ручного MTU туннеля.
+     *
+     * Подпись «на проводе N» — не украшение. Человек выбирает MTU против
+     * конкретного пути, а режет путь именно размер пакета **на проводе**: MTU
+     * плюс 60 байт обвязки (IPv4, UDP, заголовок WireGuard и тег Poly1305). Без
+     * этой строки 1440 сравнивают с 1492 и делают неверный вывод, хотя на
+     * проводе это уже 1500.
+     *
+     * Применяется в `onStopTrackingTouch`, а не на каждом движении пальца:
+     * промежуточные значения — дорога к настройке, а не настройка, и реаплай на
+     * каждом из них рвал бы туннель полсотни раз за один жест. Записи в момент
+     * движения тоже нет — только по отпусканию, поэтому переживать за флеш в
+     * `onPause` (I20) здесь нечего.
+     */
+    private fun setupTunnelMtuRow() {
 
-            "Пока ничего не подобрано.\n\nПодбор идёт в фоне: один профиль раз в полчаса, " +
-                "не раньше чем через пять минут после того, как погас экран. " +
-                "Сеть при этом не используется — подобранное проверяет обычное подключение."
+        val seekBar = findViewById<SeekBar>(R.id.sb_tunnel_mtu) ?: return
 
-        } else {
+        val value = findViewById<TextView>(R.id.tv_tunnel_mtu_value) ?: return
 
-            overrides.joinToString("\n") { "${it.sni} — ${it.profileId.substringAfterLast('|')}" }
+        val summary = findViewById<TextView>(R.id.tv_tunnel_mtu_summary) ?: return
+
+        val steps = (NovaVpnService.TUNNEL_MTU_MAX - NovaVpnService.TUNNEL_MTU_MIN) /
+            NovaVpnService.TUNNEL_MTU_STEP
+
+        fun mtuOf(progress: Int): Int =
+            NovaVpnService.TUNNEL_MTU_MIN + progress * NovaVpnService.TUNNEL_MTU_STEP
+
+        fun render(mtu: Int) {
+
+            value.text = mtu.toString()
+
+            // Значение по умолчанию названо прямо в подписи, а не только в
+            // положении ползунка: человек, сдвинувший его наугад, иначе не может
+            // вернуться к заводскому — на глаз середина шкалы это 1220, а не 1280.
+            val default = if (mtu == NovaVpnService.TUNNEL_MTU_DEFAULT) {
+                "по умолчанию ${NovaVpnService.TUNNEL_MTU_DEFAULT} — оно и стоит"
+            } else {
+                "по умолчанию ${NovaVpnService.TUNNEL_MTU_DEFAULT}"
+            }
+
+            summary.text = "На проводе ${mtu + NovaVpnService.WARP_WIRE_OVERHEAD_IPV4} Б, " +
+                "$default. Действует на WARP и AWG: у MASQUE размер считается из " +
+                "пакета QUIC, а у Opera и VLESS его решает не туннель."
 
         }
 
+        seekBar.max = steps
+
+        val current = clientData.getTunnelMtu()
+
+        seekBar.progress =
+            ((current - NovaVpnService.TUNNEL_MTU_MIN) / NovaVpnService.TUNNEL_MTU_STEP)
+                .coerceIn(0, steps)
+
+        render(current)
+
+        seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+
+            override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) {
+
+                render(mtuOf(progress))
+
+            }
+
+            override fun onStartTrackingTouch(bar: SeekBar) = Unit
+
+            override fun onStopTrackingTouch(bar: SeekBar) {
+
+                val chosen = mtuOf(bar.progress)
+
+                if (chosen == clientData.getTunnelMtu()) return
+
+                clientData.setTunnelMtu(chosen)
+
+                LogManager.log(
+                    "MTU туннеля выбран вручную: $chosen " +
+                        "(на проводе ${chosen + NovaVpnService.WARP_WIRE_OVERHEAD_IPV4} Б)."
+                )
+
+                maybeApplyTunnelMtuImmediately(chosen)
+
+            }
+
+        })
+
+    }
+
+
+
+    /**
+     * Применить новый MTU к идущему сеансу.
+     *
+     * Туннель приходится пересобирать: MTU задаётся в `VpnService.Builder`, то
+     * есть в момент подъёма интерфейса, и живому `tun` его не переставить.
+     * Порядок берём общий (`SessionReapply`), включая осторожный путь для Opera:
+     * второй копией порядка случается G49, а обычный реаплай поверх живой Opera
+     * роняет процесс `:vpn` (G3).
+     */
+    private fun maybeApplyTunnelMtuImmediately(mtu: Int) {
+
+        if (!isNovaSessionLikelyActive()) return
+
+        runCatching {
+
+            LogManager.log("MTU туннеля изменён в Настройках на $mtu. Запускаем немедленный мягкий реконнект.")
+
+            val toastMessage = "Пересобираем туннель с MTU $mtu..."
+
+            if (shouldUseControlledOperaRestartReapply()) {
+
+                launchControlledOperaReapply(toastMessage)
+
+            } else {
+
+                launchDirectReapply(toastMessage)
+
+            }
+
+        }.onFailure { error ->
+
+            LogManager.log("Не удалось сразу применить MTU туннеля: ${error.message}")
+
+        }
+
+    }
+
+    /**
+     * Заливает заголовки групп градиентом роли A.
+     *
+     * В разметке у них стоит сплошной `?attr/novaTextGroupFrom` — он и остаётся,
+     * если шейдер почему-то не встанет: заголовок обязан читаться при любом
+     * исходе, а не пропадать в фон. Градиент довешивается сверху.
+     */
+    private fun setupGroupHeadings() {
+
+        val headings = listOf(
+            R.id.hdr_group_connection,
+            R.id.hdr_group_routing,
+            R.id.hdr_group_app,
+            R.id.hdr_group_updates,
+            R.id.hdr_group_diagnostics,
+            R.id.hdr_group_apps_vpn,
+        )
+
+        headings.forEach { id ->
+
+            findViewById<TextView>(id)?.let(NovaTheme::paintHeading)
+
+        }
+
+    }
+
+    /**
+     * Выбор темы оформления.
+     *
+     * Меняет только экраны настроек: их десять, они все объявлены с
+     * `Theme.Nova.Settings`, и палитра у них теперь одна. Главный экран живёт по
+     * своим правилам (фон-картинка, анимация) и в эту смену не входит.
+     */
+    private fun setupAppThemeRow() {
+
+        val row = findViewById<View>(R.id.row_app_theme) ?: return
+
+        val note = findViewById<TextView>(R.id.tv_app_theme_note) ?: return
+
+        fun render() {
+
+            val option = NovaTheme.optionFor(NovaTheme.current(this))
+
+            note.text = "${option.title} — ${option.note}"
+
+        }
+
+        render()
+
+        row.setOnClickListener { showAppThemePicker(::render) }
+
+    }
+
+    private fun showAppThemePicker(onChanged: () -> Unit) {
+
+        val options = NovaTheme.ORDER
+
+        val current = NovaTheme.current(this)
+
+        var picked = options.indexOfFirst { it.key == current }.coerceAtLeast(0)
+
         android.app.AlertDialog.Builder(this)
 
-            .setTitle("Адаптация к сети")
+            .setTitle("Тема оформления")
 
-            .setMessage(body)
+            .setSingleChoiceItems(options.map { it.title }.toTypedArray(), picked) { _, which ->
 
-            .setPositiveButton("Закрыть", null)
+                picked = which
 
-            .apply {
+            }
 
-                if (overrides.isNotEmpty()) {
+            .setPositiveButton("Применить") { _, _ ->
 
-                    setNegativeButton("Сбросить подбор") { _, _ ->
+                val chosen = options[picked]
 
-                        clientData.clearAwgI1Overrides()
+                if (chosen.key != current) {
 
-                        onChanged()
+                    NovaTheme.store(this, chosen.key)
 
-                        Toast.makeText(this@SettingsActivity, "Подбор сброшен", Toast.LENGTH_SHORT).show()
+                    LogManager.log("Тема оформления: ${chosen.title}.")
 
-                    }
+                    onChanged()
+
+                    // Тема ставится в onCreate, поэтому экран надо пересоздать —
+                    // иначе выбор виден только при следующем открытии настроек, и
+                    // это читается как «кнопка ничего не сделала».
+                    recreate()
 
                 }
 
             }
 
-            .show()
+            .setNegativeButton("Отмена", null)
+
+            .showNova()
+
+    }
+
+    /**
+     * Имя профиля для человека — `адрес:порт`, ровно как на экране «Конфигурации».
+     *
+     * Внутренний идентификатор устроен как `[область|]режим|адрес|порт`, и прежний
+     * `substringAfterLast('|')` доставал из него **порт**: список выглядел как
+     * «домен — 2408» и не отвечал на единственный вопрос, ради которого его
+     * открывают — какому профилю имя досталось.
+     */
+    private fun describeAwgProfileId(profileId: String): String {
+
+        val parts = profileId.split('|')
+
+        if (parts.size < 3) return profileId
+
+        val host = parts[parts.size - 2]
+
+        return if (host.isBlank()) profileId else "$host:${parts.last()}"
+
+    }
+
+    /** Возраст записи словами — та же шкала, что на экране «Конфигурации». */
+    private fun describeAwgAge(ageMs: Long): String {
+
+        val minutes = ageMs / 60_000L
+
+        return when {
+
+            minutes < 1 -> "только что"
+
+            minutes < 60 -> "$minutes мин назад"
+
+            minutes < 60 * 24 -> "${minutes / 60} ч назад"
+
+            else -> "${minutes / (60 * 24)} дн назад"
+
+        }
+
+    }
+
+    /**
+     * Текст диалога адаптации. Вынесен отдельной чистой функцией: он собирается на
+     * `Dispatchers.IO`, и всё, что тут может пойти не так, не должно зависеть от
+     * того, жив ли ещё экран.
+     *
+     * Незавершённый подбор помечается явно. Обратное утверждение — «подтверждено
+     * трафиком» — не пишется никогда: запись без кандидата в очереди может быть и
+     * подтверждённой, и назначенной прямо сейчас ручной адаптацией, а сказать
+     * человеку «проверено», когда проверено не было, дороже, чем промолчать.
+     */
+    private fun buildAwgAdaptationBody(
+        overrides: List<ClientData.AwgI1Override>,
+        pending: Map<String, ClientData.AwgI1Pending>,
+        nowMs: Long,
+    ): String {
+
+        val what =
+            "Что это. Первый пакет встроенного профиля прикидывается началом QUIC-соединения " +
+                "с чужим доменом — этот домен провайдер и видит вместо WireGuard. В прошивке он у " +
+                "всех профилей один, а сети разные: где-то он уже примелькался DPI, где-то не " +
+                "проходит вовсе.\n\n" +
+                "Что делает адаптация. Подбирает профилю другой домен из списка «SNI маскировка»: " +
+                "один профиль раз в полчаса и не раньше чем через пять минут после того, как погас " +
+                "экран. Сеть при этом не трогается вовсе — подобранное проверит обычное " +
+                "подключение, и если трафик не пойдёт, имя снимется."
+
+        if (overrides.isEmpty()) return "Пока ничего не подобрано.\n\n$what"
+
+        val list = overrides.joinToString("\n\n") { override ->
+
+            val age = if (override.updatedAt > 0L) {
+                describeAwgAge(nowMs - override.updatedAt)
+            } else {
+                "время неизвестно"
+            }
+
+            val waiting = if (pending.containsKey(override.profileId)) ", ждёт проверки" else ""
+
+            "${describeAwgProfileId(override.profileId)}\n" +
+                "    → ${override.sni}\n" +
+                "    $age, попытка ${override.attempts.coerceAtLeast(1)}$waiting"
+
+        }
+
+        return "Профили, которым домен в первом пакете заменён на более подходящий этой сети:\n\n" +
+            "$list\n\n$what"
+
+    }
+
+    /**
+     * Что подобрала фоновая адаптация — списком «профиль → домен».
+     *
+     * Сборка уходит на `Dispatchers.IO`: обе карты читаются с диска через
+     * `AtomicFile` с разбором JSON, а файлового ввода-вывода на главном потоке в
+     * этом проекте нет (I13). Показ — уже на главном, и только если экран жив:
+     * диалог поверх закрывшейся активности — это `WindowManager$BadTokenException`.
+     */
+    private fun showAwgAdaptationDetails(onChanged: () -> Unit) {
+
+        lifecycleScope.launch(Dispatchers.IO) {
+
+            val overrides = clientData.getAwgI1Overrides().values.sortedByDescending { it.updatedAt }
+
+            val pending = clientData.getAwgI1Pending()
+
+            val body = buildAwgAdaptationBody(overrides, pending, System.currentTimeMillis())
+
+            val hasOverrides = overrides.isNotEmpty()
+
+            runOnUiThread {
+
+                if (isFinishing || isDestroyed) return@runOnUiThread
+
+                android.app.AlertDialog.Builder(this@SettingsActivity)
+
+                    .setTitle("Адаптация к сети")
+
+                    .setMessage(body)
+
+                    .setPositiveButton("Закрыть", null)
+
+                    .apply {
+
+                        if (hasOverrides) {
+
+                            setNegativeButton("Сбросить подбор") { _, _ ->
+
+                                // Запись на диск не должна зависеть от жизни экрана:
+                                // `lifecycleScope` отменяется раньше, чем она дойдёт
+                                // до файла (G141), поэтому сброс идёт своей областью.
+                                // Подпись перечитывается **после** записи, а не рядом
+                                // с ней: иначе она прочитает файл до сброса и покажет
+                                // прежнее число — «нажал, и ничего не изменилось».
+                                CoroutineScope(Dispatchers.IO).launch {
+
+                                    clientData.clearAwgI1Overrides()
+
+                                    runOnUiThread { onChanged() }
+
+                                }
+
+                                Toast.makeText(this@SettingsActivity, "Подбор сброшен", Toast.LENGTH_SHORT).show()
+
+                            }
+
+                        }
+
+                    }
+
+                    .showNova()
+
+            }
+
+        }
 
     }
 
@@ -2986,7 +3355,21 @@ class SettingsActivity : AppCompatActivity() {
 
         view.visibility = View.VISIBLE
 
-        view.text = "Открыть: $label"
+        // Пока androidʼный признак не выставлен, а фоном заведует оболочка,
+        // подстрока обязана сказать почему: на HyperOS 3 человек выбирает «Нет
+        // ограничений» и возвращается к серому переключателю. Он не сломан —
+        // вендорная настройка и `isIgnoringBatteryOptimizations` это два разных
+        // разрешения, и нужны оба.
+        val androidFlagSet = Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+
+        view.text = if (!androidFlagSet && VendorBackgroundSettingsHelper.isVendorManagedBattery()) {
+            "Открыть: $label\n" +
+                "«Нет ограничений» в оболочке не включает переключатель выше — " +
+                "это отдельное разрешение Android, и нужны оба."
+        } else {
+            "Открыть: $label"
+        }
 
         view.setOnClickListener {
 
@@ -3534,9 +3917,9 @@ class SettingsActivity : AppCompatActivity() {
         // описывал.
         titleView.text = "Выбор протокола/региона"
 
-        titleView.setTextColor(Color.WHITE)
+        titleView.setTextColor(NovaTheme.color(this, R.attr.novaTextTitle))
 
-        val greenTint = ColorStateList.valueOf(Color.parseColor("#13A10E"))
+        val greenTint = ColorStateList.valueOf(NovaTheme.color(this, R.attr.novaAccent))
 
         buttons.forEach { button ->
 
@@ -3637,10 +4020,10 @@ class SettingsActivity : AppCompatActivity() {
             }
 
             if (chipValue == ConnectionSelectorPolicy.CHIP_TOR) {
-                // Транспорта Tor ещё нет. Записать `tor` регионом значило бы
-                // отправить службу перебирать пустоту, поэтому кнопка только
-                // запускает сбор мостов и говорит об этом словами (I4).
-                LogManager.log("Настройки: выбран TOR — транспорта ещё нет, запускаем обновление мостов.")
+                // Сбор мостов запускается вместе с выбором, а не при подключении:
+                // он идёт по сети десятками секунд. Сам выбор при этом
+                // сохраняется обычным путём ниже — транспорт Tor есть с 1.32.2.
+                LogManager.log("Настройки: выбран TOR, обновляем список мостов.")
                 // Решение о сборе и счётчик мостов читаются в рабочем потоке: оба
                 // трогают `tor_bridges.json`, а это блокирующее чтение (I13). И
                 // читаются **вместе**: поле `torBridgeCount` обновляется только на
@@ -3659,17 +4042,6 @@ class SettingsActivity : AppCompatActivity() {
                         summaryView.text = ConnectionSelectorPolicy.torNoticeFor(started, known)
                     }
                 }
-                // Отметку возвращаем на прежнюю кнопку **со снятым обработчиком**.
-                //
-                // `RadioGroup.check` неотличим от нажатия и заходит в этот же
-                // обработчик заново: со снятой отметки, потом с новой. То есть
-                // нажатие на TOR второй раз выполняло бы ветку прежнего региона —
-                // гасило только что написанную строку, отменяло идущий выпуск
-                // Proton и могло запустить незаказанное переподключение.
-                radioGroup.setOnCheckedChangeListener(null)
-                checkSelectedRegionButton(radioGroup, buttons)
-                radioGroup.setOnCheckedChangeListener(regionSelectorListener)
-                return@OnCheckedChangeListener
             }
 
             val value = ConnectionSelectorPolicy.storedValueForChip(
@@ -4636,7 +5008,7 @@ class SettingsActivity : AppCompatActivity() {
 
             when (progress.state) {
 
-                UpdateDownloadProgress.State.READY -> android.graphics.Color.parseColor("#13A10E")
+                UpdateDownloadProgress.State.READY -> NovaTheme.color(this, R.attr.novaAccent)
 
                 else -> android.graphics.Color.WHITE
 
@@ -4958,7 +5330,7 @@ class SettingsActivity : AppCompatActivity() {
 
             .setPositiveButton("Понятно", null)
 
-            .show()
+            .showNova()
 
     }
 
@@ -5005,7 +5377,7 @@ class SettingsActivity : AppCompatActivity() {
             hint = "xxxxxxxx-xxxxxxxx-xxxxxxxx"
             setSingleLine(true)
             setTextColor(Color.WHITE)
-            setHintTextColor(Color.parseColor("#8899A0"))
+            setHintTextColor(NovaTheme.color(this@SettingsActivity, R.attr.novaTextHint))
             setPadding(48, 32, 48, 32)
         }
 
@@ -5027,7 +5399,7 @@ class SettingsActivity : AppCompatActivity() {
                 Toast.makeText(this, "Лицензия убрана", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Отмена", null)
-            .show()
+            .showNova()
     }
 
     /**

@@ -22,7 +22,7 @@
     <item>
         <shape
             android:shape="rectangle">
-            <solid android:color="#13A10E" />
+            <solid android:color="?attr/novaAccent" />
             <corners android:radius="12dp" />
             <padding
                 android:left="14dp"

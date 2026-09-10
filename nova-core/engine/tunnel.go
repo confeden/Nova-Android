@@ -32,6 +32,31 @@ var stateMu sync.Mutex
 // запоминается при подъёме туннеля. Пир у нас всегда ровно один.
 var activePeerKey device.NoisePublicKey
 var activePeerKeySet bool
+// Границы MTU туннеля, общие с ползунком в настройках.
+//
+// Потолок 1440: канал телефона 1500 Б, а на IPv4-эндпоинт уходит 60 Б обвязки
+// (20 IP + 8 UDP + 16 заголовок WireGuard + 16 тег Poly1305). На IPv6-эндпоинт
+// обвязка 80 Б, поэтому там потолок ниже — за этим следит вызывающий.
+// Пол 1000: ниже выигрыш нигде не измерен, а накладные расходы растут линейно.
+// По умолчанию 1280 — минимум канала для IPv6 (RFC 8200).
+const (
+	minTunnelMtu     = 1000
+	maxTunnelMtu     = 1440
+	defaultTunnelMtu = 1280
+)
+
+// tunnelMtu — MTU системного TUN, каким его действительно поднял Android.
+//
+// Зачем ядру знать настоящее значение: `calculatePaddingSize` в amneziawg-go
+// выравнивает зашифрованную полезную нагрузку до кратности 16, но **не выше**
+// MTU устройства. Пока здесь стояли зашитые 1280, полноразмерный пакет при
+// MTU 1430 выравнивался до 1440 — на проводе получалось 1500 при пути 1492, и
+// пропадали ровно самые крупные пакеты, то есть весь массовый трафик. С
+// настоящим значением потолок срабатывает и добавка равна нулю.
+//
+// Ноль означает «не сказали» — тогда остаётся прежнее поведение, 1280.
+var tunnelMtu atomic.Int32
+
 var tunReadLogBudget atomic.Int64
 var tunWriteLogBudget atomic.Int64
 var dnsInterceptLogBudget atomic.Int64
@@ -703,11 +728,35 @@ func CreateAndroidTUN(fd int) (tun.Device, error) {
 	file := os.NewFile(uintptr(dupFD), "tun")
 	tunReadLogBudget.Store(12)
 	tunWriteLogBudget.Store(12)
+	mtu := int(tunnelMtu.Load())
+	if mtu <= 0 {
+		mtu = defaultTunnelMtu
+	}
 	return &AndroidTUN{
 		file:   file,
 		events: make(chan tun.Event, 10),
-		mtu:    1280,
+		mtu:    mtu,
 	}, nil
+}
+
+// SetTunnelMtu сообщает ядру MTU, с которым Android поднял TUN.
+//
+// Зовётся до StartVPN: устройство читает MTU один раз, при создании, и события
+// EventMTUUpdate мы не шлём. Границы — те же, что у ползунка в настройках:
+// ниже minTunnelMtu смысла нет, а выше maxTunnelMtu пакет не помещается в
+// канал телефона (1500 − 60 байт на IPv4+UDP+WireGuard).
+func SetTunnelMtu(mtu int) {
+	if mtu <= 0 {
+		tunnelMtu.Store(0)
+		return
+	}
+	if mtu < minTunnelMtu {
+		mtu = minTunnelMtu
+	}
+	if mtu > maxTunnelMtu {
+		mtu = maxTunnelMtu
+	}
+	tunnelMtu.Store(int32(mtu))
 }
 
 func (t *AndroidTUN) Name() (string, error) {

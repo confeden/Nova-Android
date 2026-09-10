@@ -1,0 +1,855 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Сгенерировано tools/gen_nova_themes.py. Руками не править:
+     правка переживёт ровно до следующего запуска генератора. -->
+<resources xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <style name="Theme.Nova.Settings.Auroramint" parent="Theme.Nova.Settings">
+        <item name="android:windowBackground">@drawable/bg_nova_screen_aurora</item>
+        <item name="novaCardBackground">@drawable/bg_nova_card_aurora</item>
+        <item name="novaFieldBackground">@drawable/bg_nova_field_aurora</item>
+        <item name="android:alertDialogTheme">@style/Theme.Nova.Dialog.Auroramint</item>
+        <item name="alertDialogTheme">@style/Theme.Nova.Dialog.Auroramint</item>
+        <item name="colorAccent">@color/nova_aurora_accent</item>
+        <item name="android:colorAccent">@color/nova_aurora_accent</item>
+        <item name="colorControlActivated">@color/nova_aurora_accent</item>
+        <item name="android:colorControlActivated">@color/nova_aurora_accent</item>
+        <item name="colorControlNormal">@color/nova_aurora_text_value</item>
+        <item name="android:colorControlNormal">@color/nova_aurora_text_value</item>
+        <item name="android:textColorHint">@color/nova_aurora_text_hint</item>
+        <item name="novaAccent">@color/nova_aurora_accent</item>
+        <item name="novaAccentDim">@color/nova_aurora_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_aurora_accent_on</item>
+        <item name="novaSeparator">@color/nova_aurora_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_aurora_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_aurora_group_to</item>
+        <item name="novaTextTitle">@color/nova_aurora_text_title</item>
+        <item name="novaTextValue">@color/nova_aurora_text_value</item>
+        <item name="novaTextHint">@color/nova_aurora_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_aurora_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_aurora_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_aurora_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_aurora_thumb_off</item>
+        <item name="novaIconTint">@color/nova_aurora_icon_tint</item>
+        <item name="novaCardFill">@color/nova_aurora_card_fill</item>
+        <item name="novaCardStroke">@color/nova_aurora_card_stroke</item>
+    </style>
+
+    <style name="Theme.Nova.Settings.DNSAI" parent="Theme.Nova.Settings">
+        <item name="android:windowBackground">@drawable/bg_nova_screen_dnsai</item>
+        <item name="novaCardBackground">@drawable/bg_nova_card_dnsai</item>
+        <item name="novaFieldBackground">@drawable/bg_nova_field_dnsai</item>
+        <item name="android:alertDialogTheme">@style/Theme.Nova.Dialog.DNSAI</item>
+        <item name="alertDialogTheme">@style/Theme.Nova.Dialog.DNSAI</item>
+        <item name="colorAccent">@color/nova_dnsai_accent</item>
+        <item name="android:colorAccent">@color/nova_dnsai_accent</item>
+        <item name="colorControlActivated">@color/nova_dnsai_accent</item>
+        <item name="android:colorControlActivated">@color/nova_dnsai_accent</item>
+        <item name="colorControlNormal">@color/nova_dnsai_text_value</item>
+        <item name="android:colorControlNormal">@color/nova_dnsai_text_value</item>
+        <item name="android:textColorHint">@color/nova_dnsai_text_hint</item>
+        <item name="novaAccent">@color/nova_dnsai_accent</item>
+        <item name="novaAccentDim">@color/nova_dnsai_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_dnsai_accent_on</item>
+        <item name="novaSeparator">@color/nova_dnsai_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_dnsai_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_dnsai_group_to</item>
+        <item name="novaTextTitle">@color/nova_dnsai_text_title</item>
+        <item name="novaTextValue">@color/nova_dnsai_text_value</item>
+        <item name="novaTextHint">@color/nova_dnsai_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_dnsai_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_dnsai_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_dnsai_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_dnsai_thumb_off</item>
+        <item name="novaIconTint">@color/nova_dnsai_icon_tint</item>
+        <item name="novaCardFill">@color/nova_dnsai_card_fill</item>
+        <item name="novaCardStroke">@color/nova_dnsai_card_stroke</item>
+    </style>
+
+    <style name="Theme.Nova.Settings.Proton" parent="Theme.Nova.Settings">
+        <item name="android:windowBackground">@drawable/bg_nova_screen_proton</item>
+        <item name="novaCardBackground">@drawable/bg_nova_card_proton</item>
+        <item name="novaFieldBackground">@drawable/bg_nova_field_proton</item>
+        <item name="android:alertDialogTheme">@style/Theme.Nova.Dialog.Proton</item>
+        <item name="alertDialogTheme">@style/Theme.Nova.Dialog.Proton</item>
+        <item name="colorAccent">@color/nova_proton_accent</item>
+        <item name="android:colorAccent">@color/nova_proton_accent</item>
+        <item name="colorControlActivated">@color/nova_proton_accent</item>
+        <item name="android:colorControlActivated">@color/nova_proton_accent</item>
+        <item name="colorControlNormal">@color/nova_proton_text_value</item>
+        <item name="android:colorControlNormal">@color/nova_proton_text_value</item>
+        <item name="android:textColorHint">@color/nova_proton_text_hint</item>
+        <item name="novaAccent">@color/nova_proton_accent</item>
+        <item name="novaAccentDim">@color/nova_proton_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_proton_accent_on</item>
+        <item name="novaSeparator">@color/nova_proton_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_proton_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_proton_group_to</item>
+        <item name="novaTextTitle">@color/nova_proton_text_title</item>
+        <item name="novaTextValue">@color/nova_proton_text_value</item>
+        <item name="novaTextHint">@color/nova_proton_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_proton_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_proton_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_proton_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_proton_thumb_off</item>
+        <item name="novaIconTint">@color/nova_proton_icon_tint</item>
+        <item name="novaCardFill">@color/nova_proton_card_fill</item>
+        <item name="novaCardStroke">@color/nova_proton_card_stroke</item>
+    </style>
+
+    <style name="Theme.Nova.Settings.Charcoalbirch" parent="Theme.Nova.Settings">
+        <item name="android:windowBackground">@drawable/bg_nova_screen_charcoal</item>
+        <item name="novaCardBackground">@drawable/bg_nova_card_charcoal</item>
+        <item name="novaFieldBackground">@drawable/bg_nova_field_charcoal</item>
+        <item name="android:alertDialogTheme">@style/Theme.Nova.Dialog.Charcoalbirch</item>
+        <item name="alertDialogTheme">@style/Theme.Nova.Dialog.Charcoalbirch</item>
+        <item name="colorAccent">@color/nova_charcoal_accent</item>
+        <item name="android:colorAccent">@color/nova_charcoal_accent</item>
+        <item name="colorControlActivated">@color/nova_charcoal_accent</item>
+        <item name="android:colorControlActivated">@color/nova_charcoal_accent</item>
+        <item name="colorControlNormal">@color/nova_charcoal_text_value</item>
+        <item name="android:colorControlNormal">@color/nova_charcoal_text_value</item>
+        <item name="android:textColorHint">@color/nova_charcoal_text_hint</item>
+        <item name="novaAccent">@color/nova_charcoal_accent</item>
+        <item name="novaAccentDim">@color/nova_charcoal_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_charcoal_accent_on</item>
+        <item name="novaSeparator">@color/nova_charcoal_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_charcoal_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_charcoal_group_to</item>
+        <item name="novaTextTitle">@color/nova_charcoal_text_title</item>
+        <item name="novaTextValue">@color/nova_charcoal_text_value</item>
+        <item name="novaTextHint">@color/nova_charcoal_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_charcoal_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_charcoal_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_charcoal_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_charcoal_thumb_off</item>
+        <item name="novaIconTint">@color/nova_charcoal_icon_tint</item>
+        <item name="novaCardFill">@color/nova_charcoal_card_fill</item>
+        <item name="novaCardStroke">@color/nova_charcoal_card_stroke</item>
+    </style>
+
+    <style name="Theme.Nova.Settings.Graphenegolden" parent="Theme.Nova.Settings">
+        <item name="android:windowBackground">@drawable/bg_nova_screen_graphene</item>
+        <item name="novaCardBackground">@drawable/bg_nova_card_graphene</item>
+        <item name="novaFieldBackground">@drawable/bg_nova_field_graphene</item>
+        <item name="android:alertDialogTheme">@style/Theme.Nova.Dialog.Graphenegolden</item>
+        <item name="alertDialogTheme">@style/Theme.Nova.Dialog.Graphenegolden</item>
+        <item name="colorAccent">@color/nova_graphene_accent</item>
+        <item name="android:colorAccent">@color/nova_graphene_accent</item>
+        <item name="colorControlActivated">@color/nova_graphene_accent</item>
+        <item name="android:colorControlActivated">@color/nova_graphene_accent</item>
+        <item name="colorControlNormal">@color/nova_graphene_text_value</item>
+        <item name="android:colorControlNormal">@color/nova_graphene_text_value</item>
+        <item name="android:textColorHint">@color/nova_graphene_text_hint</item>
+        <item name="novaAccent">@color/nova_graphene_accent</item>
+        <item name="novaAccentDim">@color/nova_graphene_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_graphene_accent_on</item>
+        <item name="novaSeparator">@color/nova_graphene_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_graphene_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_graphene_group_to</item>
+        <item name="novaTextTitle">@color/nova_graphene_text_title</item>
+        <item name="novaTextValue">@color/nova_graphene_text_value</item>
+        <item name="novaTextHint">@color/nova_graphene_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_graphene_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_graphene_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_graphene_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_graphene_thumb_off</item>
+        <item name="novaIconTint">@color/nova_graphene_icon_tint</item>
+        <item name="novaCardFill">@color/nova_graphene_card_fill</item>
+        <item name="novaCardStroke">@color/nova_graphene_card_stroke</item>
+    </style>
+
+    <style name="Theme.Nova.Settings.Cyberneon" parent="Theme.Nova.Settings">
+        <item name="android:windowBackground">@drawable/bg_nova_screen_neon</item>
+        <item name="novaCardBackground">@drawable/bg_nova_card_neon</item>
+        <item name="novaFieldBackground">@drawable/bg_nova_field_neon</item>
+        <item name="android:alertDialogTheme">@style/Theme.Nova.Dialog.Cyberneon</item>
+        <item name="alertDialogTheme">@style/Theme.Nova.Dialog.Cyberneon</item>
+        <item name="colorAccent">@color/nova_neon_accent</item>
+        <item name="android:colorAccent">@color/nova_neon_accent</item>
+        <item name="colorControlActivated">@color/nova_neon_accent</item>
+        <item name="android:colorControlActivated">@color/nova_neon_accent</item>
+        <item name="colorControlNormal">@color/nova_neon_text_value</item>
+        <item name="android:colorControlNormal">@color/nova_neon_text_value</item>
+        <item name="android:textColorHint">@color/nova_neon_text_hint</item>
+        <item name="novaAccent">@color/nova_neon_accent</item>
+        <item name="novaAccentDim">@color/nova_neon_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_neon_accent_on</item>
+        <item name="novaSeparator">@color/nova_neon_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_neon_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_neon_group_to</item>
+        <item name="novaTextTitle">@color/nova_neon_text_title</item>
+        <item name="novaTextValue">@color/nova_neon_text_value</item>
+        <item name="novaTextHint">@color/nova_neon_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_neon_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_neon_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_neon_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_neon_thumb_off</item>
+        <item name="novaIconTint">@color/nova_neon_icon_tint</item>
+        <item name="novaCardFill">@color/nova_neon_card_fill</item>
+        <item name="novaCardStroke">@color/nova_neon_card_stroke</item>
+    </style>
+
+    <style name="Theme.Nova.Settings.PathofExile1" parent="Theme.Nova.Settings">
+        <item name="android:windowBackground">@drawable/bg_nova_screen_poe1</item>
+        <item name="novaCardBackground">@drawable/bg_nova_card_poe1</item>
+        <item name="novaFieldBackground">@drawable/bg_nova_field_poe1</item>
+        <item name="android:alertDialogTheme">@style/Theme.Nova.Dialog.PathofExile1</item>
+        <item name="alertDialogTheme">@style/Theme.Nova.Dialog.PathofExile1</item>
+        <item name="colorAccent">@color/nova_poe1_accent</item>
+        <item name="android:colorAccent">@color/nova_poe1_accent</item>
+        <item name="colorControlActivated">@color/nova_poe1_accent</item>
+        <item name="android:colorControlActivated">@color/nova_poe1_accent</item>
+        <item name="colorControlNormal">@color/nova_poe1_text_value</item>
+        <item name="android:colorControlNormal">@color/nova_poe1_text_value</item>
+        <item name="android:textColorHint">@color/nova_poe1_text_hint</item>
+        <item name="novaAccent">@color/nova_poe1_accent</item>
+        <item name="novaAccentDim">@color/nova_poe1_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_poe1_accent_on</item>
+        <item name="novaSeparator">@color/nova_poe1_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_poe1_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_poe1_group_to</item>
+        <item name="novaTextTitle">@color/nova_poe1_text_title</item>
+        <item name="novaTextValue">@color/nova_poe1_text_value</item>
+        <item name="novaTextHint">@color/nova_poe1_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_poe1_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_poe1_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_poe1_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_poe1_thumb_off</item>
+        <item name="novaIconTint">@color/nova_poe1_icon_tint</item>
+        <item name="novaCardFill">@color/nova_poe1_card_fill</item>
+        <item name="novaCardStroke">@color/nova_poe1_card_stroke</item>
+    </style>
+
+    <style name="Theme.Nova.Settings.PathofExile2" parent="Theme.Nova.Settings">
+        <item name="android:windowBackground">@drawable/bg_nova_screen_poe2</item>
+        <item name="novaCardBackground">@drawable/bg_nova_card_poe2</item>
+        <item name="novaFieldBackground">@drawable/bg_nova_field_poe2</item>
+        <item name="android:alertDialogTheme">@style/Theme.Nova.Dialog.PathofExile2</item>
+        <item name="alertDialogTheme">@style/Theme.Nova.Dialog.PathofExile2</item>
+        <item name="colorAccent">@color/nova_poe2_accent</item>
+        <item name="android:colorAccent">@color/nova_poe2_accent</item>
+        <item name="colorControlActivated">@color/nova_poe2_accent</item>
+        <item name="android:colorControlActivated">@color/nova_poe2_accent</item>
+        <item name="colorControlNormal">@color/nova_poe2_text_value</item>
+        <item name="android:colorControlNormal">@color/nova_poe2_text_value</item>
+        <item name="android:textColorHint">@color/nova_poe2_text_hint</item>
+        <item name="novaAccent">@color/nova_poe2_accent</item>
+        <item name="novaAccentDim">@color/nova_poe2_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_poe2_accent_on</item>
+        <item name="novaSeparator">@color/nova_poe2_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_poe2_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_poe2_group_to</item>
+        <item name="novaTextTitle">@color/nova_poe2_text_title</item>
+        <item name="novaTextValue">@color/nova_poe2_text_value</item>
+        <item name="novaTextHint">@color/nova_poe2_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_poe2_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_poe2_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_poe2_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_poe2_thumb_off</item>
+        <item name="novaIconTint">@color/nova_poe2_icon_tint</item>
+        <item name="novaCardFill">@color/nova_poe2_card_fill</item>
+        <item name="novaCardStroke">@color/nova_poe2_card_stroke</item>
+    </style>
+
+    <style name="Theme.Nova.Settings.GTAVIViceSunset" parent="Theme.Nova.Settings">
+        <item name="android:windowBackground">@drawable/bg_nova_screen_gta6sunset</item>
+        <item name="novaCardBackground">@drawable/bg_nova_card_gta6sunset</item>
+        <item name="novaFieldBackground">@drawable/bg_nova_field_gta6sunset</item>
+        <item name="android:alertDialogTheme">@style/Theme.Nova.Dialog.GTAVIViceSunset</item>
+        <item name="alertDialogTheme">@style/Theme.Nova.Dialog.GTAVIViceSunset</item>
+        <item name="colorAccent">@color/nova_gta6sunset_accent</item>
+        <item name="android:colorAccent">@color/nova_gta6sunset_accent</item>
+        <item name="colorControlActivated">@color/nova_gta6sunset_accent</item>
+        <item name="android:colorControlActivated">@color/nova_gta6sunset_accent</item>
+        <item name="colorControlNormal">@color/nova_gta6sunset_text_value</item>
+        <item name="android:colorControlNormal">@color/nova_gta6sunset_text_value</item>
+        <item name="android:textColorHint">@color/nova_gta6sunset_text_hint</item>
+        <item name="novaAccent">@color/nova_gta6sunset_accent</item>
+        <item name="novaAccentDim">@color/nova_gta6sunset_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_gta6sunset_accent_on</item>
+        <item name="novaSeparator">@color/nova_gta6sunset_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_gta6sunset_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_gta6sunset_group_to</item>
+        <item name="novaTextTitle">@color/nova_gta6sunset_text_title</item>
+        <item name="novaTextValue">@color/nova_gta6sunset_text_value</item>
+        <item name="novaTextHint">@color/nova_gta6sunset_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_gta6sunset_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_gta6sunset_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_gta6sunset_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_gta6sunset_thumb_off</item>
+        <item name="novaIconTint">@color/nova_gta6sunset_icon_tint</item>
+        <item name="novaCardFill">@color/nova_gta6sunset_card_fill</item>
+        <item name="novaCardStroke">@color/nova_gta6sunset_card_stroke</item>
+    </style>
+
+    <style name="Theme.Nova.Settings.GTAVIViceNight" parent="Theme.Nova.Settings">
+        <item name="android:windowBackground">@drawable/bg_nova_screen_gta6night</item>
+        <item name="novaCardBackground">@drawable/bg_nova_card_gta6night</item>
+        <item name="novaFieldBackground">@drawable/bg_nova_field_gta6night</item>
+        <item name="android:alertDialogTheme">@style/Theme.Nova.Dialog.GTAVIViceNight</item>
+        <item name="alertDialogTheme">@style/Theme.Nova.Dialog.GTAVIViceNight</item>
+        <item name="colorAccent">@color/nova_gta6night_accent</item>
+        <item name="android:colorAccent">@color/nova_gta6night_accent</item>
+        <item name="colorControlActivated">@color/nova_gta6night_accent</item>
+        <item name="android:colorControlActivated">@color/nova_gta6night_accent</item>
+        <item name="colorControlNormal">@color/nova_gta6night_text_value</item>
+        <item name="android:colorControlNormal">@color/nova_gta6night_text_value</item>
+        <item name="android:textColorHint">@color/nova_gta6night_text_hint</item>
+        <item name="novaAccent">@color/nova_gta6night_accent</item>
+        <item name="novaAccentDim">@color/nova_gta6night_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_gta6night_accent_on</item>
+        <item name="novaSeparator">@color/nova_gta6night_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_gta6night_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_gta6night_group_to</item>
+        <item name="novaTextTitle">@color/nova_gta6night_text_title</item>
+        <item name="novaTextValue">@color/nova_gta6night_text_value</item>
+        <item name="novaTextHint">@color/nova_gta6night_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_gta6night_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_gta6night_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_gta6night_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_gta6night_thumb_off</item>
+        <item name="novaIconTint">@color/nova_gta6night_icon_tint</item>
+        <item name="novaCardFill">@color/nova_gta6night_card_fill</item>
+        <item name="novaCardStroke">@color/nova_gta6night_card_stroke</item>
+    </style>
+
+    <style name="Theme.Nova.Dialog.Auroramint" parent="android:Theme.Material.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/bg_nova_dialog_aurora</item>
+        <item name="android:textColorPrimary">@color/nova_aurora_text_title</item>
+        <item name="android:textColorSecondary">@color/nova_aurora_text_value</item>
+        <item name="android:textColorAlertDialogListItem">@color/nova_aurora_text_title</item>
+        <item name="android:colorAccent">@color/nova_aurora_accent</item>
+        <item name="android:colorControlActivated">@color/nova_aurora_accent</item>
+        <item name="android:colorControlNormal">@color/nova_aurora_text_value</item>
+        <item name="android:windowMinWidthMajor">85%</item>
+        <item name="android:windowMinWidthMinor">92%</item>
+        <item name="novaDialogButton">@drawable/bg_nova_dialog_button_aurora</item>
+        <item name="novaDialogButtonPrimary">@drawable/bg_nova_dialog_button_primary_aurora</item>
+        <item name="novaAccent">@color/nova_aurora_accent</item>
+        <item name="novaAccentDim">@color/nova_aurora_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_aurora_accent_on</item>
+        <item name="novaSeparator">@color/nova_aurora_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_aurora_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_aurora_group_to</item>
+        <item name="novaTextTitle">@color/nova_aurora_text_title</item>
+        <item name="novaTextValue">@color/nova_aurora_text_value</item>
+        <item name="novaTextHint">@color/nova_aurora_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_aurora_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_aurora_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_aurora_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_aurora_thumb_off</item>
+        <item name="novaIconTint">@color/nova_aurora_icon_tint</item>
+        <item name="novaCardFill">@color/nova_aurora_card_fill</item>
+        <item name="novaCardStroke">@color/nova_aurora_card_stroke</item>
+        <item name="android:buttonBarPositiveButtonStyle">@style/Widget.Nova.DialogButtonPrimary.Auroramint</item>
+        <item name="android:buttonBarNegativeButtonStyle">@style/Widget.Nova.DialogButton.Auroramint</item>
+        <item name="android:buttonBarNeutralButtonStyle">@style/Widget.Nova.DialogButton.Auroramint</item>
+    </style>
+
+    <style name="Theme.Nova.Dialog.DNSAI" parent="android:Theme.Material.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/bg_nova_dialog_dnsai</item>
+        <item name="android:textColorPrimary">@color/nova_dnsai_text_title</item>
+        <item name="android:textColorSecondary">@color/nova_dnsai_text_value</item>
+        <item name="android:textColorAlertDialogListItem">@color/nova_dnsai_text_title</item>
+        <item name="android:colorAccent">@color/nova_dnsai_accent</item>
+        <item name="android:colorControlActivated">@color/nova_dnsai_accent</item>
+        <item name="android:colorControlNormal">@color/nova_dnsai_text_value</item>
+        <item name="android:windowMinWidthMajor">85%</item>
+        <item name="android:windowMinWidthMinor">92%</item>
+        <item name="novaDialogButton">@drawable/bg_nova_dialog_button_dnsai</item>
+        <item name="novaDialogButtonPrimary">@drawable/bg_nova_dialog_button_primary_dnsai</item>
+        <item name="novaAccent">@color/nova_dnsai_accent</item>
+        <item name="novaAccentDim">@color/nova_dnsai_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_dnsai_accent_on</item>
+        <item name="novaSeparator">@color/nova_dnsai_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_dnsai_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_dnsai_group_to</item>
+        <item name="novaTextTitle">@color/nova_dnsai_text_title</item>
+        <item name="novaTextValue">@color/nova_dnsai_text_value</item>
+        <item name="novaTextHint">@color/nova_dnsai_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_dnsai_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_dnsai_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_dnsai_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_dnsai_thumb_off</item>
+        <item name="novaIconTint">@color/nova_dnsai_icon_tint</item>
+        <item name="novaCardFill">@color/nova_dnsai_card_fill</item>
+        <item name="novaCardStroke">@color/nova_dnsai_card_stroke</item>
+        <item name="android:buttonBarPositiveButtonStyle">@style/Widget.Nova.DialogButtonPrimary.DNSAI</item>
+        <item name="android:buttonBarNegativeButtonStyle">@style/Widget.Nova.DialogButton.DNSAI</item>
+        <item name="android:buttonBarNeutralButtonStyle">@style/Widget.Nova.DialogButton.DNSAI</item>
+    </style>
+
+    <style name="Theme.Nova.Dialog.Proton" parent="android:Theme.Material.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/bg_nova_dialog_proton</item>
+        <item name="android:textColorPrimary">@color/nova_proton_text_title</item>
+        <item name="android:textColorSecondary">@color/nova_proton_text_value</item>
+        <item name="android:textColorAlertDialogListItem">@color/nova_proton_text_title</item>
+        <item name="android:colorAccent">@color/nova_proton_accent</item>
+        <item name="android:colorControlActivated">@color/nova_proton_accent</item>
+        <item name="android:colorControlNormal">@color/nova_proton_text_value</item>
+        <item name="android:windowMinWidthMajor">85%</item>
+        <item name="android:windowMinWidthMinor">92%</item>
+        <item name="novaDialogButton">@drawable/bg_nova_dialog_button_proton</item>
+        <item name="novaDialogButtonPrimary">@drawable/bg_nova_dialog_button_primary_proton</item>
+        <item name="novaAccent">@color/nova_proton_accent</item>
+        <item name="novaAccentDim">@color/nova_proton_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_proton_accent_on</item>
+        <item name="novaSeparator">@color/nova_proton_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_proton_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_proton_group_to</item>
+        <item name="novaTextTitle">@color/nova_proton_text_title</item>
+        <item name="novaTextValue">@color/nova_proton_text_value</item>
+        <item name="novaTextHint">@color/nova_proton_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_proton_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_proton_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_proton_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_proton_thumb_off</item>
+        <item name="novaIconTint">@color/nova_proton_icon_tint</item>
+        <item name="novaCardFill">@color/nova_proton_card_fill</item>
+        <item name="novaCardStroke">@color/nova_proton_card_stroke</item>
+        <item name="android:buttonBarPositiveButtonStyle">@style/Widget.Nova.DialogButtonPrimary.Proton</item>
+        <item name="android:buttonBarNegativeButtonStyle">@style/Widget.Nova.DialogButton.Proton</item>
+        <item name="android:buttonBarNeutralButtonStyle">@style/Widget.Nova.DialogButton.Proton</item>
+    </style>
+
+    <style name="Theme.Nova.Dialog.Charcoalbirch" parent="android:Theme.Material.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/bg_nova_dialog_charcoal</item>
+        <item name="android:textColorPrimary">@color/nova_charcoal_text_title</item>
+        <item name="android:textColorSecondary">@color/nova_charcoal_text_value</item>
+        <item name="android:textColorAlertDialogListItem">@color/nova_charcoal_text_title</item>
+        <item name="android:colorAccent">@color/nova_charcoal_accent</item>
+        <item name="android:colorControlActivated">@color/nova_charcoal_accent</item>
+        <item name="android:colorControlNormal">@color/nova_charcoal_text_value</item>
+        <item name="android:windowMinWidthMajor">85%</item>
+        <item name="android:windowMinWidthMinor">92%</item>
+        <item name="novaDialogButton">@drawable/bg_nova_dialog_button_charcoal</item>
+        <item name="novaDialogButtonPrimary">@drawable/bg_nova_dialog_button_primary_charcoal</item>
+        <item name="novaAccent">@color/nova_charcoal_accent</item>
+        <item name="novaAccentDim">@color/nova_charcoal_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_charcoal_accent_on</item>
+        <item name="novaSeparator">@color/nova_charcoal_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_charcoal_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_charcoal_group_to</item>
+        <item name="novaTextTitle">@color/nova_charcoal_text_title</item>
+        <item name="novaTextValue">@color/nova_charcoal_text_value</item>
+        <item name="novaTextHint">@color/nova_charcoal_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_charcoal_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_charcoal_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_charcoal_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_charcoal_thumb_off</item>
+        <item name="novaIconTint">@color/nova_charcoal_icon_tint</item>
+        <item name="novaCardFill">@color/nova_charcoal_card_fill</item>
+        <item name="novaCardStroke">@color/nova_charcoal_card_stroke</item>
+        <item name="android:buttonBarPositiveButtonStyle">@style/Widget.Nova.DialogButtonPrimary.Charcoalbirch</item>
+        <item name="android:buttonBarNegativeButtonStyle">@style/Widget.Nova.DialogButton.Charcoalbirch</item>
+        <item name="android:buttonBarNeutralButtonStyle">@style/Widget.Nova.DialogButton.Charcoalbirch</item>
+    </style>
+
+    <style name="Theme.Nova.Dialog.Graphenegolden" parent="android:Theme.Material.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/bg_nova_dialog_graphene</item>
+        <item name="android:textColorPrimary">@color/nova_graphene_text_title</item>
+        <item name="android:textColorSecondary">@color/nova_graphene_text_value</item>
+        <item name="android:textColorAlertDialogListItem">@color/nova_graphene_text_title</item>
+        <item name="android:colorAccent">@color/nova_graphene_accent</item>
+        <item name="android:colorControlActivated">@color/nova_graphene_accent</item>
+        <item name="android:colorControlNormal">@color/nova_graphene_text_value</item>
+        <item name="android:windowMinWidthMajor">85%</item>
+        <item name="android:windowMinWidthMinor">92%</item>
+        <item name="novaDialogButton">@drawable/bg_nova_dialog_button_graphene</item>
+        <item name="novaDialogButtonPrimary">@drawable/bg_nova_dialog_button_primary_graphene</item>
+        <item name="novaAccent">@color/nova_graphene_accent</item>
+        <item name="novaAccentDim">@color/nova_graphene_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_graphene_accent_on</item>
+        <item name="novaSeparator">@color/nova_graphene_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_graphene_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_graphene_group_to</item>
+        <item name="novaTextTitle">@color/nova_graphene_text_title</item>
+        <item name="novaTextValue">@color/nova_graphene_text_value</item>
+        <item name="novaTextHint">@color/nova_graphene_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_graphene_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_graphene_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_graphene_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_graphene_thumb_off</item>
+        <item name="novaIconTint">@color/nova_graphene_icon_tint</item>
+        <item name="novaCardFill">@color/nova_graphene_card_fill</item>
+        <item name="novaCardStroke">@color/nova_graphene_card_stroke</item>
+        <item name="android:buttonBarPositiveButtonStyle">@style/Widget.Nova.DialogButtonPrimary.Graphenegolden</item>
+        <item name="android:buttonBarNegativeButtonStyle">@style/Widget.Nova.DialogButton.Graphenegolden</item>
+        <item name="android:buttonBarNeutralButtonStyle">@style/Widget.Nova.DialogButton.Graphenegolden</item>
+    </style>
+
+    <style name="Theme.Nova.Dialog.Cyberneon" parent="android:Theme.Material.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/bg_nova_dialog_neon</item>
+        <item name="android:textColorPrimary">@color/nova_neon_text_title</item>
+        <item name="android:textColorSecondary">@color/nova_neon_text_value</item>
+        <item name="android:textColorAlertDialogListItem">@color/nova_neon_text_title</item>
+        <item name="android:colorAccent">@color/nova_neon_accent</item>
+        <item name="android:colorControlActivated">@color/nova_neon_accent</item>
+        <item name="android:colorControlNormal">@color/nova_neon_text_value</item>
+        <item name="android:windowMinWidthMajor">85%</item>
+        <item name="android:windowMinWidthMinor">92%</item>
+        <item name="novaDialogButton">@drawable/bg_nova_dialog_button_neon</item>
+        <item name="novaDialogButtonPrimary">@drawable/bg_nova_dialog_button_primary_neon</item>
+        <item name="novaAccent">@color/nova_neon_accent</item>
+        <item name="novaAccentDim">@color/nova_neon_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_neon_accent_on</item>
+        <item name="novaSeparator">@color/nova_neon_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_neon_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_neon_group_to</item>
+        <item name="novaTextTitle">@color/nova_neon_text_title</item>
+        <item name="novaTextValue">@color/nova_neon_text_value</item>
+        <item name="novaTextHint">@color/nova_neon_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_neon_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_neon_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_neon_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_neon_thumb_off</item>
+        <item name="novaIconTint">@color/nova_neon_icon_tint</item>
+        <item name="novaCardFill">@color/nova_neon_card_fill</item>
+        <item name="novaCardStroke">@color/nova_neon_card_stroke</item>
+        <item name="android:buttonBarPositiveButtonStyle">@style/Widget.Nova.DialogButtonPrimary.Cyberneon</item>
+        <item name="android:buttonBarNegativeButtonStyle">@style/Widget.Nova.DialogButton.Cyberneon</item>
+        <item name="android:buttonBarNeutralButtonStyle">@style/Widget.Nova.DialogButton.Cyberneon</item>
+    </style>
+
+    <style name="Theme.Nova.Dialog.PathofExile1" parent="android:Theme.Material.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/bg_nova_dialog_poe1</item>
+        <item name="android:textColorPrimary">@color/nova_poe1_text_title</item>
+        <item name="android:textColorSecondary">@color/nova_poe1_text_value</item>
+        <item name="android:textColorAlertDialogListItem">@color/nova_poe1_text_title</item>
+        <item name="android:colorAccent">@color/nova_poe1_accent</item>
+        <item name="android:colorControlActivated">@color/nova_poe1_accent</item>
+        <item name="android:colorControlNormal">@color/nova_poe1_text_value</item>
+        <item name="android:windowMinWidthMajor">85%</item>
+        <item name="android:windowMinWidthMinor">92%</item>
+        <item name="novaDialogButton">@drawable/bg_nova_dialog_button_poe1</item>
+        <item name="novaDialogButtonPrimary">@drawable/bg_nova_dialog_button_primary_poe1</item>
+        <item name="novaAccent">@color/nova_poe1_accent</item>
+        <item name="novaAccentDim">@color/nova_poe1_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_poe1_accent_on</item>
+        <item name="novaSeparator">@color/nova_poe1_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_poe1_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_poe1_group_to</item>
+        <item name="novaTextTitle">@color/nova_poe1_text_title</item>
+        <item name="novaTextValue">@color/nova_poe1_text_value</item>
+        <item name="novaTextHint">@color/nova_poe1_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_poe1_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_poe1_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_poe1_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_poe1_thumb_off</item>
+        <item name="novaIconTint">@color/nova_poe1_icon_tint</item>
+        <item name="novaCardFill">@color/nova_poe1_card_fill</item>
+        <item name="novaCardStroke">@color/nova_poe1_card_stroke</item>
+        <item name="android:buttonBarPositiveButtonStyle">@style/Widget.Nova.DialogButtonPrimary.PathofExile1</item>
+        <item name="android:buttonBarNegativeButtonStyle">@style/Widget.Nova.DialogButton.PathofExile1</item>
+        <item name="android:buttonBarNeutralButtonStyle">@style/Widget.Nova.DialogButton.PathofExile1</item>
+    </style>
+
+    <style name="Theme.Nova.Dialog.PathofExile2" parent="android:Theme.Material.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/bg_nova_dialog_poe2</item>
+        <item name="android:textColorPrimary">@color/nova_poe2_text_title</item>
+        <item name="android:textColorSecondary">@color/nova_poe2_text_value</item>
+        <item name="android:textColorAlertDialogListItem">@color/nova_poe2_text_title</item>
+        <item name="android:colorAccent">@color/nova_poe2_accent</item>
+        <item name="android:colorControlActivated">@color/nova_poe2_accent</item>
+        <item name="android:colorControlNormal">@color/nova_poe2_text_value</item>
+        <item name="android:windowMinWidthMajor">85%</item>
+        <item name="android:windowMinWidthMinor">92%</item>
+        <item name="novaDialogButton">@drawable/bg_nova_dialog_button_poe2</item>
+        <item name="novaDialogButtonPrimary">@drawable/bg_nova_dialog_button_primary_poe2</item>
+        <item name="novaAccent">@color/nova_poe2_accent</item>
+        <item name="novaAccentDim">@color/nova_poe2_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_poe2_accent_on</item>
+        <item name="novaSeparator">@color/nova_poe2_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_poe2_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_poe2_group_to</item>
+        <item name="novaTextTitle">@color/nova_poe2_text_title</item>
+        <item name="novaTextValue">@color/nova_poe2_text_value</item>
+        <item name="novaTextHint">@color/nova_poe2_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_poe2_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_poe2_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_poe2_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_poe2_thumb_off</item>
+        <item name="novaIconTint">@color/nova_poe2_icon_tint</item>
+        <item name="novaCardFill">@color/nova_poe2_card_fill</item>
+        <item name="novaCardStroke">@color/nova_poe2_card_stroke</item>
+        <item name="android:buttonBarPositiveButtonStyle">@style/Widget.Nova.DialogButtonPrimary.PathofExile2</item>
+        <item name="android:buttonBarNegativeButtonStyle">@style/Widget.Nova.DialogButton.PathofExile2</item>
+        <item name="android:buttonBarNeutralButtonStyle">@style/Widget.Nova.DialogButton.PathofExile2</item>
+    </style>
+
+    <style name="Theme.Nova.Dialog.GTAVIViceSunset" parent="android:Theme.Material.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/bg_nova_dialog_gta6sunset</item>
+        <item name="android:textColorPrimary">@color/nova_gta6sunset_text_title</item>
+        <item name="android:textColorSecondary">@color/nova_gta6sunset_text_value</item>
+        <item name="android:textColorAlertDialogListItem">@color/nova_gta6sunset_text_title</item>
+        <item name="android:colorAccent">@color/nova_gta6sunset_accent</item>
+        <item name="android:colorControlActivated">@color/nova_gta6sunset_accent</item>
+        <item name="android:colorControlNormal">@color/nova_gta6sunset_text_value</item>
+        <item name="android:windowMinWidthMajor">85%</item>
+        <item name="android:windowMinWidthMinor">92%</item>
+        <item name="novaDialogButton">@drawable/bg_nova_dialog_button_gta6sunset</item>
+        <item name="novaDialogButtonPrimary">@drawable/bg_nova_dialog_button_primary_gta6sunset</item>
+        <item name="novaAccent">@color/nova_gta6sunset_accent</item>
+        <item name="novaAccentDim">@color/nova_gta6sunset_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_gta6sunset_accent_on</item>
+        <item name="novaSeparator">@color/nova_gta6sunset_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_gta6sunset_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_gta6sunset_group_to</item>
+        <item name="novaTextTitle">@color/nova_gta6sunset_text_title</item>
+        <item name="novaTextValue">@color/nova_gta6sunset_text_value</item>
+        <item name="novaTextHint">@color/nova_gta6sunset_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_gta6sunset_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_gta6sunset_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_gta6sunset_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_gta6sunset_thumb_off</item>
+        <item name="novaIconTint">@color/nova_gta6sunset_icon_tint</item>
+        <item name="novaCardFill">@color/nova_gta6sunset_card_fill</item>
+        <item name="novaCardStroke">@color/nova_gta6sunset_card_stroke</item>
+        <item name="android:buttonBarPositiveButtonStyle">@style/Widget.Nova.DialogButtonPrimary.GTAVIViceSunset</item>
+        <item name="android:buttonBarNegativeButtonStyle">@style/Widget.Nova.DialogButton.GTAVIViceSunset</item>
+        <item name="android:buttonBarNeutralButtonStyle">@style/Widget.Nova.DialogButton.GTAVIViceSunset</item>
+    </style>
+
+    <style name="Theme.Nova.Dialog.GTAVIViceNight" parent="android:Theme.Material.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/bg_nova_dialog_gta6night</item>
+        <item name="android:textColorPrimary">@color/nova_gta6night_text_title</item>
+        <item name="android:textColorSecondary">@color/nova_gta6night_text_value</item>
+        <item name="android:textColorAlertDialogListItem">@color/nova_gta6night_text_title</item>
+        <item name="android:colorAccent">@color/nova_gta6night_accent</item>
+        <item name="android:colorControlActivated">@color/nova_gta6night_accent</item>
+        <item name="android:colorControlNormal">@color/nova_gta6night_text_value</item>
+        <item name="android:windowMinWidthMajor">85%</item>
+        <item name="android:windowMinWidthMinor">92%</item>
+        <item name="novaDialogButton">@drawable/bg_nova_dialog_button_gta6night</item>
+        <item name="novaDialogButtonPrimary">@drawable/bg_nova_dialog_button_primary_gta6night</item>
+        <item name="novaAccent">@color/nova_gta6night_accent</item>
+        <item name="novaAccentDim">@color/nova_gta6night_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_gta6night_accent_on</item>
+        <item name="novaSeparator">@color/nova_gta6night_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_gta6night_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_gta6night_group_to</item>
+        <item name="novaTextTitle">@color/nova_gta6night_text_title</item>
+        <item name="novaTextValue">@color/nova_gta6night_text_value</item>
+        <item name="novaTextHint">@color/nova_gta6night_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_gta6night_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_gta6night_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_gta6night_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_gta6night_thumb_off</item>
+        <item name="novaIconTint">@color/nova_gta6night_icon_tint</item>
+        <item name="novaCardFill">@color/nova_gta6night_card_fill</item>
+        <item name="novaCardStroke">@color/nova_gta6night_card_stroke</item>
+        <item name="android:buttonBarPositiveButtonStyle">@style/Widget.Nova.DialogButtonPrimary.GTAVIViceNight</item>
+        <item name="android:buttonBarNegativeButtonStyle">@style/Widget.Nova.DialogButton.GTAVIViceNight</item>
+        <item name="android:buttonBarNeutralButtonStyle">@style/Widget.Nova.DialogButton.GTAVIViceNight</item>
+    </style>
+
+    <style name="Widget.Nova.DialogButton.Auroramint" parent="android:Widget.Material.Button.Borderless">
+        <item name="android:background">@drawable/bg_nova_dialog_button_aurora</item>
+        <item name="android:backgroundTint">@color/nova_aurora_accent</item>
+        <item name="android:backgroundTintMode">src_in</item>
+        <item name="android:textColor">@color/nova_aurora_accent</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:minWidth">96dp</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:paddingLeft">18dp</item>
+        <item name="android:paddingRight">18dp</item>
+        <item name="android:layout_marginStart">8dp</item>
+        <item name="android:layout_marginBottom">4dp</item>
+    </style>
+
+    <style name="Widget.Nova.DialogButtonPrimary.Auroramint" parent="@style/Widget.Nova.DialogButton.Auroramint">
+        <item name="android:background">@drawable/bg_nova_dialog_button_primary_aurora</item>
+        <item name="android:textColor">@color/nova_aurora_accent_on</item>
+    </style>
+
+    <style name="Widget.Nova.DialogButton.DNSAI" parent="android:Widget.Material.Button.Borderless">
+        <item name="android:background">@drawable/bg_nova_dialog_button_dnsai</item>
+        <item name="android:backgroundTint">@color/nova_dnsai_accent</item>
+        <item name="android:backgroundTintMode">src_in</item>
+        <item name="android:textColor">@color/nova_dnsai_accent</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:minWidth">96dp</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:paddingLeft">18dp</item>
+        <item name="android:paddingRight">18dp</item>
+        <item name="android:layout_marginStart">8dp</item>
+        <item name="android:layout_marginBottom">4dp</item>
+    </style>
+
+    <style name="Widget.Nova.DialogButtonPrimary.DNSAI" parent="@style/Widget.Nova.DialogButton.DNSAI">
+        <item name="android:background">@drawable/bg_nova_dialog_button_primary_dnsai</item>
+        <item name="android:textColor">@color/nova_dnsai_accent_on</item>
+    </style>
+
+    <style name="Widget.Nova.DialogButton.Proton" parent="android:Widget.Material.Button.Borderless">
+        <item name="android:background">@drawable/bg_nova_dialog_button_proton</item>
+        <item name="android:backgroundTint">@color/nova_proton_accent</item>
+        <item name="android:backgroundTintMode">src_in</item>
+        <item name="android:textColor">@color/nova_proton_accent</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:minWidth">96dp</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:paddingLeft">18dp</item>
+        <item name="android:paddingRight">18dp</item>
+        <item name="android:layout_marginStart">8dp</item>
+        <item name="android:layout_marginBottom">4dp</item>
+    </style>
+
+    <style name="Widget.Nova.DialogButtonPrimary.Proton" parent="@style/Widget.Nova.DialogButton.Proton">
+        <item name="android:background">@drawable/bg_nova_dialog_button_primary_proton</item>
+        <item name="android:textColor">@color/nova_proton_accent_on</item>
+    </style>
+
+    <style name="Widget.Nova.DialogButton.Charcoalbirch" parent="android:Widget.Material.Button.Borderless">
+        <item name="android:background">@drawable/bg_nova_dialog_button_charcoal</item>
+        <item name="android:backgroundTint">@color/nova_charcoal_accent</item>
+        <item name="android:backgroundTintMode">src_in</item>
+        <item name="android:textColor">@color/nova_charcoal_accent</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:minWidth">96dp</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:paddingLeft">18dp</item>
+        <item name="android:paddingRight">18dp</item>
+        <item name="android:layout_marginStart">8dp</item>
+        <item name="android:layout_marginBottom">4dp</item>
+    </style>
+
+    <style name="Widget.Nova.DialogButtonPrimary.Charcoalbirch" parent="@style/Widget.Nova.DialogButton.Charcoalbirch">
+        <item name="android:background">@drawable/bg_nova_dialog_button_primary_charcoal</item>
+        <item name="android:textColor">@color/nova_charcoal_accent_on</item>
+    </style>
+
+    <style name="Widget.Nova.DialogButton.Graphenegolden" parent="android:Widget.Material.Button.Borderless">
+        <item name="android:background">@drawable/bg_nova_dialog_button_graphene</item>
+        <item name="android:backgroundTint">@color/nova_graphene_accent</item>
+        <item name="android:backgroundTintMode">src_in</item>
+        <item name="android:textColor">@color/nova_graphene_accent</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:minWidth">96dp</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:paddingLeft">18dp</item>
+        <item name="android:paddingRight">18dp</item>
+        <item name="android:layout_marginStart">8dp</item>
+        <item name="android:layout_marginBottom">4dp</item>
+    </style>
+
+    <style name="Widget.Nova.DialogButtonPrimary.Graphenegolden" parent="@style/Widget.Nova.DialogButton.Graphenegolden">
+        <item name="android:background">@drawable/bg_nova_dialog_button_primary_graphene</item>
+        <item name="android:textColor">@color/nova_graphene_accent_on</item>
+    </style>
+
+    <style name="Widget.Nova.DialogButton.Cyberneon" parent="android:Widget.Material.Button.Borderless">
+        <item name="android:background">@drawable/bg_nova_dialog_button_neon</item>
+        <item name="android:backgroundTint">@color/nova_neon_accent</item>
+        <item name="android:backgroundTintMode">src_in</item>
+        <item name="android:textColor">@color/nova_neon_accent</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:minWidth">96dp</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:paddingLeft">18dp</item>
+        <item name="android:paddingRight">18dp</item>
+        <item name="android:layout_marginStart">8dp</item>
+        <item name="android:layout_marginBottom">4dp</item>
+    </style>
+
+    <style name="Widget.Nova.DialogButtonPrimary.Cyberneon" parent="@style/Widget.Nova.DialogButton.Cyberneon">
+        <item name="android:background">@drawable/bg_nova_dialog_button_primary_neon</item>
+        <item name="android:textColor">@color/nova_neon_accent_on</item>
+    </style>
+
+    <style name="Widget.Nova.DialogButton.PathofExile1" parent="android:Widget.Material.Button.Borderless">
+        <item name="android:background">@drawable/bg_nova_dialog_button_poe1</item>
+        <item name="android:backgroundTint">@color/nova_poe1_accent</item>
+        <item name="android:backgroundTintMode">src_in</item>
+        <item name="android:textColor">@color/nova_poe1_accent</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:minWidth">96dp</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:paddingLeft">18dp</item>
+        <item name="android:paddingRight">18dp</item>
+        <item name="android:layout_marginStart">8dp</item>
+        <item name="android:layout_marginBottom">4dp</item>
+    </style>
+
+    <style name="Widget.Nova.DialogButtonPrimary.PathofExile1" parent="@style/Widget.Nova.DialogButton.PathofExile1">
+        <item name="android:background">@drawable/bg_nova_dialog_button_primary_poe1</item>
+        <item name="android:textColor">@color/nova_poe1_accent_on</item>
+    </style>
+
+    <style name="Widget.Nova.DialogButton.PathofExile2" parent="android:Widget.Material.Button.Borderless">
+        <item name="android:background">@drawable/bg_nova_dialog_button_poe2</item>
+        <item name="android:backgroundTint">@color/nova_poe2_accent</item>
+        <item name="android:backgroundTintMode">src_in</item>
+        <item name="android:textColor">@color/nova_poe2_accent</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:minWidth">96dp</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:paddingLeft">18dp</item>
+        <item name="android:paddingRight">18dp</item>
+        <item name="android:layout_marginStart">8dp</item>
+        <item name="android:layout_marginBottom">4dp</item>
+    </style>
+
+    <style name="Widget.Nova.DialogButtonPrimary.PathofExile2" parent="@style/Widget.Nova.DialogButton.PathofExile2">
+        <item name="android:background">@drawable/bg_nova_dialog_button_primary_poe2</item>
+        <item name="android:textColor">@color/nova_poe2_accent_on</item>
+    </style>
+
+    <style name="Widget.Nova.DialogButton.GTAVIViceSunset" parent="android:Widget.Material.Button.Borderless">
+        <item name="android:background">@drawable/bg_nova_dialog_button_gta6sunset</item>
+        <item name="android:backgroundTint">@color/nova_gta6sunset_accent</item>
+        <item name="android:backgroundTintMode">src_in</item>
+        <item name="android:textColor">@color/nova_gta6sunset_accent</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:minWidth">96dp</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:paddingLeft">18dp</item>
+        <item name="android:paddingRight">18dp</item>
+        <item name="android:layout_marginStart">8dp</item>
+        <item name="android:layout_marginBottom">4dp</item>
+    </style>
+
+    <style name="Widget.Nova.DialogButtonPrimary.GTAVIViceSunset" parent="@style/Widget.Nova.DialogButton.GTAVIViceSunset">
+        <item name="android:background">@drawable/bg_nova_dialog_button_primary_gta6sunset</item>
+        <item name="android:textColor">@color/nova_gta6sunset_accent_on</item>
+    </style>
+
+    <style name="Widget.Nova.DialogButton.GTAVIViceNight" parent="android:Widget.Material.Button.Borderless">
+        <item name="android:background">@drawable/bg_nova_dialog_button_gta6night</item>
+        <item name="android:backgroundTint">@color/nova_gta6night_accent</item>
+        <item name="android:backgroundTintMode">src_in</item>
+        <item name="android:textColor">@color/nova_gta6night_accent</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:minWidth">96dp</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:paddingLeft">18dp</item>
+        <item name="android:paddingRight">18dp</item>
+        <item name="android:layout_marginStart">8dp</item>
+        <item name="android:layout_marginBottom">4dp</item>
+    </style>
+
+    <style name="Widget.Nova.DialogButtonPrimary.GTAVIViceNight" parent="@style/Widget.Nova.DialogButton.GTAVIViceNight">
+        <item name="android:background">@drawable/bg_nova_dialog_button_primary_gta6night</item>
+        <item name="android:textColor">@color/nova_gta6night_accent_on</item>
+    </style>
+</resources>

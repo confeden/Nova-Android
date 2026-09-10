@@ -96,6 +96,7 @@ object SessionReapply {
             putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_HOST, clientData.getTrafficMaskHost())
             putExtra(NovaVpnService.EXTRA_REAPPLY_SNI_MASK_MODE, clientData.getSniMaskMode())
             putExtra(NovaVpnService.EXTRA_REAPPLY_SNI_MASK_LIST, clientData.getSniCustomListRaw())
+            putExtra(NovaVpnService.EXTRA_REAPPLY_TUNNEL_MTU, clientData.getTunnelMtu())
             // «Обход по доменам» — по той же причине: список, записанный экраном, в
             // процессе `:vpn` не виден, и без extras он бы сохранялся и не действовал.
             putExtra(
@@ -165,6 +166,13 @@ object SessionReapply {
 
     /** Желаемый транспорт по текущим предпочтениям — он же уходит в состояние службы. */
     fun desiredBackend(clientData: ClientData): String {
+        // TOR проверяется первым: `shouldUseWarpTransport` отвечает на него `false`,
+        // и без этой ветки переприменение настроек на живом Tor объявляло бы
+        // желаемым транспортом встроенную Opera — то есть просило бы службу
+        // подменить выбранное пользователем (I1).
+        if (clientData.getExitRegionPreference().trim().lowercase() == ConnectionSelectorPolicy.CHIP_TOR) {
+            return NovaVpnService.BACKEND_TOR
+        }
         return if (clientData.shouldUseWarpTransport()) {
             NovaVpnService.BACKEND_WARP
         } else {

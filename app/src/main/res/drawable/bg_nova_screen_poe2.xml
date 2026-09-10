@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Сгенерировано tools/gen_nova_themes.py. Руками не править:
+     правка переживёт ровно до следующего запуска генератора. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:angle="270"
+        android:startColor="#0E1012"
+        android:centerColor="#121517"
+        android:endColor="#16191C"
+        android:type="linear" />
+</shape>

@@ -3,7 +3,6 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#121212"
     android:padding="16dp">
 
     <TextView
@@ -12,7 +11,7 @@
         android:layout_height="wrap_content"
         android:fontFamily="sans-serif-medium"
         android:text="Конфигурации"
-        android:textColor="#50C878"
+        android:textColor="?attr/novaAccent"
         android:textSize="24sp"
         android:textStyle="bold"
         app:layout_constraintEnd_toEndOf="parent"
@@ -41,7 +40,7 @@
             android:singleLine="true"
             android:text="Сгенерировать новые"
             android:textSize="16sp"
-            android:textColor="#FFFFFF"
+            android:textColor="?attr/novaTextTitle"
             android:visibility="gone" />
 
         <TextView
@@ -56,7 +55,7 @@
             android:gravity="center"
             android:singleLine="true"
             android:text="Управление конфигурациями"
-            android:textColor="#FFFFFF" />
+            android:textColor="?attr/novaTextTitle" />
 
         <TextView
             android:id="@+id/btn_adapt_network"
@@ -70,7 +69,7 @@
             android:gravity="center"
             android:singleLine="true"
             android:text="Адаптация к условиям сети"
-            android:textColor="#FFFFFF" />
+            android:textColor="?attr/novaTextTitle" />
 
         <TextView
             android:id="@+id/btn_imported_only"
@@ -84,7 +83,7 @@
             android:gravity="center"
             android:singleLine="true"
             android:text="Встроенные конфигурации"
-            android:textColor="#FFFFFF" />
+            android:textColor="?attr/novaTextTitle" />
     </LinearLayout>
 
     <TextView
@@ -94,7 +93,7 @@
         android:layout_marginTop="14dp"
         android:fontFamily="sans-serif-medium"
         android:text="Готово к проверке"
-        android:textColor="#FFFFFF"
+        android:textColor="?attr/novaTextTitle"
         android:textSize="15sp"
         android:textStyle="bold"
         app:layout_constraintEnd_toEndOf="parent"
@@ -108,7 +107,7 @@
         android:layout_marginTop="4dp"
         android:fontFamily="sans-serif-medium"
         android:text="Успешных: 0"
-        android:textColor="#50C878"
+        android:textColor="?attr/novaAccent"
         android:textSize="13sp"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@id/tv_discovery_status" />
@@ -138,7 +137,7 @@
         android:layout_marginTop="18dp"
         android:fontFamily="sans-serif"
         android:text="Пока нет встроенных конфигураций."
-        android:textColor="#AAAAAA"
+        android:textColor="?attr/novaTextHint"
         android:textSize="14sp"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
@@ -149,8 +148,7 @@
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginTop="10dp"
-        android:background="@drawable/bg_settings_item"
-        android:backgroundTint="#20FFFFFF"
+        android:background="?attr/novaCardBackground"
         android:hint="Поиск: хост, порт, режим"
         android:imeOptions="actionSearch"
         android:inputType="text"
@@ -158,8 +156,8 @@
         android:minHeight="44dp"
         android:paddingStart="12dp"
         android:paddingEnd="12dp"
-        android:textColor="#FFFFFF"
-        android:textColorHint="#8899A0"
+        android:textColor="?attr/novaTextTitle"
+        android:textColorHint="?attr/novaTextHint"
         android:textSize="14sp"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"

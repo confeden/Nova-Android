@@ -294,19 +294,40 @@ object ProtonProfileManager {
         val certAlive = account != null &&
             account.certExpiresAt > System.currentTimeMillis() + CERT_RENEW_MARGIN_MS
 
-        // Сохранённый список принимается только если он **измерен**. Профили без
-        // единого ответа на пробу лежат в порядке нагрузки, а не задержки, и
-        // считать такой набор готовым значило бы навсегда закрепить неудачный
-        // замер: следующий заход просто вернул бы его же.
+        // Сохранённый список принимается измеренным — **или недавно померенным**.
+        //
+        // «Только измеренный» было бы верно, если бы неудачный замер значил «ещё
+        // не мерили». Он значит другое: на сети, где узлы Proton не отвечают на
+        // пробу (открытый P11, а на части сетей молчит и запасной TCP по 443),
+        // измеренным набор не станет никогда — и каждый вызов с экрана заводил
+        // полный сорокасекундный прогон, который заканчивался тем же списком в
+        // том же порядке нагрузки. Фоновая подготовка от этого защищена давно:
+        // `isPreparationComplete` замер намеренно не проверяет. Здесь та же
+        // защита, но с повтором по времени, чтобы прежнее опасение осталось
+        // закрытым — неудачный замер не закрепляется навсегда, сеть меняется, и
+        // через час замер идёт снова (`PROBE_REFRESH_MS`).
         val measured = existing.any { it.pingMs > 0 }
-        if (!force && !needsLiveNodes(store) && certAlive && existing.size >= TARGET_COUNT && measured) {
+        val probeRetryDue =
+            System.currentTimeMillis() - store.readProbeCheckedAt() > ProtonProfileStore.PROBE_REFRESH_MS
+        if (!force &&
+            !needsLiveNodes(store) &&
+            certAlive &&
+            existing.size >= TARGET_COUNT &&
+            (measured || !probeRetryDue)
+        ) {
             // Их могло накопиться больше цели — оставляем лучшие и не ходим в сеть.
             val trimmed = existing.sortedBy { effectivePing(it) }.take(TARGET_COUNT)
             if (trimmed.size != existing.size) store.writeProfiles(trimmed)
-            val best = trimmed.firstOrNull()
+            val bestPingMs = trimmed.firstOrNull()?.pingMs ?: 0
             return Outcome(
                 profiles = trimmed,
-                message = "Proton: готово, ${trimmed.size} шт., лучший ${best?.pingMs ?: 0} мс",
+                // «лучший 0 мс» читается как измерение. Замера нет — набор лежит в
+                // порядке нагрузки, и сказать надо именно это (I4).
+                message = if (bestPingMs > 0) {
+                    "Proton: готово, ${trimmed.size} шт., лучший $bestPingMs мс"
+                } else {
+                    "Proton: готово, ${trimmed.size} шт., замер не прошёл"
+                },
                 ready = true,
             )
         }
@@ -460,13 +481,35 @@ object ProtonProfileManager {
 
         val probed = if (probeRequested) awaitProbe(store, candidates.size) else null
 
+        // Отметка о попытке замера — до разбора её итога, как и у списка узлов.
+        // Ниже несколько выходов (`return` в запасной ветке, четыре исхода в
+        // `when`), и отметка, поставленная в одном из них, не покрыла бы
+        // остальные: именно так предикат «набор готов» и остался бы ложным
+        // навсегда на сети, где никто не отвечает.
+        //
+        // Но только если о замере правда просили. `requestProbe` отказывает,
+        // когда система не даёт поднять службу переднего плана (ушли из
+        // приложения посреди сорокасекундного прогона — обычное дело), и мерить
+        // тогда никто не начинал. Отметить это как попытку значило бы на час
+        // закрыть замер по причине, к сети отношения не имеющей: следующий заход
+        // с экрана вернул бы набор в порядке нагрузки, ни разу не померив, на
+        // совершенно исправной сети.
+        //
+        // Аренда проверяется по той же причине, что и перед записью личности:
+        // прогон, у которого её отобрал явный выбор пользователя, обязан
+        // закончиться, ничего не записав.
+        if (probeRequested && holdsLease(store, owner)) store.writeProbeAttempt()
+
         // Замер не дошёл до конца — но список-то выпущен, и выбрасывать его значит
         // отдать пользователю «Proton не готов» там, где готово всё, кроме порядка.
         // Раньше рабочий файл к этому моменту уже содержал кандидатов (их писали
         // прямо в него), и неудача замера оставляла их на месте сама собой. Теперь
         // кандидаты лежат отдельно, поэтому запасной путь нужен явный.
         val selected = probed?.takeIf { it.isNotEmpty() } ?: run {
-            val fallback = candidates.sortedBy { it.load }.take(TARGET_COUNT)
+            val fallback = ProtonProfileStore.expandPortFallbacks(
+                candidates.sortedBy { it.load },
+                TARGET_COUNT,
+            )
             LogManager.log(
                 if (!probeRequested) {
                     "Proton: службу не удалось попросить о замере"

@@ -54,6 +54,9 @@ class LocalProxyActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Тему ставим до super.onCreate: позже окно уже создано со старым фоном,
+        // и выбор доехал бы только до следующего открытия экрана.
+        NovaTheme.apply(this)
         super.onCreate(savedInstanceState)
         applyZeroTransitionOpen()
         setContentView(R.layout.activity_local_proxy)

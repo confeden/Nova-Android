@@ -3,7 +3,6 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:background="#121212"
     android:paddingLeft="16dp"
     android:paddingTop="16dp"
     android:paddingRight="16dp"
@@ -15,8 +14,7 @@
         android:minHeight="52dp"
         android:orientation="horizontal"
         android:gravity="center_vertical"
-        android:background="@drawable/bg_settings_item"
-        android:backgroundTint="#20FFFFFF"
+        android:background="?attr/novaCardBackground"
         android:padding="12dp"
         android:layout_marginBottom="12dp">
 
@@ -25,7 +23,7 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:text="Логи"
-            android:textColor="#FFFFFF"
+            android:textColor="?attr/novaTextTitle"
             android:textSize="16sp"
             android:textStyle="bold" />
 
@@ -39,8 +37,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:background="@drawable/bg_settings_item"
-        android:backgroundTint="#20FFFFFF"
+        android:background="?attr/novaCardBackground"
         android:padding="12dp"
         android:layout_marginBottom="12dp">
 
@@ -49,7 +46,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="Состояние: Выключено"
-            android:textColor="#AAAAAA"
+            android:textColor="?attr/novaTextHint"
             android:textSize="12sp"
             android:layout_marginBottom="10dp" />
 
@@ -64,32 +61,32 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="ERROR"
-                android:textColor="#FFFFFF"
-                android:buttonTint="#13A10E" />
+                android:textColor="?attr/novaTextTitle"
+                android:buttonTint="?attr/novaAccent" />
 
             <RadioButton
                 android:id="@+id/rb_logs_warn"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="WARN"
-                android:textColor="#FFFFFF"
-                android:buttonTint="#13A10E" />
+                android:textColor="?attr/novaTextTitle"
+                android:buttonTint="?attr/novaAccent" />
 
             <RadioButton
                 android:id="@+id/rb_logs_info"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="INFO"
-                android:textColor="#FFFFFF"
-                android:buttonTint="#13A10E" />
+                android:textColor="?attr/novaTextTitle"
+                android:buttonTint="?attr/novaAccent" />
 
             <RadioButton
                 android:id="@+id/rb_logs_debug"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="DEBUG"
-                android:textColor="#FFFFFF"
-                android:buttonTint="#13A10E" />
+                android:textColor="?attr/novaTextTitle"
+                android:buttonTint="?attr/novaAccent" />
         </RadioGroup>
     </LinearLayout>
 
@@ -106,11 +103,11 @@
             android:layout_weight="1"
             android:gravity="center"
             android:text="Обновить"
-            android:textColor="#FFFFFF"
+            android:textColor="?attr/novaTextTitle"
             android:textSize="14sp"
             android:textStyle="bold"
-            android:background="@drawable/bg_settings_item"
-            android:backgroundTint="#20FFFFFF" />
+            android:background="?attr/novaCardBackground"
+            />
 
         <Space
             android:layout_width="8dp"
@@ -123,11 +120,11 @@
             android:layout_weight="1"
             android:gravity="center"
             android:text="Скопировать лог"
-            android:textColor="#FFFFFF"
+            android:textColor="?attr/novaTextTitle"
             android:textSize="14sp"
             android:textStyle="bold"
-            android:background="@drawable/bg_settings_item"
-            android:backgroundTint="#20FFFFFF" />
+            android:background="?attr/novaCardBackground"
+            />
 
         <Space
             android:layout_width="8dp"
@@ -140,18 +137,18 @@
             android:layout_weight="1"
             android:gravity="center"
             android:text="Отправить лог"
-            android:textColor="#FFFFFF"
+            android:textColor="?attr/novaTextTitle"
             android:textSize="14sp"
             android:textStyle="bold"
-            android:background="@drawable/bg_settings_item"
-            android:backgroundTint="#20FFFFFF" />
+            android:background="?attr/novaCardBackground"
+            />
     </LinearLayout>
 
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:text="Предпросмотр"
-        android:textColor="#FFFFFF"
+        android:textColor="?attr/novaTextTitle"
         android:textSize="14sp"
         android:textStyle="bold"
         android:layout_marginBottom="8dp" />
@@ -160,8 +157,7 @@
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:background="@drawable/bg_settings_item"
-        android:backgroundTint="#101010"
+        android:background="?attr/novaCardBackground"
         android:fillViewport="true">
 
         <TextView
@@ -170,7 +166,7 @@
             android:layout_height="wrap_content"
             android:padding="12dp"
             android:text="Логов пока нет"
-            android:textColor="#D9D9D9"
+            android:textColor="?attr/novaTextHint"
             android:textSize="12sp"
             android:fontFamily="monospace"
             android:textIsSelectable="true" />

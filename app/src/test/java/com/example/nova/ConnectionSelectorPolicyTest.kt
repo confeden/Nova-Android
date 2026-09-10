@@ -79,7 +79,7 @@ class ConnectionSelectorPolicyTest {
 
     /** Строка подрегионов есть только там, где подрегион существует. */
     @Test
-    fun `sub regions exist only for opera and proton`() {
+    fun `sub regions exist only for opera, proton and tor`() {
         assertEquals(
             listOf("eu" to "EU", "us" to "US"),
             ConnectionSelectorPolicy.subRegionsFor("opera", emptyList()),
@@ -92,9 +92,56 @@ class ConnectionSelectorPolicyTest {
         )
         // Профилей нет — обещать страны нечем, и «AUTO» в одиночку бессмысленна.
         assertTrue(ConnectionSelectorPolicy.subRegionsFor("proton", emptyList()).isEmpty())
-        for (chip in listOf("auto", "ru", "masque", "tor")) {
+        // У Tor подвыбор — это способ входа, а не регион. Порядок закреплён
+        // тестом намеренно: он означает «по убыванию вероятности пройти из
+        // России», и переставить его молча нельзя.
+        assertEquals(
+            listOf(
+                "webtunnel" to "WEBTUNNEL",
+                "obfs4" to "OBFS4",
+                "vanilla" to "VANILLA",
+                "direct" to "БЕЗ МОСТОВ",
+            ),
+            ConnectionSelectorPolicy.subRegionsFor("tor", emptyList()),
+        )
+        // Умолчание — первый в списке, иначе порядок обещал бы одно, а приложение
+        // делало другое.
+        assertEquals(
+            ConnectionSelectorPolicy.TOR_ENTRY_MODES.first().first,
+            ConnectionSelectorPolicy.DEFAULT_TOR_ENTRY,
+        )
+        // Прокси в ядре нужен только транспортам; мосты — всем, кроме прямого входа.
+        assertTrue(ConnectionSelectorPolicy.torEntryUsesPluggableTransport("webtunnel"))
+        assertTrue(ConnectionSelectorPolicy.torEntryUsesPluggableTransport("obfs4"))
+        assertFalse(ConnectionSelectorPolicy.torEntryUsesPluggableTransport("vanilla"))
+        assertFalse(ConnectionSelectorPolicy.torEntryUsesPluggableTransport("direct"))
+        assertEquals("webtunnel", ConnectionSelectorPolicy.torBridgeTransportFor("webtunnel"))
+        assertEquals("vanilla", ConnectionSelectorPolicy.torBridgeTransportFor("vanilla"))
+        assertEquals("", ConnectionSelectorPolicy.torBridgeTransportFor("direct"))
+        for (chip in listOf("auto", "ru", "masque")) {
             assertTrue(chip, ConnectionSelectorPolicy.subRegionsFor(chip, listOf("NL")).isEmpty())
         }
+    }
+
+    /** Подпись строки подвыбора зависит от кнопки: у Tor выбирают вход, а не регион. */
+    @Test
+    fun `sub region prefix says what is being chosen`() {
+        assertEquals("Регион: ", ConnectionSelectorPolicy.subRegionPrefixFor("opera"))
+        assertEquals("Регион: ", ConnectionSelectorPolicy.subRegionPrefixFor("proton"))
+        assertEquals("Вход: ", ConnectionSelectorPolicy.subRegionPrefixFor("tor"))
+    }
+
+    /** Незнакомый способ входа — это откат версии или правка файла руками. */
+    @Test
+    fun `unknown tor entry falls back to obfs4`() {
+        assertEquals("webtunnel", ConnectionSelectorPolicy.normalizeTorEntry(null))
+        assertEquals("webtunnel", ConnectionSelectorPolicy.normalizeTorEntry(""))
+        // snowflake в ядро не собран (pion/webrtc и `anet` ломают компоновку) —
+        // значение из чужой версии обязано откатываться на умолчание, а не уходить
+        // в фазу как есть.
+        assertEquals("webtunnel", ConnectionSelectorPolicy.normalizeTorEntry("snowflake"))
+        assertEquals("vanilla", ConnectionSelectorPolicy.normalizeTorEntry(" VANILLA "))
+        assertEquals("direct", ConnectionSelectorPolicy.normalizeTorEntry("direct"))
     }
 
     @Test

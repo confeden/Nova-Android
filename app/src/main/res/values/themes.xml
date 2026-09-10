@@ -34,7 +34,43 @@
         <item name="android:windowExitTransition">@null</item>
         <item name="android:windowReenterTransition">@null</item>
         <item name="android:windowReturnTransition">@null</item>
-        <item name="android:windowBackground">@drawable/bg_liquid_glass_screen</item>
+        <!--
+            Умолчания словаря темы (values/attrs_nova_theme.xml). Совпадают с
+            «Aurora mint» — ближайшей к прежнему виду из семи. Нужны отдельно от
+            themes_nova.xml, чтобы экран, которому тему забыли поставить, получил
+            рабочую палитру, а не нули: атрибут без значения — это не «серый по
+            умолчанию», это исключение при раздувании разметки.
+        -->
+        <item name="android:windowBackground">@drawable/bg_nova_screen_aurora</item>
+        <item name="novaCardBackground">@drawable/bg_nova_card_aurora</item>
+        <item name="novaFieldBackground">@drawable/bg_nova_field_aurora</item>
+        <item name="novaDialogButton">@drawable/bg_nova_dialog_button_aurora</item>
+        <item name="novaDialogButtonPrimary">@drawable/bg_nova_dialog_button_primary_aurora</item>
+        <item name="android:alertDialogTheme">@style/Theme.Nova.Dialog.Auroramint</item>
+        <item name="alertDialogTheme">@style/Theme.Nova.Dialog.Auroramint</item>
+        <item name="colorAccent">@color/nova_aurora_accent</item>
+        <item name="android:colorAccent">@color/nova_aurora_accent</item>
+        <item name="colorControlActivated">@color/nova_aurora_accent</item>
+        <item name="android:colorControlActivated">@color/nova_aurora_accent</item>
+        <item name="colorControlNormal">@color/nova_aurora_text_value</item>
+        <item name="android:colorControlNormal">@color/nova_aurora_text_value</item>
+        <item name="android:textColorHint">@color/nova_aurora_text_hint</item>
+        <item name="novaAccent">@color/nova_aurora_accent</item>
+        <item name="novaAccentDim">@color/nova_aurora_accent_dim</item>
+        <item name="novaAccentOn">@color/nova_aurora_accent_on</item>
+        <item name="novaSeparator">@color/nova_aurora_separator</item>
+        <item name="novaTextGroupFrom">@color/nova_aurora_group_from</item>
+        <item name="novaTextGroupTo">@color/nova_aurora_group_to</item>
+        <item name="novaTextTitle">@color/nova_aurora_text_title</item>
+        <item name="novaTextValue">@color/nova_aurora_text_value</item>
+        <item name="novaTextHint">@color/nova_aurora_text_hint</item>
+        <item name="novaSwitchOn">@color/nova_aurora_switch_on</item>
+        <item name="novaSwitchOff">@color/nova_aurora_switch_off</item>
+        <item name="novaSwitchThumbOn">@color/nova_aurora_thumb_on</item>
+        <item name="novaSwitchThumbOff">@color/nova_aurora_thumb_off</item>
+        <item name="novaIconTint">@color/nova_aurora_icon_tint</item>
+        <item name="novaCardFill">@color/nova_aurora_card_fill</item>
+        <item name="novaCardStroke">@color/nova_aurora_card_stroke</item>
         <item name="switchStyle">@style/LiquidGlassSwitch</item>
         <item name="android:switchStyle">@style/LiquidGlassSwitch</item>
         <item name="android:activityOpenEnterAnimation">@anim/no_anim</item>

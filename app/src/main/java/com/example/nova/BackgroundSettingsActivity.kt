@@ -10,6 +10,9 @@ class BackgroundSettingsActivity : AppCompatActivity() {
     private lateinit var clientData: ClientData
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Тему ставим до super.onCreate: позже окно уже создано со старым фоном,
+        // и выбор доехал бы только до следующего открытия экрана.
+        NovaTheme.apply(this)
         super.onCreate(savedInstanceState)
         LogManager.setAppContext(this)
         setContentView(R.layout.activity_background_settings)

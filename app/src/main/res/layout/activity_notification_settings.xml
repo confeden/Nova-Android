@@ -14,7 +14,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="Уведомление"
-            android:textColor="#50C878"
+            android:textColor="?attr/novaAccent"
             android:textSize="24sp"
             android:textStyle="bold" />
 
@@ -22,8 +22,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:background="@drawable/bg_settings_item"
-            android:backgroundTint="#20FFFFFF"
+            android:background="?attr/novaCardBackground"
             android:gravity="center_vertical"
             android:minHeight="64dp"
             android:orientation="horizontal"
@@ -39,7 +38,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="Скорость и транспорт"
-                    android:textColor="#FFFFFF"
+                    android:textColor="?attr/novaTextTitle"
                     android:textSize="16sp"
                     android:textStyle="bold" />
 
@@ -48,7 +47,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="3dp"
                     android:text="Показывать в шторке скорость обмена и текущий регион с протоколом"
-                    android:textColor="#AAAAAA"
+                    android:textColor="?attr/novaTextHint"
                     android:textSize="12sp" />
             </LinearLayout>
 
@@ -64,7 +63,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
-            android:textColor="#7FA9C4"
+            android:textColor="?attr/novaTextValue"
             android:textSize="12sp" />
     </LinearLayout>
 </ScrollView>

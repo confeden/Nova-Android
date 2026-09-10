@@ -103,8 +103,8 @@ val tgCfWsSecret: String = run {
  * `NOVA_OPERA_RELAY_PASSWORD` остаётся аварийной подменой — но сборка с ней
  * перестаёт быть воспроизводимой, поэтому публиковать её нельзя.
  */
-val relayKeyId: String = "nova-android-155"
-val relayKeyToken: String = "PkZoJVMNlwnnmDWXobQbTVGPDCT53yeH"
+val relayKeyId: String = "nova-android-156"
+val relayKeyToken: String = "UcmNokqhV0OKWSqcXSm1DK81N7eTHfwR"
 
 val operaRelayPassword: String = run {
     val override = System.getenv("NOVA_OPERA_RELAY_PASSWORD")?.trim()?.takeIf { it.isNotEmpty() }
@@ -156,8 +156,8 @@ android {
         // регулярным выражением (`fdroid checkupdates`, режим `Tags`) и переменную
         // не раскрывает — со `versionCode = appVersionCode` он не находит версию
         // вовсе и не видит новых релизов. Единственный источник версии — здесь.
-        versionCode = 155
-        versionName = "1.32.0"
+        versionCode = 156
+        versionName = "1.32.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -463,6 +463,11 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.10.5")
     // Local .aar library from Go will be added here later
     implementation(files("libs/nova-core-api24-stripped.aar"))
+    // Настоящий tor (BSD-3), запускаемый через JNI в нашем же процессе, а не
+    // отдельным исполняемым файлом: сокеты чужого процесса нечем пометить
+    // `VpnService.protect()`, и мост завернулся бы в собственный туннель (G154).
+    // Версия 0.4.8.x, а не 0.4.9.x: та требует compileSdk 37, у нас 35.
+    implementation("info.guardianproject:tor-android:0.4.8.22")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
 }

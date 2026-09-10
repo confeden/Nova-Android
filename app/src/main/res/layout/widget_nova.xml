@@ -15,10 +15,15 @@
     рамка тянется по ширине, а по высоте остаётся прежней и стоит по центру,
     вместо того чтобы превращаться в пустую коробку.
 
-    Обрезки больше нет, потому что размеры в `widget_nova_info.xml` объявлены по
-    реальному содержимому — 12+52+16+52+12 = 144dp в ширину и 12+52+12 = 76dp в
-    высоту, — а не по формуле «две ячейки на одну». Прежние 110x40dp были меньше
-    самих кнопок, и лаунчер честно резал то, что не поместилось.
+    **Кнопки не обрезаются, потому что уменьшаются.** Круг раньше был фоном вида,
+    а фон рисуется по размеру вида: когда лаунчер отводил строку ниже, чем
+    12+52+12 = 76dp, круги честно резались сверху и снизу. Теперь круг вместе со
+    значком лежит в `src` (`widget_btn_power_off` и соседи), а вид объявлен
+    `wrap_content` с `adjustViewBounds` и `fitCenter` — под тесным родителем
+    ImageView уменьшает рисунок, сохраняя пропорции, вместо того чтобы обрезать
+    его. Собственный размер рисунка 48dp, полный размер содержимого
+    10+48+14+48+10 = 130dp на 10+48+10 = 68dp, и это уже помещается в строку
+    везде, где помещалось прежнее объявление 2x1 из `widget_nova_info.xml`.
 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_root"
@@ -33,25 +38,25 @@
         android:background="@drawable/bg_widget_frame"
         android:gravity="center"
         android:orientation="horizontal"
-        android:padding="12dp">
+        android:padding="10dp">
 
         <ImageView
             android:id="@+id/widget_btn_power"
-            android:layout_width="52dp"
-            android:layout_height="52dp"
-            android:background="@drawable/bg_widget_power_off"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:adjustViewBounds="true"
             android:contentDescription="Подключить или отключить Nova"
-            android:padding="13dp"
-            android:src="@drawable/ic_widget_power" />
+            android:scaleType="fitCenter"
+            android:src="@drawable/widget_btn_power_off" />
 
         <ImageView
             android:id="@+id/widget_btn_next"
-            android:layout_width="52dp"
-            android:layout_height="52dp"
-            android:layout_marginStart="16dp"
-            android:background="@drawable/bg_widget_next"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="14dp"
+            android:adjustViewBounds="true"
             android:contentDescription="Следующий профиль"
-            android:padding="14dp"
-            android:src="@drawable/ic_widget_next" />
+            android:scaleType="fitCenter"
+            android:src="@drawable/widget_btn_next" />
     </LinearLayout>
 </FrameLayout>

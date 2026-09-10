@@ -28,6 +28,9 @@ class SniMaskSettingsActivity : AppCompatActivity() {
     private lateinit var tvState: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Тему ставим до super.onCreate: позже окно уже создано со старым фоном,
+        // и выбор доехал бы только до следующего открытия экрана.
+        NovaTheme.apply(this)
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_sni_mask_settings)
         LogManager.setAppContext(this)

@@ -3550,7 +3550,52 @@ object LogManager {
 
 
 
-    private fun record(level: DiagnosticLogLevel, tag: String, message: String) {
+    /**
+     * Шапка сеанса: одна строка на процесс, и она стоит первой в журнале.
+     *
+     * Журнал приходит владельцу без сопроводительного письма, а первые вопросы к
+     * нему всегда одни и те же — какая сборка, какой Android, какое устройство,
+     * какой из двух процессов пишет. Раньше на них отвечали перепиской; теперь
+     * отвечает первая строка. Пишется лениво, при первой же записи после того,
+     * как появился контекст: до него версии взять неоткуда.
+     */
+    @Volatile
+    private var sessionHeaderWritten = false
+    private fun writeSessionHeaderIfNeeded() {
+        if (sessionHeaderWritten) return
+        if (appContext == null) return
+        synchronized(this) {
+            if (sessionHeaderWritten) return
+            sessionHeaderWritten = true
+        }
+        val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "?"
+        val process = currentProcessName()
+        record(
+            DiagnosticLogLevel.INFO,
+            DEFAULT_TAG,
+            "Nova ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}, ${BuildConfig.FLAVOR}) - " +
+                "Android ${android.os.Build.VERSION.RELEASE} (SDK ${android.os.Build.VERSION.SDK_INT}), " +
+                "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, $abi, процесс $process",
+        )
+    }
+    /**
+     * Имя процесса — из procfs, а не из `Application.getProcessName()`: тот
+     * появился в API 28, а у нас minSdk 24, и подпись `:vpn` нужна как раз на
+     * старых устройствах, где расходятся два процесса.
+     */
+    private fun currentProcessName(): String {
+        return try {
+            java.io.File("/proc/self/cmdline").readText()
+                .filter { it.code != 0 }
+                .trim()
+                .substringAfterLast(':', "")
+                .ifBlank { "основной" }
+        } catch (error: Throwable) {
+            "?"
+        }
+    }
+    private fun record(level: DiagnosticLogLevel, tag: String, message: String) {
+        writeSessionHeaderIfNeeded()
 
 
 

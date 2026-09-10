@@ -121,7 +121,73 @@ object AppUpdateManager {
     private const val DOWNLOAD_RETRY_DELAY_MS = 1500L
     private const val NOTIFICATION_UPDATED_ID = 2203
     private val updateCheckInProgress = AtomicBoolean(false)
+
+    /**
+     * Когда была захвачена [updateCheckInProgress]. Ноль — не захвачена.
+     *
+     * Зачем время, а не один признак. Признак снимается в `finally`, и пока поток
+     * жив это верно — но «жив» и «работает» разные вещи: сетевой вызов, который не
+     * уложился в свои сроки (перенаправление, TLS, ленты, до которых из России
+     * нет пути), держит его сколько угодно, а плашка на главном экране всё это
+     * время показывает «ПРОВЕРКА ОБНОВЛЕНИЯ» и не нажимается. Наблюдалось на
+     * 1.32.0. Признак без срока годности — это I4 в чистом виде: состояние,
+     * которое некому опровергнуть.
+     */
+    @Volatile
+    private var updateCheckStartedAt = 0L
+
+    /**
+     * Через сколько захваченный признак считается протухшим.
+     *
+     * Честная проверка укладывается заметно быстрее: [UPDATE_URLS] и релиз на
+     * GitHub опрашиваются по очереди с `connectTimeout` и `readTimeout` по 6 с,
+     * то есть худший **правильный** случай это около полуминуты. Полторы минуты
+     * оставляют запас на медленную сеть и всё равно возвращают экран к жизни.
+     */
+    private const val CHECK_STALE_AFTER_MS = 90_000L
+
     private val installSessionInProgress = AtomicBoolean(false)
+
+    /**
+     * Захватить признак проверки, отобрав его у протухшего вызова.
+     *
+     * @return true, если проверку можно начинать.
+     */
+    private fun acquireCheckSlot(): Boolean {
+        if (updateCheckInProgress.compareAndSet(false, true)) {
+            updateCheckStartedAt = System.currentTimeMillis()
+            return true
+        }
+        val startedAt = updateCheckStartedAt
+        val ageMs = System.currentTimeMillis() - startedAt
+        if (startedAt <= 0L || ageMs < CHECK_STALE_AFTER_MS) return false
+        LogManager.log(
+            "Проверка обновлений висит ${ageMs / 1000} с — забираем признак себе. " +
+                "Прошлый вызов, если он ещё жив, снимет его и никому не помешает."
+        )
+        updateCheckStartedAt = System.currentTimeMillis()
+        return true
+    }
+
+    private fun releaseCheckSlot() {
+        updateCheckStartedAt = 0L
+        updateCheckInProgress.set(false)
+    }
+
+    /**
+     * Идёт ли проверка **прямо сейчас**, а не «когда-то началась».
+     *
+     * Протухший признак здесь не просто игнорируется, а снимается: иначе экран
+     * перестал бы врать, а следующая проверка всё равно упиралась бы в занятость.
+     */
+    private fun checkIsRunningNow(): Boolean {
+        if (!updateCheckInProgress.get()) return false
+        val startedAt = updateCheckStartedAt
+        if (startedAt > 0L && System.currentTimeMillis() - startedAt < CHECK_STALE_AFTER_MS) return true
+        LogManager.log("Проверка обновлений не уложилась в ${CHECK_STALE_AFTER_MS / 1000} с — снимаем признак.")
+        releaseCheckSlot()
+        return false
+    }
 
     /**
      * Сколько процентов APK уже переложено в сессию установщика.
@@ -263,7 +329,7 @@ object AppUpdateManager {
         }
     }
 
-    fun isCheckInProgress(): Boolean = updateCheckInProgress.get()
+    fun isCheckInProgress(): Boolean = checkIsRunningNow()
 
     fun enqueueImmediateCheck(context: Context, reason: String) {
         if (!isUpdaterEnabled) return
@@ -285,7 +351,7 @@ object AppUpdateManager {
 
     fun performUpdateCheck(context: Context): Boolean {
         if (!isUpdaterEnabled) return false
-        if (!updateCheckInProgress.compareAndSet(false, true)) {
+        if (!acquireCheckSlot()) {
             LogManager.log("Проверка обновлений уже выполняется. Повторный запуск пропускаем.")
             return false
         }
@@ -321,7 +387,7 @@ object AppUpdateManager {
         showAvailableNotification(appContext, metadata)
         return true
         } finally {
-            updateCheckInProgress.set(false)
+            releaseCheckSlot()
         }
     }
 
@@ -335,7 +401,7 @@ object AppUpdateManager {
                 message = "Обновления в этой сборке выдаёт F-Droid",
             )
         }
-        if (!updateCheckInProgress.compareAndSet(false, true)) {
+        if (!acquireCheckSlot()) {
             return ManualUpdateCheckResult(
                 kind = ManualUpdateCheckResult.Kind.CHECKING,
                 message = "Проверка уже выполняется",
@@ -411,7 +477,7 @@ object AppUpdateManager {
                 )
             }
         } finally {
-            updateCheckInProgress.set(false)
+            releaseCheckSlot()
         }
     }
 
@@ -537,7 +603,7 @@ object AppUpdateManager {
             )
         }
 
-        if (updateCheckInProgress.get()) {
+        if (checkIsRunningNow()) {
             return UpdateDownloadProgress(
                 state = UpdateDownloadProgress.State.CHECKING,
                 version = clientData.getLastUpdateVersion(),
@@ -1030,10 +1096,16 @@ object AppUpdateManager {
         NotificationManagerCompat.from(context.applicationContext).cancel(NOTIFICATION_UPDATED_ID)
     }
 
+    /**
+     * @param showDisconnect показывать ли кнопку «Отключить». Не всегда:
+     *        уведомление остаётся висеть и когда туннель уже выключен, а работает
+     *        одна раздача, — там эта кнопка обещала бы не то, что сделает.
+     */
     fun buildForegroundVpnNotification(
         context: Context,
         channelId: String,
         subtitle: String = "",
+        showDisconnect: Boolean = false,
     ): Notification {
         val readyVersion = getReadyDownloadedVersion(context)
         val openAppIntent = buildOpenAppPendingIntent(context, 5005)
@@ -1045,6 +1117,20 @@ object AppUpdateManager {
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setAutoCancel(false)
             .setContentIntent(openAppIntent)
+
+        // Действие добавляется до ветки с готовым обновлением намеренно:
+        // `DecoratedCustomViewStyle` рисует кнопки под своим макетом, поэтому
+        // отключиться можно и когда сверху висит «обновление готово». Иначе
+        // человек терял бы кнопку ровно в тот день, когда вышла новая версия.
+        if (showDisconnect) {
+            builder.addAction(
+                NotificationCompat.Action.Builder(
+                    R.drawable.ic_widget_power,
+                    "Отключить",
+                    buildDisconnectPendingIntent(context),
+                ).build()
+            )
+        }
 
         if (readyVersion.isNotBlank()) {
             val installIntent = buildInstallPendingIntent(context, 5004)
@@ -1485,6 +1571,31 @@ object AppUpdateManager {
             context,
             requestCode,
             installIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    /**
+     * Намерение кнопки «Отключить».
+     *
+     * Широковещание, а не намерение прямо в службу: останов снимает признаки
+     * через `SharedPreferences`, а они кэшируются попроцессно (I2), и снять их
+     * обязан **основной** процесс. Приёмник объявлен без `android:process`,
+     * поэтому попадает именно туда — см. [NovaNotificationActionReceiver].
+     *
+     * `setPackage` стоит потому, что намерение с собственным действием без него
+     * считается неявным, а неявные широковещания к приёмнику из манифеста
+     * Android 8 и старше не доставляет вовсе.
+     */
+    private fun buildDisconnectPendingIntent(context: Context): PendingIntent {
+        val intent = Intent(NovaNotificationActionReceiver.ACTION_DISCONNECT).apply {
+            setPackage(context.packageName)
+            setClass(context, NovaNotificationActionReceiver::class.java)
+        }
+        return PendingIntent.getBroadcast(
+            context,
+            NovaNotificationActionReceiver.REQUEST_DISCONNECT,
+            intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
     }

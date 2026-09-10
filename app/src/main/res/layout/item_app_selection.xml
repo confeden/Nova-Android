@@ -22,7 +22,7 @@
             android:id="@+id/tv_name"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="#FFFFFF"
+            android:textColor="?attr/novaTextTitle"
             android:textSize="16sp"/>
 
         <!--
@@ -46,6 +46,6 @@
         android:id="@+id/cb_select"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:buttonTint="#13A10E"/>
+        android:buttonTint="?attr/novaAccent"/>
 
 </LinearLayout>

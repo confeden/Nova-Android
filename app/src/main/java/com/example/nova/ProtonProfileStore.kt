@@ -303,6 +303,26 @@ class ProtonProfileStore(context: Context) {
             true
         }
 
+    /** Когда профили последний раз **пытались** замерить. 0 — никогда. */
+    fun readProbeCheckedAt(): Long =
+        readAtomically(accountFile)
+            ?.let { runCatching { JSONObject(it).optLong("probe_checked_at", 0L) }.getOrDefault(0L) }
+            ?: 0L
+
+    /**
+     * Отмечает попытку замера — **любую**, удачную и нет.
+     *
+     * Момент, а не результат, ровно по той же причине, что и у
+     * [writeNodesAttempt]: на сети, где ни один узел не отвечает, отметка «есть
+     * измеренные профили» не появится никогда, и предикат «набор готов» остался
+     * бы ложным навсегда. См. [ProtonProfileStore.PROBE_REFRESH_MS].
+     */
+    fun writeProbeAttempt(atMs: Long = System.currentTimeMillis()) =
+        mutateAccountJson { json ->
+            json.put("probe_checked_at", atMs)
+            true
+        }
+
     // --- профили ------------------------------------------------------------
 
     fun readProfiles(): List<ProtonProfile> = readProfileList(profilesFile)
@@ -593,8 +613,116 @@ class ProtonProfileStore(context: Context) {
          * профилям по кругу: если оператор глушит один порт, кандидаты на нём просто
          * не отвечают на рукопожатие и отсеиваются замером, а список не остаётся
          * пустым.
+         *
+         * Список — тот же, что предлагает сам Proton. Дописывать сюда порты «на
+         * удачу» (123, 500) нельзя: узел на них не слушает, и каждая такая запись
+         * это выброшенная попытка ценой в полный таймаут рукопожатия.
          */
         val PORTS = listOf(51820, 443, 80, 88, 4500, 1194, 5060, 1224, 4569)
+
+        /**
+         * Сколько ближайших узлов **каждой страны** получают запасные порты.
+         *
+         * Зачем вообще. Порт назначался узлу один и навсегда: кандидаты
+         * раскладывались по девяти портам по кругу, и узел, которому достался
+         * заглушённый оператором порт, выбывал целиком — при том что живёт он ровно
+         * так же, как соседний, которому повезло с портом. Замер этого не ловит: он
+         * идёт по TCP на 443 ([ProtonLatency.TCP_PORT]) и о судьбе UDP-порта не
+         * говорит ничего. Проверить UDP-порт заранее нечем — рукопожатие из России
+         * молчит у всех узлов (P5-P16), — поэтому единственная честная проверка это
+         * сама попытка подключения, и она обязана быть у узла не одна.
+         *
+         * Почему по странам, а не по голове списка. Список упорядочен задержкой, а
+         * бесплатный набор Proton перекошен в NL (на замере — 30 узлов из 50), так
+         * что вся голова это NL. Раздача запасных портов «первым десяти» означала бы,
+         * что выбравший US пользователь снова получает по одному порту на узел — то
+         * есть ровно ту болезнь, ради которой всё и делается. Страна — первый ключ
+         * сортировки очереди (`buildUserImportedWarpAttemptSet`), поэтому запас
+         * обязан быть у головы **каждой** страны.
+         *
+         * Почему две, а не все. Три попытки на узел стоят ~10-25 с. Остаток бюджета
+         * уходит на **широту** — по одному порту на узел, — потому что блокируют не
+         * только порт, но и адрес.
+         */
+        const val PORT_FALLBACK_SERVERS_PER_COUNTRY = 2
+
+        /** Сколько портов у такого узла: свой и два запасных. */
+        const val PORTS_PER_FALLBACK_SERVER = 3
+
+        /**
+         * Раздаёт ближайшим узлам каждой страны запасные порты, сохраняя порядок.
+         *
+         * Порядок входного списка сохраняется, варианты одного адреса идут подряд:
+         * очередь подключения сортирует по замеренной задержке, которая у вариантов
+         * общая, и рассчитывает на то, что перебор идёт «ближайший узел на трёх
+         * портах, потом следующий».
+         *
+         * @param ordered узлы в том порядке, в котором их надо пробовать — по одному
+         *        на адрес, с уже назначенным портом.
+         * @param limit сколько записей всего допустимо. Слоты под запасные порты
+         *        резервируются **до** раздачи одиночных: иначе страна, стоящая в
+         *        конце списка по задержке, не получила бы их никогда — бюджет
+         *        кончался бы на ближайшей стране. Обрезка идёт по узлам, а не внутри
+         *        узла: половина набора портов была бы молчаливой лотереей.
+         */
+        fun expandPortFallbacks(ordered: List<ProtonProfile>, limit: Int): List<ProtonProfile> {
+            if (ordered.isEmpty() || limit <= 0) return emptyList()
+
+            // Шаг 1: кто в голове своей страны.
+            val rankInCountry = HashMap<String, Int>()
+            val wantsFallback = ArrayList<Boolean>(ordered.size)
+            ordered.forEach { profile ->
+                val country = profile.country.trim().uppercase(Locale.US)
+                val rank = rankInCountry.getOrDefault(country, 0)
+                wantsFallback += rank < PORT_FALLBACK_SERVERS_PER_COUNTRY
+                rankInCountry[country] = rank + 1
+            }
+
+            // Шаг 2: бюджет. Если голов больше, чем влезает, лишние теряют запас —
+            // начиная с самых дальних, то есть с конца списка.
+            var multiCount = wantsFallback.count { it }
+            val affordable = limit / PORTS_PER_FALLBACK_SERVER
+            if (multiCount > affordable) {
+                var extra = multiCount - affordable
+                for (index in ordered.indices.reversed()) {
+                    if (extra == 0) break
+                    if (wantsFallback[index]) {
+                        wantsFallback[index] = false
+                        extra--
+                    }
+                }
+                multiCount = affordable
+            }
+            var singlesBudget = limit - multiCount * PORTS_PER_FALLBACK_SERVER
+
+            // Шаг 3: раздача.
+            val out = ArrayList<ProtonProfile>(limit)
+            val seen = HashSet<String>(limit * 2)
+            ordered.forEachIndexed { index, profile ->
+                val host = profile.entryIp.trim().trim('[', ']')
+                if (host.isEmpty()) return@forEachIndexed
+                val ports = if (wantsFallback[index]) {
+                    fallbackPortsFor(profile.port)
+                } else {
+                    if (singlesBudget <= 0) return@forEachIndexed
+                    listOf(profile.port)
+                }
+                val variants = ports.mapNotNull { port ->
+                    if (seen.add("$host:$port")) profile.copy(port = port) else null
+                }
+                if (variants.isEmpty()) return@forEachIndexed
+                if (!wantsFallback[index]) singlesBudget--
+                out += variants
+            }
+            return out
+        }
+
+        /** Свой порт узла и следующие за ним по кругу [PORTS]. */
+        private fun fallbackPortsFor(assigned: Int): List<Int> {
+            val start = PORTS.indexOf(assigned).takeIf { it >= 0 } ?: 0
+            val count = PORTS_PER_FALLBACK_SERVER.coerceAtMost(PORTS.size)
+            return (0 until count).map { PORTS[(start + it) % PORTS.size] }
+        }
 
         fun buildDeviceProfile(random: Random = Random.Default): ProtonDeviceProfile {
             val models = listOf(
@@ -766,6 +894,19 @@ class ProtonProfileStore(context: Context) {
          * прошивочном списке до переустановки нельзя — ровно на это и жалуются.
          */
         const val NODES_REFRESH_MS = 6L * 60 * 60 * 1000
+
+        /**
+         * Как часто прогон пробует замерить профили заново, когда прошлый замер
+         * не дал ни одного ответа.
+         *
+         * Тот же приём и по той же причине, что и [NODES_REFRESH_MS]: неудачный
+         * замер — это состояние сети (открытый P11: узлы Proton не отвечают на
+         * пробу рукопожатием, а на части сетей молчит и запасной TCP), а не
+         * незаконченная работа. Час — компромисс: короче, чем у списка узлов,
+         * потому что замер дешевле полного прогона и меняется чаще (достаточно
+         * сменить Wi-Fi на сотовую), но не «каждый вызов».
+         */
+        const val PROBE_REFRESH_MS = 60L * 60 * 1000
 
         const val STATE_REQUESTED = "requested"
         const val STATE_RUNNING = "running"

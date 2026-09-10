@@ -105,6 +105,39 @@ func GetDomainBypassStats() string {
 	return novaengine.GetDomainBypassStats()
 }
 
+// StartTorPtProxy starts a loopback SOCKS5 listener that speaks the named Tor
+// pluggable transport (obfs4, webtunnel, meek_lite, snowflake) and returns the
+// address it actually listens on ("127.0.0.1:port"). Put that address into
+// torrc as "ClientTransportPlugin <name> socks5 <addr>".
+//
+// An empty listenAddr means loopback with any free port. Binding anything but a
+// loopback address is refused: the port has no authentication, so exposing it
+// would hand anyone an open proxy to the bridge. stateDir is used by transports
+// that keep state between runs (snowflake, meek_lite).
+//
+// Comments here stay ASCII on purpose: gomobile copies them into generated Java
+// that javac compiles with the platform encoding (see engine/tor_obfs4.go for
+// the reasoning behind this proxy, in Russian).
+func StartTorPtProxy(name string, listenAddr string, stateDir string) (string, error) {
+	return novaengine.StartTorPtProxy(name, listenAddr, stateDir)
+}
+
+// StopTorPtProxy closes every pluggable-transport listener.
+func StopTorPtProxy() {
+	novaengine.StopTorPtProxy()
+}
+
+// TorPtProxyStats returns accepted/failed/live counters as one line.
+func TorPtProxyStats() string {
+	return novaengine.TorPtProxyStats()
+}
+
+// TorPtTransports lists the pluggable transports compiled into this core,
+// comma separated.
+func TorPtTransports() string {
+	return novaengine.TorPtTransports()
+}
+
 // SetTrafficCamouflageHost configures a neutral fake-template host that can be
 // reused by transport-specific obfuscation paths such as MASQUE fake QUIC bursts.
 func SetTrafficCamouflageHost(host string) {
@@ -166,6 +199,20 @@ func SetMasqueProtectSocketEnabled(enabled bool) {
 // generated Java, and javac reads that file as windows-1252.
 func SetMasqueConnectIPOpenTimeoutMs(ms int) {
 	novaengine.SetMasqueConnectIPOpenTimeoutMs(ms)
+}
+
+// SetTunnelMtu tells the engine the MTU Android actually gave the TUN interface.
+//
+// The engine pads encrypted payloads up to a multiple of 16 but never past the
+// device MTU. While that value was hardcoded to 1280, a full-size packet on a
+// 1430-byte TUN grew to 1440 and left the phone as 1500 bytes on the wire, which
+// is exactly what a 1492-byte path drops. Call it before StartVPN: the device
+// reads the MTU once, when it is created.
+//
+// Doc comments on exported bindings must stay ASCII: gomobile copies them into
+// generated Java, and javac reads that file as windows-1252.
+func SetTunnelMtu(mtu int) {
+	novaengine.SetTunnelMtu(mtu)
 }
 
 // SetMasqueSocketPreprobeEnabled toggles the pre-handshake reachability packet (a QUIC

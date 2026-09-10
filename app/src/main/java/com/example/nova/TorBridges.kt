@@ -114,6 +114,16 @@ data class TorBridge(
         fun parse(raw: String?): TorBridge? {
             val line = raw?.trim().orEmpty()
             if (line.isEmpty() || line.startsWith("#")) return null
+            // Управляющий символ внутри строки моста — это дописанная директива
+            // torrc, а не мост.
+            //
+            // Строки приходят с чужих сборщиков по сети, а `torrc` разбирается
+            // построчно: перевод строки в середине превратил бы одну запись в
+            // «мост плюс что угодно ещё» — от `SocksPort 0.0.0.0:9050`, то есть
+            // открытого наружу прокси, до подмены `ClientTransportPlugin`.
+            // Отсекаем в самом разборе, чтобы такая запись не доехала ни до
+            // файла мостов, ни до torrc.
+            if (line.any { it.isISOControl() }) return null
             // Приставку `Bridge ` несут строки, скопированные прямо из torrc.
             val body = if (line.length > 7 && line.regionMatches(0, "Bridge ", 0, 7, ignoreCase = true)) {
                 line.substring(7).trim()
@@ -256,6 +266,48 @@ object TorBridgeStore {
  * отдельной c-shared библиотекой. Пока этого нет, кнопка TOR не меняет регион, а
  * запускает сбор мостов и говорит об этом словами (I4).
  */
+/**
+ * Выбранный способ входа в сеть Tor — файлом, а не в `SharedPreferences`.
+ *
+ * Значение читает процесс `:vpn`, а пишет экран. Настройки кэшируются
+ * попроцессно (I2), поэтому prefs здесь означали бы «выбрал, а служба не
+ * увидела» — ровно тот дефект, ради которого написано правило. Файл лежит рядом
+ * с мостами и читается тем же способом.
+ */
+object TorEntryModeStore {
+
+    private const val FILE_NAME = "tor_entry_mode.txt"
+
+    fun read(context: Context?): String {
+        val file = fileFor(context) ?: return ConnectionSelectorPolicy.DEFAULT_TOR_ENTRY
+        val raw = runCatching { file.baseFile.takeIf { it.exists() }?.readText(Charsets.UTF_8) }
+            .getOrNull()
+            .orEmpty()
+        return ConnectionSelectorPolicy.normalizeTorEntry(raw)
+    }
+
+    fun write(context: Context?, mode: String): Boolean {
+        val file = fileFor(context) ?: return false
+        val normalized = ConnectionSelectorPolicy.normalizeTorEntry(mode)
+        return runCatching {
+            val stream = file.startWrite()
+            try {
+                stream.write(normalized.toByteArray(Charsets.UTF_8))
+                file.finishWrite(stream)
+                true
+            } catch (error: Throwable) {
+                file.failWrite(stream)
+                throw error
+            }
+        }.getOrDefault(false)
+    }
+
+    private fun fileFor(context: Context?): AtomicFile? {
+        val dir = context?.applicationContext?.filesDir ?: return null
+        return AtomicFile(File(dir, FILE_NAME))
+    }
+}
+
 object TorBridgeManager {
 
     /**

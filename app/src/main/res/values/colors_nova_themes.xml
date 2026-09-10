@@ -1,0 +1,235 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Сгенерировано tools/gen_nova_themes.py. Руками не править:
+     правка переживёт ровно до следующего запуска генератора. -->
+<resources>
+
+    <!-- Aurora mint -->
+    <color name="nova_aurora_bg_top">#06051A</color>
+    <color name="nova_aurora_bg_mid">#0E0B2E</color>
+    <color name="nova_aurora_bg_bot">#160F3F</color>
+    <color name="nova_aurora_accent">#2FD98E</color>
+    <color name="nova_aurora_accent_dim">#2E2FD98E</color>
+    <color name="nova_aurora_accent_on">#06051A</color>
+    <color name="nova_aurora_card_fill">#0BFFFFFF</color>
+    <color name="nova_aurora_card_stroke">#17FFFFFF</color>
+    <color name="nova_aurora_separator">#12FFFFFF</color>
+    <color name="nova_aurora_group_from">#2FD98E</color>
+    <color name="nova_aurora_group_to">#B8F0D8</color>
+    <color name="nova_aurora_text_title">#EEF0F8</color>
+    <color name="nova_aurora_text_value">#A8ADD4</color>
+    <color name="nova_aurora_text_hint">#7A7FA8</color>
+    <color name="nova_aurora_switch_on">#2FD98E</color>
+    <color name="nova_aurora_switch_off">#2EFFFFFF</color>
+    <color name="nova_aurora_thumb_on">#FFFFFF</color>
+    <color name="nova_aurora_thumb_off">#B8BED0</color>
+    <color name="nova_aurora_icon_tint">#B32FD98E</color>
+    <color name="nova_aurora_field_fill">#0BFFFFFF</color>
+    <color name="nova_aurora_field_stroke">#14FFFFFF</color>
+
+    <!-- DNS-AI -->
+    <color name="nova_dnsai_bg_top">#0D1117</color>
+    <color name="nova_dnsai_bg_mid">#0F141C</color>
+    <color name="nova_dnsai_bg_bot">#111823</color>
+    <color name="nova_dnsai_accent">#5B8CFF</color>
+    <color name="nova_dnsai_accent_dim">#2E5B8CFF</color>
+    <color name="nova_dnsai_accent_on">#0D1117</color>
+    <color name="nova_dnsai_card_fill">#161B22</color>
+    <color name="nova_dnsai_card_stroke">#12FFFFFF</color>
+    <color name="nova_dnsai_separator">#12FFFFFF</color>
+    <color name="nova_dnsai_group_from">#EEF4FF</color>
+    <color name="nova_dnsai_group_to">#7FE0BD</color>
+    <color name="nova_dnsai_text_title">#E8ECF3</color>
+    <color name="nova_dnsai_text_value">#A8B0BF</color>
+    <color name="nova_dnsai_text_hint">#7B8494</color>
+    <color name="nova_dnsai_switch_on">#5B8CFF</color>
+    <color name="nova_dnsai_switch_off">#1C232D</color>
+    <color name="nova_dnsai_thumb_on">#FFFFFF</color>
+    <color name="nova_dnsai_thumb_off">#7B8494</color>
+    <color name="nova_dnsai_icon_tint">#B35B8CFF</color>
+    <color name="nova_dnsai_field_fill">#0BFFFFFF</color>
+    <color name="nova_dnsai_field_stroke">#21FFFFFF</color>
+
+    <!-- Proton -->
+    <color name="nova_proton_bg_top">#16141C</color>
+    <color name="nova_proton_bg_mid">#1A1824</color>
+    <color name="nova_proton_bg_bot">#1C1B24</color>
+    <color name="nova_proton_accent">#6D4AFF</color>
+    <color name="nova_proton_accent_dim">#386D4AFF</color>
+    <color name="nova_proton_accent_on">#FFFFFF</color>
+    <color name="nova_proton_card_fill">#242230</color>
+    <color name="nova_proton_card_stroke">#2E2B3C</color>
+    <color name="nova_proton_separator">#12FFFFFF</color>
+    <color name="nova_proton_group_from">#8A6EFF</color>
+    <color name="nova_proton_group_to">#EDEAF8</color>
+    <color name="nova_proton_text_title">#EDEAF8</color>
+    <color name="nova_proton_text_value">#B0ABCC</color>
+    <color name="nova_proton_text_hint">#706B8A</color>
+    <color name="nova_proton_switch_on">#6D4AFF</color>
+    <color name="nova_proton_switch_off">#3A3844</color>
+    <color name="nova_proton_thumb_on">#FFFFFF</color>
+    <color name="nova_proton_thumb_off">#B0ABCC</color>
+    <color name="nova_proton_icon_tint">#8A6EFF</color>
+    <color name="nova_proton_field_fill">#1C1A26</color>
+    <color name="nova_proton_field_stroke">#2E2B3C</color>
+
+    <!-- Charcoal birch -->
+    <color name="nova_charcoal_bg_top">#08090C</color>
+    <color name="nova_charcoal_bg_mid">#0B0C10</color>
+    <color name="nova_charcoal_bg_bot">#0E1014</color>
+    <color name="nova_charcoal_accent">#4FD8C4</color>
+    <color name="nova_charcoal_accent_dim">#294FD8C4</color>
+    <color name="nova_charcoal_accent_on">#08090C</color>
+    <color name="nova_charcoal_card_fill">#0BFFFFFF</color>
+    <color name="nova_charcoal_card_stroke">#13FFFFFF</color>
+    <color name="nova_charcoal_separator">#12FFFFFF</color>
+    <color name="nova_charcoal_group_from">#4FD8C4</color>
+    <color name="nova_charcoal_group_to">#C9D2D8</color>
+    <color name="nova_charcoal_text_title">#F2F4F7</color>
+    <color name="nova_charcoal_text_value">#9AA3AE</color>
+    <color name="nova_charcoal_text_hint">#7A8290</color>
+    <color name="nova_charcoal_switch_on">#4FD8C4</color>
+    <color name="nova_charcoal_switch_off">#26FFFFFF</color>
+    <color name="nova_charcoal_thumb_on">#FFFFFF</color>
+    <color name="nova_charcoal_thumb_off">#9AA3AE</color>
+    <color name="nova_charcoal_icon_tint">#8CFFFFFF</color>
+    <color name="nova_charcoal_field_fill">#0BFFFFFF</color>
+    <color name="nova_charcoal_field_stroke">#13FFFFFF</color>
+
+    <!-- Graphene golden -->
+    <color name="nova_graphene_bg_top">#101215</color>
+    <color name="nova_graphene_bg_mid">#13161A</color>
+    <color name="nova_graphene_bg_bot">#16191E</color>
+    <color name="nova_graphene_accent">#F0B429</color>
+    <color name="nova_graphene_accent_dim">#26F0B429</color>
+    <color name="nova_graphene_accent_on">#101215</color>
+    <color name="nova_graphene_card_fill">#1B1F25</color>
+    <color name="nova_graphene_card_stroke">#12FFFFFF</color>
+    <color name="nova_graphene_separator">#12FFFFFF</color>
+    <color name="nova_graphene_group_from">#F0B429</color>
+    <color name="nova_graphene_group_to">#F0E6D0</color>
+    <color name="nova_graphene_text_title">#E8EAF0</color>
+    <color name="nova_graphene_text_value">#9098A8</color>
+    <color name="nova_graphene_text_hint">#636B78</color>
+    <color name="nova_graphene_switch_on">#F0B429</color>
+    <color name="nova_graphene_switch_off">#353A44</color>
+    <color name="nova_graphene_thumb_on">#FFFFFF</color>
+    <color name="nova_graphene_thumb_off">#9098A8</color>
+    <color name="nova_graphene_icon_tint">#9098A8</color>
+    <color name="nova_graphene_field_fill">#22262D</color>
+    <color name="nova_graphene_field_stroke">#14FFFFFF</color>
+
+    <!-- Cyber neon -->
+    <color name="nova_neon_bg_top">#0A0A12</color>
+    <color name="nova_neon_bg_mid">#0C0A16</color>
+    <color name="nova_neon_bg_bot">#0E0B1A</color>
+    <color name="nova_neon_accent">#39E6D6</color>
+    <color name="nova_neon_accent_dim">#2E39E6D6</color>
+    <color name="nova_neon_accent_on">#0A0A12</color>
+    <color name="nova_neon_card_fill">#08FFFFFF</color>
+    <color name="nova_neon_card_stroke">#3839E6D6</color>
+    <color name="nova_neon_separator">#1A39E6D6</color>
+    <color name="nova_neon_group_from">#39E6D6</color>
+    <color name="nova_neon_group_to">#FF5FBF</color>
+    <color name="nova_neon_text_title">#D6D9E6</color>
+    <color name="nova_neon_text_value">#8C93A8</color>
+    <color name="nova_neon_text_hint">#5F6678</color>
+    <color name="nova_neon_switch_on">#39E6D6</color>
+    <color name="nova_neon_switch_off">#2A2A3A</color>
+    <color name="nova_neon_thumb_on">#0A0A12</color>
+    <color name="nova_neon_thumb_off">#8C93A8</color>
+    <color name="nova_neon_icon_tint">#39E6D6</color>
+    <color name="nova_neon_field_fill">#0DFFFFFF</color>
+    <color name="nova_neon_field_stroke">#2839E6D6</color>
+
+    <!-- Path of Exile 1 -->
+    <color name="nova_poe1_bg_top">#0A0705</color>
+    <color name="nova_poe1_bg_mid">#14100B</color>
+    <color name="nova_poe1_bg_bot">#1A150E</color>
+    <color name="nova_poe1_accent">#C8AA6E</color>
+    <color name="nova_poe1_accent_dim">#2EC8AA6E</color>
+    <color name="nova_poe1_accent_on">#0A0705</color>
+    <color name="nova_poe1_card_fill">#1E1810</color>
+    <color name="nova_poe1_card_stroke">#8B7343</color>
+    <color name="nova_poe1_separator">#2EC8AA6E</color>
+    <color name="nova_poe1_group_from">#E8DCC0</color>
+    <color name="nova_poe1_group_to">#C8AA6E</color>
+    <color name="nova_poe1_text_title">#C9BFA8</color>
+    <color name="nova_poe1_text_value">#8A8073</color>
+    <color name="nova_poe1_text_hint">#6B6254</color>
+    <color name="nova_poe1_switch_on">#9B2C2C</color>
+    <color name="nova_poe1_switch_off">#2A2018</color>
+    <color name="nova_poe1_thumb_on">#E8DCC0</color>
+    <color name="nova_poe1_thumb_off">#8A8073</color>
+    <color name="nova_poe1_icon_tint">#BFC8AA6E</color>
+    <color name="nova_poe1_field_fill">#17110A</color>
+    <color name="nova_poe1_field_stroke">#6E5A33</color>
+
+    <!-- Path of Exile 2 -->
+    <color name="nova_poe2_bg_top">#0E1012</color>
+    <color name="nova_poe2_bg_mid">#121517</color>
+    <color name="nova_poe2_bg_bot">#16191C</color>
+    <color name="nova_poe2_accent">#C86A32</color>
+    <color name="nova_poe2_accent_dim">#2EC86A32</color>
+    <color name="nova_poe2_accent_on">#FFF3EA</color>
+    <color name="nova_poe2_card_fill">#0EFFFFFF</color>
+    <color name="nova_poe2_card_stroke">#21BEC8D0</color>
+    <color name="nova_poe2_separator">#80000000</color>
+    <color name="nova_poe2_group_from">#E68A4E</color>
+    <color name="nova_poe2_group_to">#AEB8C0</color>
+    <color name="nova_poe2_text_title">#CBD2D8</color>
+    <color name="nova_poe2_text_value">#8E979F</color>
+    <color name="nova_poe2_text_hint">#666E75</color>
+    <color name="nova_poe2_switch_on">#C86A32</color>
+    <color name="nova_poe2_switch_off">#2A2E32</color>
+    <color name="nova_poe2_thumb_on">#FFFFFF</color>
+    <color name="nova_poe2_thumb_off">#8E979F</color>
+    <color name="nova_poe2_icon_tint">#8E979F</color>
+    <color name="nova_poe2_field_fill">#0DFFFFFF</color>
+    <color name="nova_poe2_field_stroke">#21BEC8D0</color>
+
+    <!-- GTA VI Vice Sunset -->
+    <color name="nova_gta6sunset_bg_top">#1F1F38</color>
+    <color name="nova_gta6sunset_bg_mid">#18182D</color>
+    <color name="nova_gta6sunset_bg_bot">#0C0D1B</color>
+    <color name="nova_gta6sunset_accent">#E9639B</color>
+    <color name="nova_gta6sunset_accent_dim">#2EE9639B</color>
+    <color name="nova_gta6sunset_accent_on">#2A0F1C</color>
+    <color name="nova_gta6sunset_card_fill">#38365D</color>
+    <color name="nova_gta6sunset_card_stroke">#1FCCC2F5</color>
+    <color name="nova_gta6sunset_separator">#14CCC2F5</color>
+    <color name="nova_gta6sunset_group_from">#FEC497</color>
+    <color name="nova_gta6sunset_group_to">#E9639B</color>
+    <color name="nova_gta6sunset_text_title">#E5DDFF</color>
+    <color name="nova_gta6sunset_text_value">#B0A6DE</color>
+    <color name="nova_gta6sunset_text_hint">#8B84B8</color>
+    <color name="nova_gta6sunset_switch_on">#E9639B</color>
+    <color name="nova_gta6sunset_switch_off">#47435F</color>
+    <color name="nova_gta6sunset_thumb_on">#FFFFFF</color>
+    <color name="nova_gta6sunset_thumb_off">#CCC2F5</color>
+    <color name="nova_gta6sunset_icon_tint">#CCC2F5</color>
+    <color name="nova_gta6sunset_field_fill">#14CCC2F5</color>
+    <color name="nova_gta6sunset_field_stroke">#1FCCC2F5</color>
+
+    <!-- GTA VI Vice Night -->
+    <color name="nova_gta6night_bg_top">#07080F</color>
+    <color name="nova_gta6night_bg_mid">#0A0B15</color>
+    <color name="nova_gta6night_bg_bot">#0C0D1B</color>
+    <color name="nova_gta6night_accent">#E9639B</color>
+    <color name="nova_gta6night_accent_dim">#2EE9639B</color>
+    <color name="nova_gta6night_accent_on">#2A0F1C</color>
+    <color name="nova_gta6night_card_fill">#0AD9F3FE</color>
+    <color name="nova_gta6night_card_stroke">#29E9639B</color>
+    <color name="nova_gta6night_separator">#17E9639B</color>
+    <color name="nova_gta6night_group_from">#E9639B</color>
+    <color name="nova_gta6night_group_to">#D9F3FE</color>
+    <color name="nova_gta6night_text_title">#E8EAF4</color>
+    <color name="nova_gta6night_text_value">#9FB4C4</color>
+    <color name="nova_gta6night_text_hint">#5F6A80</color>
+    <color name="nova_gta6night_switch_on">#E9639B</color>
+    <color name="nova_gta6night_switch_off">#3A4152</color>
+    <color name="nova_gta6night_thumb_on">#FFFFFF</color>
+    <color name="nova_gta6night_thumb_off">#9FB4C4</color>
+    <color name="nova_gta6night_icon_tint">#9FB4C4</color>
+    <color name="nova_gta6night_field_fill">#0FD9F3FE</color>
+    <color name="nova_gta6night_field_stroke">#1FD9F3FE</color>
+</resources>

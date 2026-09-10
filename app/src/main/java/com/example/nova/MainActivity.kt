@@ -58,6 +58,16 @@ import okhttp3.Request
 import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
+
+    /**
+     * Последняя записанная в журнал строка о наблюдённом выходе.
+     *
+     * Нужна ровно для того, чтобы повтор не писался: проверка адреса идёт по
+     * кругу, пока экран открыт, и без сравнения журнал заполняется одной и той
+     * же строкой (см. `checkCurrentIp`).
+     */
+    private var lastExitSnapshotLine: String? = null
+
     companion object {
         /** Сколько ждать прогресс от новой фазы, прежде чем доверять состоянию сервиса. */
         private const val PROGRESS_PHASE_SWITCH_QUIET_MS = 1_500L
@@ -1398,12 +1408,16 @@ class MainActivity : AppCompatActivity() {
                 )
             }
             UpdateDownloadProgress.State.CHECKING -> {
-                showUpdateChip(
-                    caption = "ПРОВЕРКА ОБНОВЛЕНИЯ",
-                    captionColor = UPDATE_CHIP_BUSY_COLOR,
-                    progressLine = "",
-                    clickable = false,
-                )
+                // Проверка не показывается вовсе.
+                //
+                // Она ничего не обещает и ничем не управляется: плашка стояла
+                // ненажимаемой, а проверка на 1.32.0 могла зависнуть — и человек
+                // получал кнопку, которая не исчезает и не отвечает на нажатие.
+                // Скачивание и установку показывать надо (там есть и прогресс, и
+                // «ОСТАНОВИТЬ»), а «мы куда-то сходили и пока не знаем» — нет:
+                // как только версия найдётся, плашка появится сама следующим же
+                // тиком. Срок самой проверке ставит `AppUpdateManager`.
+                btnInstallUpdate.visibility = View.GONE
             }
             UpdateDownloadProgress.State.READY -> {
                 // Версию показываем ту, что реально лежит на диске: подпись — это
@@ -1702,6 +1716,9 @@ class MainActivity : AppCompatActivity() {
     /** Тот же заслон, что у основного селектора: программная отметка — не нажатие. */
     private var suppressMainSubRegionCallback = false
 
+    /** Подсказка «Отключите DoT» рядом с выбором входа в Tor. */
+    private var mainDotHint: TextView? = null
+
     /**
      * Страны, которые есть в выпущенных профилях Proton.
      *
@@ -1850,6 +1867,9 @@ class MainActivity : AppCompatActivity() {
         mainRegionGroup = findViewById(R.id.rg_exit_region)
         mainRegionNotice = findViewById(R.id.tv_exit_last)
         mainSubRegionRow = findViewById(R.id.ll_exit_sub_region)
+        mainDotHint = findViewById<TextView>(R.id.tv_exit_dot_hint)?.apply {
+            setOnClickListener { showPrivateDnsExplanation() }
+        }
         mainSubRegionLabel = findViewById(R.id.tv_exit_sub_region_label)
         mainSubRegionGroup = findViewById(R.id.rg_exit_sub_region)
         // Список, порядок и разбиение на строки — из [ConnectionSelectorPolicy],
@@ -1913,11 +1933,12 @@ class MainActivity : AppCompatActivity() {
      */
     private fun applyChipFromMainScreen(chipValue: String) {
         if (chipValue == ConnectionSelectorPolicy.CHIP_TOR) {
-            LogManager.log("Главный экран: выбран TOR — транспорта ещё нет, запускаем обновление мостов.")
-            // Решение и чтение файла — с рабочего потока, надпись — с главного.
-            // Текст обязан описывать то, что произошло: сбор мог и не начаться
-            // (список свежий или прогон уже идёт), а регион здесь не меняется
-            // вовсе, и обещать «выбор сохранён» было бы неправдой.
+            LogManager.log("Главный экран: выбран TOR.")
+            // Сбор мостов запускается заранее, а не в момент подключения: он идёт
+            // по сети десятками секунд, и делать его при уже нажатом «Подключить»
+            // означало бы минуту молчания вместо туннеля. Решение и чтение файла —
+            // с рабочего потока (I13), надпись — с главного. Текст описывает то,
+            // что произошло: сбор мог и не начаться, если список свежий.
             Thread({
                 val started = TorBridgeManager.refreshInBackground(
                     this,
@@ -1933,9 +1954,6 @@ class MainActivity : AppCompatActivity() {
                     ).show()
                 }
             }, "NovaTorChipTap").apply { isDaemon = true; start() }
-            // Отметка возвращается на прежнюю кнопку: регион не менялся.
-            refreshMainRegionSelector()
-            return
         }
         applyRegionFromMainScreen(
             ConnectionSelectorPolicy.storedValueForChip(
@@ -1963,6 +1981,59 @@ class MainActivity : AppCompatActivity() {
      * рассинхрон, ради которого переподключение уже сделано у самой кнопки
      * PROTON и в настройках.
      */
+    /**
+     * Объясняет, почему при системном строгом DoT через Tor не открывается ничего.
+     *
+     * Отдельным диалогом, а не длинной строкой на экране: строка занимает место
+     * у кнопки подключения, а сказать надо три вещи — что происходит, почему это
+     * не поломка Nova и что именно переключить. Кнопка ведёт прямо в тот раздел
+     * настроек Android; если производитель его прячет, открывается общий раздел
+     * сети — молча не открыть ничего было бы хуже (I4).
+     */
+    private fun showPrivateDnsExplanation() {
+        val host = TorTransport.strictPrivateDnsHost(this)
+        val message = "В настройках телефона включён «Частный DNS» в строгом режиме" +
+            (if (host.isNotBlank()) " ($host)" else "") + ".\n\n" +
+            "В этом режиме Android резолвит имена только через DoT к этому серверу и никогда " +
+            "не спрашивает их обычным запросом. Через Tor такой DoT не проходит, поэтому " +
+            "туннель поднимется и пинги будут идти, а ни один сайт не откроется — браузер " +
+            "покажет ERR_NAME_NOT_RESOLVED.\n\n" +
+            "Приложение это исправить не может: настройка системная. Откройте настройки " +
+            "телефона и переключите «Частный DNS» на «Автоматически» или «Выключено»."
+        // Диалог строится в теме настроек, а не в теме главного экрана: главный
+        // экран своих `nova*` не объявляет, и без обёртки диалог приезжает
+        // системным серым, не похожим на остальное приложение.
+        val themed = android.view.ContextThemeWrapper(
+            this,
+            NovaTheme.optionFor(NovaTheme.current(this)).styleRes,
+        )
+        android.app.AlertDialog.Builder(themed)
+            .setTitle("Частный DNS мешает Tor")
+            .setMessage(message)
+            .setPositiveButton("Открыть настройки") { _, _ -> openPrivateDnsSettings() }
+            .setNegativeButton("Понятно", null)
+            .showNova()
+    }
+
+    private fun openPrivateDnsSettings() {
+        // `PRIVATE_DNS_SETTINGS` в открытом SDK нет, но строку понимают штатные
+        // настройки Android; там, где её нет, остаётся общий раздел сети.
+        val candidates = listOf(
+            Intent("android.settings.PRIVATE_DNS_SETTINGS"),
+            Intent(android.provider.Settings.ACTION_WIRELESS_SETTINGS),
+        )
+        for (intent in candidates) {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val opened = runCatching { startActivity(intent); true }.getOrDefault(false)
+            if (opened) return
+        }
+        Toast.makeText(
+            this,
+            "Не удалось открыть настройки. «Частный DNS» — в разделе «Сеть и интернет».",
+            Toast.LENGTH_LONG,
+        ).show()
+    }
+
     private fun applySubRegionFromMainScreen(value: String) {
         val chip = ConnectionSelectorPolicy.valueAt(
             ConnectionSelectorPolicy.selectedIndex(
@@ -1986,6 +2057,36 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(
                 this,
                 if (reconnecting) "Страна Proton: $label, переподключаемся" else "Страна Proton: $label",
+                Toast.LENGTH_SHORT,
+            ).show()
+            if (reconnecting) {
+                updateUiByState(NovaVpnService.STATE_CONNECTING)
+            }
+            refreshMainRegionSelector()
+            return
+        }
+        if (chip == ConnectionSelectorPolicy.CHIP_TOR) {
+            val previous = TorEntryModeStore.read(this)
+            val chosen = ConnectionSelectorPolicy.normalizeTorEntry(value)
+            val changed = previous != chosen
+            // Запись в файл — это диск, а диск на главном потоке запрещён (I13).
+            // Поток свой, а не `lifecycleScope`: правка обязана дожить до конца,
+            // даже если экран закроют сразу после нажатия (I18).
+            Thread({ TorEntryModeStore.write(this, chosen) }, "NovaTorEntryWrite")
+                .apply { isDaemon = true; start() }
+            val label = ConnectionSelectorPolicy.TOR_ENTRY_MODES
+                .firstOrNull { it.first == chosen }?.second ?: chosen
+            // Переподключаем только на смене: повторное нажатие на уже выбранный
+            // способ не должно ронять живой туннель.
+            val reconnecting = changed &&
+                SessionReapply.isSessionLikelyActive(this, clientData) &&
+                SessionReapply.applyToLiveSession(this, clientData)
+            LogManager.log(
+                "Главный экран: вход в Tor — $label, смена=$changed, переподключение=$reconnecting."
+            )
+            Toast.makeText(
+                this,
+                if (reconnecting) "Вход в Tor: $label, переподключаемся" else "Вход в Tor: $label",
                 Toast.LENGTH_SHORT,
             ).show()
             if (reconnecting) {
@@ -2094,6 +2195,16 @@ class MainActivity : AppCompatActivity() {
     private fun refreshMainSubRegionRow(chipValue: String) {
         val row = mainSubRegionRow ?: return
         val group = mainSubRegionGroup ?: return
+        // Подсказка про DoT нужна только там, где она что-то меняет: у Tor и
+        // только при включённом строгом «Частном DNS».
+        mainDotHint?.visibility = if (
+            chipValue == ConnectionSelectorPolicy.CHIP_TOR &&
+            TorTransport.strictPrivateDnsHost(this).isNotBlank()
+        ) {
+            View.VISIBLE
+        } else {
+            View.GONE
+        }
         val entries = ConnectionSelectorPolicy.subRegionsFor(
             chipValue,
             if (chipValue == "proton") protonAvailableCountries else emptyList(),
@@ -2108,7 +2219,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         row.visibility = View.VISIBLE
-        mainSubRegionLabel?.text = ConnectionSelectorPolicy.SUB_REGION_PREFIX.trimEnd()
+        mainSubRegionLabel?.text = ConnectionSelectorPolicy.subRegionPrefixFor(chipValue).trimEnd()
         // Подрегион — всегда **одна** строка, сколько бы стран ни выпустил Proton.
         // Без плана перенос считается по ширине, а внутри `HorizontalScrollView`
         // ширина приходит спецификацией `UNSPECIFIED`, то есть нулём: строка
@@ -2167,6 +2278,9 @@ class MainActivity : AppCompatActivity() {
         val wantedValue = when (chipValue) {
             // Пустое предпочтение — это кнопка «AUTO», а не первая страна списка.
             "proton" -> clientData.getProtonCountryPreference()
+            // Способ входа в Tor лежит в файле, а не в настройках: его читает
+            // процесс `:vpn`, а prefs кэшируются попроцессно (I2).
+            ConnectionSelectorPolicy.CHIP_TOR -> TorEntryModeStore.read(this)
             else -> ConnectionSelectorPolicy.normalizeOperaSubRegion(clientData.getOperaSubRegionPreference())
         }
         val wanted = (0 until group.childCount)
@@ -2359,6 +2473,12 @@ class MainActivity : AppCompatActivity() {
     private fun resolveUiBackend(snapshotBackend: String? = null): String {
         resolveImportedUiBackendLabel()?.let { importedBackend ->
             return importedBackend
+        }
+        // Выбранный TOR подписывает бейдж сам и раньше всех догадок ниже: у него
+        // нет ни региона Opera, ни конфигурации WARP, по которым эти догадки
+        // строятся, и без этой строки экран показывал «WARP» на живом Tor.
+        if (clientData.getExitRegionPreference().trim().lowercase() == "tor") {
+            return NovaVpnService.BACKEND_TOR
         }
         val snapshot = snapshotBackend?.trim().orEmpty()
         val selectedRegion = clientData.getExitRegionPreference().trim().lowercase()
@@ -2636,6 +2756,10 @@ class MainActivity : AppCompatActivity() {
         return backendLabel.trim().uppercase().startsWith(NovaVpnService.BACKEND_VLESS)
     }
 
+    private fun isTorBackend(backendLabel: String): Boolean {
+        return backendLabel.trim().uppercase().startsWith(NovaVpnService.BACKEND_TOR)
+    }
+
     private fun resolveImportedUiBackendLabel(): String? {
         if (!clientData.isImportedConfigSourceActive()) return null
         // Схлопывание «AUTO» в единственную семью раньше жило только здесь, и экран
@@ -2648,6 +2772,9 @@ class MainActivity : AppCompatActivity() {
     private fun resolveConnectedUiBackend(tunnelNetwork: Network? = findCurrentVpnNetwork()): String {
         resolveImportedUiBackendLabel()?.let { importedBackend ->
             return importedBackend
+        }
+        if (clientData.getExitRegionPreference().trim().lowercase() == "tor") {
+            return NovaVpnService.BACKEND_TOR
         }
         val selectedRegion = clientData.getExitRegionPreference().trim().lowercase()
         val restartSession = clientData.getRestartSession()
@@ -2753,7 +2880,7 @@ class MainActivity : AppCompatActivity() {
                 var snapshot = if (tunnelNetwork != null) {
                     if (isOperaBackend(resolvedBackend)) {
                         fetchIpSnapshotViaOperaProxy()
-                    } else if (isVlessBackend(resolvedBackend)) {
+                    } else if (isVlessBackend(resolvedBackend) || isTorBackend(resolvedBackend)) {
                         // Своими силами экран этот адрес не узнает: при раздельном
                         // туннелировании он снаружи VPN, и запрос «по умолчанию» уходит
                         // мимо узла — возвращался адрес и страна провайдера, отчего при
@@ -2802,13 +2929,19 @@ class MainActivity : AppCompatActivity() {
                     // Транспорт печатаем рядом с бэкендом: именно он решает, что
                     // окажется на бейдже, и его отсутствие в этой строке однажды уже
                     // спрятало расхождение «в туннеле MASQUE, на экране WARP».
-                    LogManager.log(
-                        "UI checkCurrentIp: " +
-                            (if (effectiveSnapshot.measured) "snapshot получен" else "показано прошлое наблюдение") +
-                            ", ip=${primaryIp.ifBlank { "-" }}, " +
-                            "country=${effectiveSnapshot.country.ifBlank { "-" }}, backend=$resolvedBackend, " +
-                            "transport=${clientData.getServiceTransport().ifBlank { "-" }}"
-                    )
+                    val line = "UI checkCurrentIp: " +
+                        (if (effectiveSnapshot.measured) "snapshot получен" else "показано прошлое наблюдение") +
+                        ", ip=${primaryIp.ifBlank { "-" }}, " +
+                        "country=${effectiveSnapshot.country.ifBlank { "-" }}, backend=$resolvedBackend, " +
+                        "transport=${clientData.getServiceTransport().ifBlank { "-" }}"
+                    // Проверка идёт по кругу, пока экран открыт, и до этой правки
+                    // писала одну и ту же строку каждые несколько секунд — 16 раз за
+                    // одно подключение на замере Pixel 4a. Смысл в ней только тогда,
+                    // когда что-то изменилось: адрес, страна, бэкенд или транспорт.
+                    if (line != lastExitSnapshotLine) {
+                        lastExitSnapshotLine = line
+                        LogManager.log(line)
+                    }
                 }
 
                 if (
@@ -2821,7 +2954,8 @@ class MainActivity : AppCompatActivity() {
                     // Для VLESS экран лишь пересказывает наблюдение службы. Записывать
                     // его обратно нельзя: любое своё измерение здесь идёт мимо узла и
                     // затирало бы честное наблюдение адресом провайдера.
-                    !isVlessBackend(resolvedBackend)
+                    !isVlessBackend(resolvedBackend) &&
+                    !isTorBackend(resolvedBackend)
                 ) {
                     clientData.saveLastExitObservation(
                         ip = primaryIp,
@@ -2946,14 +3080,31 @@ class MainActivity : AppCompatActivity() {
         // RU вместо US». Привязываемся к транспорту, как уже сделано для полей
         // экрана (G55).
         val activeTransport = clientData.getServiceTransport().ifBlank { resolvedBackend }
-        if (activeTransport != lastObservedIpTransport) {
+        val tunnelSnapshot = clientData.getTunnelUiSnapshot()
+        // Транспорт сверяется с тем, что записан **в самом снимке**, а не с тем, что
+        // экран показывал в прошлый раз.
+        //
+        // Прежнее сравнение отвечало на нужный вопрос лишь косвенно и на смене
+        // транспорта запиралось само на себе: снимок отвергался, показывать было
+        // нечего, `lastObservedIpTransport` не обновлялся — и следующий круг
+        // отвергал снимок ровно по той же причине. На Tor это и наблюдалось:
+        // служба измеряла выход через цепочку (FI), а бейдж показывал «TOR: --»
+        // бесконечно. Когда транспорт в снимке известен, он и есть ответ; поле
+        // экрана остаётся запасным для старых снимков без этой отметки.
+        val snapshotTransport = tunnelSnapshot?.transport?.trim().orEmpty()
+        val transportMatches = if (snapshotTransport.isNotBlank()) {
+            snapshotTransport.equals(activeTransport, ignoreCase = true)
+        } else {
+            activeTransport == lastObservedIpTransport
+        }
+        if (!transportMatches) {
             LogManager.log(
-                "UI checkCurrentIp: трасса не дошла, но транспорт сменился " +
-                    "($lastObservedIpTransport -> $activeTransport) — прошлое наблюдение не подставляем."
+                "UI checkCurrentIp: трасса не дошла, но снимок снят на другом транспорте " +
+                    "(${snapshotTransport.ifBlank { lastObservedIpTransport }} вместо $activeTransport) — " +
+                    "прошлое наблюдение не подставляем."
             )
             return null
         }
-        val tunnelSnapshot = clientData.getTunnelUiSnapshot()
         if (
             tunnelSnapshot != null &&
             (tunnelSnapshot.ipv4.isNotBlank() || tunnelSnapshot.ipv6.isNotBlank() || tunnelSnapshot.country.isNotBlank()) &&
@@ -3666,7 +3817,14 @@ class MainActivity : AppCompatActivity() {
                 }
                 currentTunnelBackend = resolvedBackend
 
-                if (isTunnelConnected() && isVlessBackend(resolvedBackend)) {
+                if (isTunnelConnected() && isTorBackend(resolvedBackend)) {
+                    // Ровно та же причина, что и у VLESS ниже: цепочку Tor экран не
+                    // видит, её проверяет служба и публикует замер под своей меткой.
+                    latency = clientData.getTransportLatency()
+                        ?.takeIf { it.transport.equals(NovaVpnService.TRANSPORT_TOR, ignoreCase = true) }
+                        ?.latencyMs
+                        ?: -1
+                } else if (isTunnelConnected() && isVlessBackend(resolvedBackend)) {
                     // Замер берём у службы. Сама она проверяет узел раз в полторы
                     // секунды через SOCKS-инбаунд ядра, а экран этот путь повторить не
                     // может: при раздельном туннелировании он снаружи VPN и своей же
@@ -3835,6 +3993,12 @@ class MainActivity : AppCompatActivity() {
         val transport = clientData.getServiceTransport()
         if (NovaVpnService.isPublishedTransport(transport, NovaVpnService.TRANSPORT_MASQUE)) {
             return "${NovaVpnService.TRANSPORT_MASQUE}: $effectiveCountry"
+        }
+        // Tor подписывается своим именем по той же причине, что и MASQUE: по
+        // бэкенду его не отличить, а без этой ветки бейдж скатывался в общий
+        // «WARP: RU» — на живом Tor это была прямая неправда.
+        if (NovaVpnService.isPublishedTransport(transport, NovaVpnService.TRANSPORT_TOR)) {
+            return "${NovaVpnService.TRANSPORT_TOR}: $effectiveCountry"
         }
         // Импортированный профиль AmneziaWG подписывается своим именем: бэкенд у него
         // тот же `WARP`, и раньше бейдж обещал Cloudflare там, где туннель шёл на
@@ -4325,6 +4489,7 @@ class MainActivity : AppCompatActivity() {
             preference == "eu" -> "ПОДКЛЮЧЕНИЕ... EU"
             preference == "us" -> "ПОДКЛЮЧЕНИЕ... US"
             preference == "masque" -> "ПОДКЛЮЧЕНИЕ... MASQUE"
+            preference == "tor" -> "ПОДКЛЮЧЕНИЕ... TOR"
             preference == "vless" -> "ПОДКЛЮЧЕНИЕ... VLESS"
             preference == "proton" -> "ПОДКЛЮЧЕНИЕ... AWG Proton"
             isOperaBackend(currentTunnelBackend) -> {

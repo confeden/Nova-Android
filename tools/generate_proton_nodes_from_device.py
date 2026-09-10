@@ -35,20 +35,29 @@ import subprocess
 import sys
 from pathlib import Path
 
-DEVICE_FILE = "/data/data/com.brent.nova/files/proton_profiles.json"
+# Кандидаты, а не рабочий список.
+#
+# В рабочем списке узел встречается несколько раз — по разу на запасной порт
+# (`ProtonProfileStore.expandPortFallbacks`), — поэтому пятьдесят записей это
+# около тридцати адресов. Кандидаты же лежат по одному на адрес, и их восемьдесят:
+# для актива, где порт не хранится вовсе, это строго более широкий источник.
+DEVICE_FILE = "/data/data/com.brent.nova/files/proton_candidates.json"
+DEVICE_FILE_FALLBACK = "/data/data/com.brent.nova/files/proton_profiles.json"
 ASSET = Path("app/src/main/assets/proton_nodes.json")
 SOURCE = "vpn-api.proton.me /vpn/logicals?Tier=0"
 
 
 def pull(serial: str) -> dict:
-    cmd = ["adb"]
-    if serial:
-        cmd += ["-s", serial]
-    cmd += ["shell", f'su -c "cat {DEVICE_FILE}"']
-    raw = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", check=True).stdout
-    if not raw.strip():
-        sys.exit("устройство вернуло пустой файл: выбран ли регион PROTON и прошла ли генерация?")
-    return json.loads(raw)
+    for path in (DEVICE_FILE, DEVICE_FILE_FALLBACK):
+        cmd = ["adb"]
+        if serial:
+            cmd += ["-s", serial]
+        cmd += ["shell", f'su -c "cat {path}"']
+        raw = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", check=True).stdout
+        if raw.strip():
+            print(f"источник: {path}", file=sys.stderr)
+            return json.loads(raw)
+    sys.exit("устройство вернуло пустые файлы: выбран ли регион PROTON и прошла ли генерация?")
 
 
 def build_nodes(payload: dict) -> list[dict]:

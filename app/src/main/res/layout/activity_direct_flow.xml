@@ -15,7 +15,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:text="Прямой поток"
-        android:textColor="#50C878"
+        android:textColor="?attr/novaAccent"
         android:textSize="24sp"
         android:textStyle="bold" />
 
@@ -25,7 +25,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
         android:text="Эти приложения идут мимо туннеля в любом режиме раздельного туннелирования. Изменения применяются к текущему сеансу."
-        android:textColor="#7FA9C4"
+        android:textColor="?attr/novaTextValue"
         android:textSize="12sp" />
 
     <!-- Мастер-переключатель закрытого российского списка -->
@@ -33,8 +33,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
-        android:background="@drawable/bg_settings_item"
-        android:backgroundTint="#20FFFFFF"
+        android:background="?attr/novaCardBackground"
         android:gravity="center_vertical"
         android:orientation="horizontal"
         android:padding="12dp">
@@ -44,7 +43,7 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:text="Российские приложения мимо туннеля"
-            android:textColor="#FFFFFF"
+            android:textColor="?attr/novaTextTitle"
             android:textSize="16sp" />
 
         <Switch
@@ -60,7 +59,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
-        android:textColor="#AAAAAA"
+        android:textColor="?attr/novaTextHint"
         android:textSize="13sp" />
 
     <EditText
@@ -68,11 +67,11 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
-        android:backgroundTint="#80FFFFFF"
+        android:backgroundTint="?attr/novaAccent"
         android:hint="Поиск приложений..."
         android:inputType="text"
-        android:textColor="#FFFFFF"
-        android:textColorHint="#80FFFFFF" />
+        android:textColor="?attr/novaTextTitle"
+        android:textColorHint="?attr/novaTextHint" />
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -86,7 +85,7 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:text="Системные приложения"
-            android:textColor="#FFFFFF"
+            android:textColor="?attr/novaTextTitle"
             android:textSize="14sp" />
 
         <Switch

@@ -14,7 +14,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="Фон главного экрана"
-            android:textColor="#50C878"
+            android:textColor="?attr/novaAccent"
             android:textSize="24sp"
             android:textStyle="bold" />
 
@@ -24,7 +24,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
             android:text="Анимация не реагирует на касания и экономит ресурсы."
-            android:textColor="#AAAAAA"
+            android:textColor="?attr/novaTextHint"
             android:textSize="12sp" />
 
         <RadioGroup
@@ -32,8 +32,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:background="@drawable/bg_settings_item"
-            android:backgroundTint="#20FFFFFF"
+            android:background="?attr/novaCardBackground"
             android:orientation="vertical"
             android:padding="12dp">
 
@@ -41,27 +40,27 @@
                 android:id="@+id/rb_background_animation"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:buttonTint="#13A10E"
+                android:buttonTint="?attr/novaAccent"
                 android:text="Использовать анимацию"
-                android:textColor="#FFFFFF"
+                android:textColor="?attr/novaTextTitle"
                 android:textSize="16sp" />
 
             <RadioButton
                 android:id="@+id/rb_background_image"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:buttonTint="#13A10E"
+                android:buttonTint="?attr/novaAccent"
                 android:text="Использовать изображение"
-                android:textColor="#FFFFFF"
+                android:textColor="?attr/novaTextTitle"
                 android:textSize="16sp" />
 
             <RadioButton
                 android:id="@+id/rb_background_none"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:buttonTint="#13A10E"
+                android:buttonTint="?attr/novaAccent"
                 android:text="Без фона"
-                android:textColor="#FFFFFF"
+                android:textColor="?attr/novaTextTitle"
                 android:textSize="16sp" />
         </RadioGroup>
     </LinearLayout>

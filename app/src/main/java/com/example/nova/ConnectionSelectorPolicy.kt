@@ -1,5 +1,7 @@
 package com.example.nova
 
+import java.util.Locale
+
 /**
  * Одно описание селектора протокола/региона на всё приложение.
  *
@@ -69,6 +71,89 @@ object ConnectionSelectorPolicy {
     const val CHIP_TOR: String = "tor"
 
     /**
+     * Мост WebTunnel: соединение выглядит обычным HTTPS к настоящему сайту с
+     * настоящим сертификатом, а секрет — путь внутри TLS.
+     */
+    const val TOR_ENTRY_WEBTUNNEL: String = "webtunnel"
+
+    /** Мост obfs4 — «похоже ни на что»: поток равномерно случайный с первого байта. */
+    const val TOR_ENTRY_OBFS4: String = "obfs4"
+
+    /** Обычный (vanilla) мост: сам протокол Tor, но адрес не в публичных списках. */
+    const val TOR_ENTRY_VANILLA: String = "vanilla"
+
+    /** Вход напрямую в сеть Tor, без мостов вовсе. */
+    const val TOR_ENTRY_DIRECT: String = "direct"
+
+    /**
+     * Способы входа в сеть Tor: `значение` → подпись на кнопке.
+     *
+     * **Порядок — по убыванию вероятности пройти из России**, и он же порядок
+     * кнопок. Обоснование по замерам, а не по вкусу:
+     *
+     *  * `webtunnel` — снаружи это HTTPS к живому сайту, сопровождаемому обычным
+     *    сертификатом; блокировать его нечем, кроме блокировки самого домена.
+     *    Именно он, по разбору `kb/dns-tunnel-and-tor.md`, вытащил Telegram и
+     *    Gemini в Петербурге, а сборщик OnionHop отдаёт живые строки (57,5 % по
+     *    апгрейду до WebSocket, замер из РФ).
+     *  * `obfs4` — «похоже ни на что», и это же его слабое место: равномерная
+     *    случайность с первого байта сама по себе признак. У нас 14 из 14
+     *    настоящих рукопожатий с мостами из РФ (S49), то есть работает, но
+     *    считается детектируемым.
+     *  * `vanilla` — обфускации нет вовсе, спасает только то, что адрес моста не
+     *    в публичных списках; DPI, узнающий рукопожатие Tor, его видит.
+     *  * `direct` — публичные входные узлы, их адреса известны всем.
+     *
+     * Названия — общепринятые имена самих транспортов Tor, а не наши выдумки:
+     * так они называются в torrc, в Tor Browser и в списках мостов.
+     *
+     * Почему выбор вообще возможен. `webtunnel` и `obfs4` ходят через наш SOCKS
+     * в ядре Go, и его сокеты помечаются `protect()`. У `vanilla` и прямого
+     * входа соединение открывает сам tor своим сокетом — и это безопасно ровно
+     * потому, что собственный пакет Nova исключён из своего же VPN во **всех**
+     * трёх режимах раздельного туннелирования (`applyOperaSplitTunnelPolicy`).
+     */
+    val TOR_ENTRY_MODES: List<Pair<String, String>> = listOf(
+        TOR_ENTRY_WEBTUNNEL to "WEBTUNNEL",
+        TOR_ENTRY_OBFS4 to "OBFS4",
+        TOR_ENTRY_VANILLA to "VANILLA",
+        TOR_ENTRY_DIRECT to "БЕЗ МОСТОВ",
+    )
+
+    /**
+     * Нужен ли способу входа наш локальный SOCKS с транспортом в ядре.
+     *
+     * У `vanilla` и прямого входа tor соединяется сам, и поднимать прокси
+     * незачем — а лишний слушатель на петле это лишняя поверхность.
+     */
+    fun torEntryUsesPluggableTransport(mode: String): Boolean =
+        normalizeTorEntry(mode).let { it == TOR_ENTRY_WEBTUNNEL || it == TOR_ENTRY_OBFS4 }
+
+    /** Какие мосты нужны этому способу входа; пусто — мосты не нужны вовсе. */
+    fun torBridgeTransportFor(mode: String): String = when (normalizeTorEntry(mode)) {
+        TOR_ENTRY_WEBTUNNEL -> "webtunnel"
+        TOR_ENTRY_OBFS4 -> "obfs4"
+        TOR_ENTRY_VANILLA -> "vanilla"
+        else -> ""
+    }
+
+    /**
+     * Что подставить, если способ входа ещё не выбирали.
+     *
+     * Первый в списке, то есть самый вероятный для России. Проверено на Pixel 4a
+     * 2026-09-10: `webtunnel` доходит до 100 % за четыре секунды и все пять
+     * мостов приняты без единого отказа. Ошибиться здесь дёшево — способ меняется
+     * одним нажатием.
+     */
+    const val DEFAULT_TOR_ENTRY: String = TOR_ENTRY_WEBTUNNEL
+
+    /** Приводит способ входа к известному; всё незнакомое — к [DEFAULT_TOR_ENTRY]. */
+    fun normalizeTorEntry(value: String?): String {
+        val normalized = value?.trim()?.lowercase(Locale.US).orEmpty()
+        return if (TOR_ENTRY_MODES.any { it.first == normalized }) normalized else DEFAULT_TOR_ENTRY
+    }
+
+    /**
      * Подрегионы Opera: `значение региона` → подпись.
      *
      * Список зашит в трёх местах службы (`normalizeOperaCountry`,
@@ -84,26 +169,35 @@ object ConnectionSelectorPolicy {
     /** Приставка строки подрегионов под селектором. Точный ключ поиска в логах. */
     const val SUB_REGION_PREFIX: String = "Регион: "
 
+    /** Приставка той же строки для Tor: там выбирают не регион, а способ входа. */
+    const val TOR_ENTRY_PREFIX: String = "Вход: "
+
+    /** Подпись строки подвыбора: у Tor она про способ входа, у остальных — про регион. */
+    fun subRegionPrefixFor(chipValue: String): String =
+        if (chipValue == CHIP_TOR) TOR_ENTRY_PREFIX else SUB_REGION_PREFIX
+
     /**
-     * Строка под селектором, когда транспорт Tor ещё не собран в этой сборке.
+     * Строка под селектором при выборе Tor.
      *
      * Текст обязан описывать то, что произошло на самом деле, а не то, что
-     * задумано. Первая версия обещала сразу две неправды: «выбор сохранён» — хотя
-     * оба экрана намеренно **не** записывают `tor` регионом и тут же возвращают
-     * отметку на прежнюю кнопку, — и «мосты уже загружаются» даже тогда, когда
-     * сбор не начинался, потому что список младше суток или прогон уже идёт.
+     * задумано. Прежняя версия обещала сразу две неправды: «выбор сохранён» —
+     * хотя оба экрана тогда намеренно **не** записывали `tor` регионом, — и
+     * «мосты уже загружаются» даже тогда, когда сбор не начинался, потому что
+     * список младше суток или прогон уже идёт. С 1.32.2 выбор **сохраняется**:
+     * транспорт есть. Осталось сказать о его цене, и сказать до подключения, а
+     * не после — «интернет стал медленным» иначе читается как поломка.
      *
      * @param bridgesAreLoading начался ли сбор именно сейчас.
      * @param knownBridges сколько мостов уже лежит на диске.
      */
     fun torNoticeFor(bridgesAreLoading: Boolean, knownBridges: Int): String {
         val head = when {
-            bridgesAreLoading -> "TOR: собираем мосты"
-            knownBridges > 0 -> "TOR: мостов уже собрано $knownBridges"
-            else -> "TOR: мостов пока нет"
+            bridgesAreLoading -> "TOR: собираем мосты, без них подключения не будет"
+            knownBridges > 0 -> "TOR выбран, мостов в списке $knownBridges"
+            else -> "TOR выбран, мосты соберутся при подключении"
         }
-        return "$head. Сам транспорт появится в следующей сборке, поэтому протокол " +
-            "остался прежним."
+        return "$head. Через Tor идёт только TCP: QUIC и UDP не пойдут, скорость " +
+            "заметно ниже обычной, а первое подключение занимает до минуты."
     }
 
     /**
@@ -155,6 +249,7 @@ object ConnectionSelectorPolicy {
     fun subRegionsFor(chipValue: String, protonCountries: Collection<String>): List<Pair<String, String>> =
         when (chipValue) {
             CHIP_OPERA -> OPERA_SUB_REGIONS
+            CHIP_TOR -> TOR_ENTRY_MODES
             "proton" -> {
                 val countries = CountryDisplayOrder.order(protonCountries)
                 if (countries.isEmpty()) {

@@ -411,6 +411,33 @@
                 android:textSize="11sp" />
 
             <!--
+                Подсказка про системный «Частный DNS», и стоит она именно здесь —
+                рядом с выбором входа в Tor, а не в общей строке под селектором.
+                Причина простая: с включённым строгим DoT ни одно имя не
+                открывается вовсе, то есть выбирать вход бессмысленно, пока это
+                не выключено. Нажатие открывает объяснение целиком.
+            -->
+            <TextView
+                android:id="@+id/tv_exit_dot_hint"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:background="@drawable/bg_region_chip"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:maxLines="1"
+                android:paddingStart="10dp"
+                android:paddingTop="4dp"
+                android:paddingEnd="10dp"
+                android:paddingBottom="4dp"
+                android:text="Отключите DoT"
+                android:textColor="#FFD166"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                android:visibility="gone" />
+
+            <!--
                 Стран у Proton бывает десять, и в ширину они не помещаются. Список
                 прокручивается вбок, а не переносится: четвёртая полоса обязана
                 остаться одной полосой.

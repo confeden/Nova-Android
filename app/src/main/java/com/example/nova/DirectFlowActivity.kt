@@ -96,6 +96,9 @@ class DirectFlowActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Тему ставим до super.onCreate: позже окно уже создано со старым фоном,
+        // и выбор доехал бы только до следующего открытия экрана.
+        NovaTheme.apply(this)
         super.onCreate(savedInstanceState)
         // Контекст логгера нужно передавать до любого обращения к LogManager
         LogManager.setAppContext(this)

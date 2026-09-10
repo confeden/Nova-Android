@@ -40,14 +40,7 @@ class NovaTileService : TileService() {
         val currentState = resolveEffectiveState(clientData)
 
         if (currentState != NovaVpnService.STATE_STOPPED) {
-            // Stop
-            clientData.clearTransientConnectingPending()
-            clientData.clearSoftReapplyPending()
-            clientData.clearRestartSession()
-            clientData.saveServiceState(NovaVpnService.STATE_STOPPED)
-            val intent = Intent(this, NovaVpnService::class.java)
-            intent.action = "STOP_VPN"
-            startService(intent)
+            NovaTunnelControl.stop(this, "Плитка в шторке")
             
             val tile = qsTile
             tile.state = Tile.STATE_INACTIVE
@@ -96,6 +89,7 @@ class NovaTileService : TileService() {
                 putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_HOST, clientData.getTrafficMaskHost())
                 putExtra(NovaVpnService.EXTRA_REAPPLY_SNI_MASK_MODE, clientData.getSniMaskMode())
                 putExtra(NovaVpnService.EXTRA_REAPPLY_SNI_MASK_LIST, clientData.getSniCustomListRaw())
+                putExtra(NovaVpnService.EXTRA_REAPPLY_TUNNEL_MTU, clientData.getTunnelMtu())
                 // «Обход по доменам» — по той же причине: список, записанный экраном, в
                 // процессе `:vpn` не виден, и без extras он бы сохранялся и не действовал.
                 putExtra(

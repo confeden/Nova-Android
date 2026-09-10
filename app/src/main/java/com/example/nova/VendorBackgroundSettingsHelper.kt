@@ -107,6 +107,18 @@ object VendorBackgroundSettingsHelper {
         }
     }
 
+    /**
+     * Управляет ли фоном производитель, а не только Android.
+     *
+     * Нужно ровно для одного: объяснить, почему «Работать в фоне» остаётся серым
+     * после того, как человек выставил в оболочке «Нет ограничений». Это не сбой
+     * переключателя — у MIUI/HyperOS, EMUI и прочих свой список фоновых прав,
+     * никак не связанный с `PowerManager.isIgnoringBatteryOptimizations`, и
+     * вендорная настройка androidʼный признак не выставляет. Молчать об этом
+     * нельзя: переключатель, который «не включается», читается как сломанный.
+     */
+    fun isVendorManagedBattery(): Boolean = detectSkin() != Skin.NONE
+
     private fun detectSkin(): Skin {
         val manufacturer = Build.MANUFACTURER.orEmpty().trim().lowercase()
         val brand = Build.BRAND.orEmpty().trim().lowercase()

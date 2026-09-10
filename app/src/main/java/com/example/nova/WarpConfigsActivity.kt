@@ -438,6 +438,9 @@ class WarpConfigsActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Тему ставим до super.onCreate: позже окно уже создано со старым фоном,
+        // и выбор доехал бы только до следующего открытия экрана.
+        NovaTheme.apply(this)
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_warp_configs)
         NovaFontHelper.apply(findViewById(android.R.id.content))
@@ -924,7 +927,7 @@ class WarpConfigsActivity : AppCompatActivity() {
                 entries.getOrNull(which)?.second?.invoke()
             }
             .setNegativeButton("Отмена", null)
-            .show()
+            .showNova()
     }
 
     /**
@@ -956,7 +959,7 @@ class WarpConfigsActivity : AppCompatActivity() {
                 Toast.makeText(this, "Удалено записей: $removed", Toast.LENGTH_LONG).show()
             }
             .setNegativeButton("Отмена", null)
-            .show()
+            .showNova()
     }
 
     /** Управление подпиской: состояние, обновление, интервал и удаление. */
@@ -978,7 +981,7 @@ class WarpConfigsActivity : AppCompatActivity() {
                 entries.getOrNull(which)?.second?.invoke()
             }
             .setNegativeButton("Закрыть", null)
-            .show()
+            .showNova()
     }
 
     private fun showSubscriptionIntervalDialog(subscription: VlessSubscriptionState) {
@@ -1005,7 +1008,7 @@ class WarpConfigsActivity : AppCompatActivity() {
                 Toast.makeText(this, "Интервал обновления: ${options[which].second}", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Отмена", null)
-            .show()
+            .showNova()
     }
 
     private fun showDeleteSubscriptionDialog(subscription: VlessSubscriptionState) {
@@ -1030,7 +1033,7 @@ class WarpConfigsActivity : AppCompatActivity() {
                 Toast.makeText(this, "Подписка удалена, профили остались", Toast.LENGTH_LONG).show()
             }
             .setNegativeButton("Отмена", null)
-            .show()
+            .showNova()
     }
 
     private fun buildImportDialogTitle(subscription: VlessSubscriptionState?): View {
@@ -1108,7 +1111,7 @@ class WarpConfigsActivity : AppCompatActivity() {
                 importConfigsFromUrl(input.text?.toString().orEmpty())
             }
             .setNegativeButton("Отмена", null)
-            .show()
+            .showNova()
     }
 
     private fun renderConfigsAsync(importedOnly: Boolean) {
@@ -1235,7 +1238,7 @@ class WarpConfigsActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton("Отмена", null)
-            .show()
+            .showNova()
     }
 
     private fun importConfigsFromUri(uri: Uri) {
@@ -1400,6 +1403,7 @@ class WarpConfigsActivity : AppCompatActivity() {
             .create()
 
         init {
+            dialog.setOnShowListener { NovaDialogs.style(dialog) }
             dialog.show()
         }
 
@@ -2676,7 +2680,7 @@ class WarpConfigsActivity : AppCompatActivity() {
                 renderConfigs()
             }
             .setNegativeButton("Отмена", null)
-            .show()
+            .showNova()
     }
 
     /**

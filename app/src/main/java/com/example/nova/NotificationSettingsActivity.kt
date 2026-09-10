@@ -17,6 +17,9 @@ import androidx.core.content.ContextCompat
 class NotificationSettingsActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Тему ставим до super.onCreate: позже окно уже создано со старым фоном,
+        // и выбор доехал бы только до следующего открытия экрана.
+        NovaTheme.apply(this)
         super.onCreate(savedInstanceState)
         LogManager.setAppContext(this)
         setContentView(R.layout.activity_notification_settings)

@@ -61,10 +61,12 @@ class NovaWidgetProvider : AppWidgetProvider() {
     private fun buildViews(context: Context): RemoteViews {
         val connected = isTunnelUp(ClientData(context))
         return RemoteViews(context.packageName, R.layout.widget_nova).apply {
-            setInt(
+            // Круг живёт в `src`, а не в фоне: фон рисуется по размеру вида и
+            // обрезается, когда лаунчер отводит строку ниже содержимого, а
+            // рисунок при `fitCenter` уменьшается целиком (см. widget_nova.xml).
+            setImageViewResource(
                 R.id.widget_btn_power,
-                "setBackgroundResource",
-                if (connected) R.drawable.bg_widget_power_on else R.drawable.bg_widget_power_off,
+                if (connected) R.drawable.widget_btn_power_on else R.drawable.widget_btn_power_off,
             )
             setOnClickPendingIntent(R.id.widget_btn_power, buildSelfPendingIntent(context, ACTION_TOGGLE, 7101))
             setOnClickPendingIntent(
@@ -87,14 +89,7 @@ class NovaWidgetProvider : AppWidgetProvider() {
     private fun toggleTunnel(context: Context) {
         val clientData = ClientData(context)
         if (isTunnelUp(clientData)) {
-            clientData.clearTransientConnectingPending()
-            clientData.clearSoftReapplyPending()
-            clientData.clearRestartSession()
-            clientData.saveServiceState(NovaVpnService.STATE_STOPPED)
-            context.startService(
-                Intent(context, NovaVpnService::class.java).apply { action = "STOP_VPN" }
-            )
-            LogManager.log("Виджет: остановка туннеля.")
+            NovaTunnelControl.stop(context, "Виджет")
             return
         }
         val intent = Intent(context, NovaVpnService::class.java).apply {
@@ -133,6 +128,7 @@ class NovaWidgetProvider : AppWidgetProvider() {
             putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_HOST, clientData.getTrafficMaskHost())
             putExtra(NovaVpnService.EXTRA_REAPPLY_SNI_MASK_MODE, clientData.getSniMaskMode())
             putExtra(NovaVpnService.EXTRA_REAPPLY_SNI_MASK_LIST, clientData.getSniCustomListRaw())
+            putExtra(NovaVpnService.EXTRA_REAPPLY_TUNNEL_MTU, clientData.getTunnelMtu())
             // «Обход по доменам» — по той же причине: список, записанный экраном, в
             // процессе `:vpn` не виден, и без extras он бы сохранялся и не действовал.
             putExtra(

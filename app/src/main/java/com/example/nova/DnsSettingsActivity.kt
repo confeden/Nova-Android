@@ -88,6 +88,9 @@ class DnsSettingsActivity : AppCompatActivity() {
     private var legacyConfig: DnsSettingsConfig = DnsSettingsConfig()
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Тему ставим до super.onCreate: позже окно уже создано со старым фоном,
+        // и выбор доехал бы только до следующего открытия экрана.
+        NovaTheme.apply(this)
         super.onCreate(savedInstanceState)
         applyZeroTransitionOpen()
         setContentView(R.layout.activity_dns_settings)
@@ -595,6 +598,9 @@ class DnsSettingsActivity : AppCompatActivity() {
             .create()
 
         dialog.setOnShowListener {
+            // Диалог собран через `create()`, а не `showNova()`, потому что
+            // обработчик показа нужен ему самому. Кнопки красим здесь же.
+            NovaDialogs.style(dialog)
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val kind = selectedKind()
                 val value = DnsRule.normalizeValue(kind, valueField.text?.toString())
@@ -668,7 +674,7 @@ class DnsSettingsActivity : AppCompatActivity() {
                 Toast.makeText(this, "Список резолверов сброшен.", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Отмена", null)
-            .show()
+            .showNova()
     }
 
     private fun renderExclusiveActionState() {

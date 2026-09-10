@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Кнопка питания виджета, «отключено», целиком одним рисунком: круг и значок.
+
+    Почему одним, а не фоном плюс `src`. Фон вида рисуется по размеру вида, и
+    когда лаунчер отводит виджету меньше высоты, чем содержимое просит, круг
+    обрезается — именно это владелец и увидел. Рисунок в `src` при
+    `adjustViewBounds` + `scaleType="fitCenter"` не обрезается, а уменьшается
+    целиком, оставаясь кругом.
+
+    Круг не красный: красный на рабочем столе читается как ошибка, а выключенный
+    VPN — не ошибка. Холодный графит с синим подсветом отличается от включённого
+    состояния и не тревожит.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item>
+        <shape android:shape="oval">
+            <size android:width="48dp" android:height="48dp" />
+            <gradient
+                android:angle="270"
+                android:startColor="#FF3A4756"
+                android:endColor="#FF161D26"
+                android:type="linear" />
+            <stroke
+                android:width="1.5dp"
+                android:color="#FF8FA8C4" />
+        </shape>
+    </item>
+
+    <item
+        android:left="12dp"
+        android:top="12dp"
+        android:right="12dp"
+        android:bottom="12dp"
+        android:drawable="@drawable/ic_widget_power" />
+</layer-list>

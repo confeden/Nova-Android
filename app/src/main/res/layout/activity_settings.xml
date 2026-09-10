@@ -33,344 +33,42 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical">
-
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Настройки"
-                android:textColor="#FFFFFF"
+                android:textColor="?attr/novaTextTitle"
                 android:textSize="24sp"
                 android:textStyle="bold"
-                android:layout_marginBottom="16dp"/>
+                android:layout_marginBottom="6dp"/>
 
             <TextView
-                android:id="@+id/row_share_release"
+                android:id="@+id/hdr_group_connection"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="16dp"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
-                android:clickable="true"
-                android:drawableEnd="@drawable/ic_link_classic"
-                android:drawablePadding="10dp"
-                android:focusable="true"
-                android:gravity="center_vertical"
-                android:minHeight="64dp"
-                android:paddingLeft="16dp"
-                android:paddingTop="8dp"
-                android:paddingRight="16dp"
-                android:paddingBottom="8dp"
-                android:text="Скачать последнюю версию"
-                android:textColor="#FFFFFF"
-                android:textSize="16sp"
+                android:layout_marginTop="6dp"
+                android:layout_marginBottom="8dp"
+                android:paddingStart="6dp"
+                android:paddingEnd="6dp"
+                android:fontFamily="sans-serif-medium"
+                android:letterSpacing="0.12"
+                android:text="ПОДКЛЮЧЕНИЕ"
+                android:textColor="?attr/novaTextGroupFrom"
+                android:textSize="11sp"
                 android:textStyle="bold" />
 
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
-                android:minHeight="64dp"
-                android:paddingLeft="16dp"
-                android:paddingTop="8dp"
-                android:paddingRight="16dp"
-                android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Работать в фоне"
-                    android:textColor="#FFFFFF"
-                    android:textSize="16sp"
-                    android:textStyle="bold"/>
-
-                <Switch
-                    android:id="@+id/sw_background"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"/>
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/row_autostart"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
-                android:minHeight="64dp"
-                android:paddingLeft="16dp"
-                android:paddingTop="8dp"
-                android:paddingRight="16dp"
-                android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp"
-                android:clickable="true"
-                android:focusable="true"
-                android:visibility="gone">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Разрешить автозапуск"
-                    android:textColor="#FFFFFF"
-                    android:textSize="16sp"
-                    android:textStyle="bold"/>
-
-                <Switch
-                    android:id="@+id/sw_autostart"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"/>
-            </LinearLayout>
-
-            <!--
-                Подстрока к «Работать в фоне»: намеренно ниже основной строки и с
-                отрицательной отбивкой сверху — она поясняет соседа, а не живёт сама по себе.
-            -->
-            <TextView
-                android:id="@+id/row_background_vendor"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="-8dp"
-                android:layout_marginBottom="16dp"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#163A4030"
-                android:clickable="true"
-                android:focusable="true"
-                android:gravity="center_vertical"
-                android:minHeight="44dp"
-                android:paddingLeft="16dp"
-                android:paddingTop="8dp"
-                android:paddingRight="16dp"
-                android:paddingBottom="8dp"
-                android:text="Открыть доп. настройки фона"
-                android:textColor="#7EEA87"
-                android:textSize="13sp"
-                android:visibility="gone" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
-                android:minHeight="64dp"
-                android:paddingLeft="16dp"
-                android:paddingTop="8dp"
-                android:paddingRight="16dp"
-                android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Реконнект при обрыве связи"
-                    android:textColor="#FFFFFF"
-                    android:textSize="16sp"
-                    android:textStyle="bold"/>
-
-                <Switch
-                    android:id="@+id/sw_autoreconnect"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"/>
-            </LinearLayout>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
-                android:minHeight="64dp"
-                android:paddingLeft="16dp"
-                android:paddingTop="8dp"
-                android:paddingRight="16dp"
-                android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp"
-                android:id="@+id/row_auto_update">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Автообновление приложения"
-                    android:textColor="#FFFFFF"
-                    android:textSize="16sp"
-                    android:textStyle="bold"/>
-
-                <Switch
-                    android:id="@+id/sw_auto_update"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"/>
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/row_awg_adaptation"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
-                android:minHeight="64dp"
-                android:paddingLeft="16dp"
-                android:paddingTop="8dp"
-                android:paddingRight="16dp"
-                android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp">
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="Адаптация к сети в фоновом режиме"
-                        android:textColor="#FFFFFF"
-                        android:textSize="16sp"
-                        android:textStyle="bold"/>
-
-                    <TextView
-                        android:id="@+id/tv_awg_adaptation_summary"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="Подбирает отпечатки встроенных профилей"
-                        android:textColor="#AAAAAA"
-                        android:textSize="12sp"/>
-                </LinearLayout>
-
-                <Switch
-                    android:id="@+id/sw_awg_adaptation"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"/>
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/row_manual_update_block"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:layout_marginTop="-8dp"
-                android:layout_marginBottom="16dp">
-
-                <TextView
-                    android:id="@+id/row_manual_update_check"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:background="@drawable/bg_settings_item"
-                    android:backgroundTint="#20FFFFFF"
-                    android:clickable="true"
-                    android:drawableEnd="@drawable/ic_update_manual"
-                    android:drawablePadding="12dp"
-                    android:focusable="true"
-                    android:gravity="center_vertical"
-                    android:minHeight="64dp"
-                    android:paddingLeft="16dp"
-                    android:paddingTop="8dp"
-                    android:paddingRight="16dp"
-                    android:paddingBottom="8dp"
-                    android:text="Проверить обновления"
-                    android:textColor="#FFFFFF"
-                    android:textSize="16sp"
-                    android:textStyle="bold" />
-
-                <ProgressBar
-                    android:id="@+id/pb_manual_update"
-                    style="?android:attr/progressBarStyleHorizontal"
-                    android:layout_width="match_parent"
-                    android:layout_height="4dp"
-                    android:layout_marginTop="8dp"
-                    android:indeterminate="false"
-                    android:indeterminateTint="#13A10E"
-                    android:max="100"
-                    android:progress="0"
-                    android:progressBackgroundTint="#203A2030"
-                    android:progressTint="#13A10E"
-                    android:visibility="gone" />
-
-                <TextView
-                    android:id="@+id/tv_manual_update_status"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:textColor="#7EEA87"
-                    android:textSize="12sp"
-                    android:visibility="gone" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/row_warp_configs"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
-                android:minHeight="64dp"
-                android:paddingLeft="16dp"
-                android:paddingTop="8dp"
-                android:paddingRight="16dp"
-                android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp"
-                android:clickable="true"
-                android:focusable="true">
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Конфигурации"
-                        android:textColor="#FFFFFF"
-                        android:textSize="16sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/tv_warp_configs_note"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="3dp"
-                        android:text="Открыть список встроенных, импортированных и ручных конфигураций"
-                        android:textColor="#AAAAAA"
-                        android:textSize="12sp" />
-                </LinearLayout>
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="12dp"
-                    android:text="›"
-                    android:textColor="#FFFFFF"
-                    android:textSize="24sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
+                android:background="?attr/novaCardBackground"
                 android:minHeight="64dp"
                 android:paddingLeft="12dp"
                 android:paddingTop="8dp"
                 android:paddingRight="12dp"
                 android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp">
+                android:layout_marginBottom="6dp">
 
                 <TextView
                     android:id="@+id/tv_connection_selector_title"
@@ -399,7 +97,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="AUTO"
-                        android:textColor="#FFFFFF"
+                        android:textColor="?attr/novaTextTitle"
                         android:textSize="11sp"
                         android:paddingStart="0dp"
                         android:paddingEnd="0dp"
@@ -412,7 +110,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="WARP"
-                        android:textColor="#FFFFFF"
+                        android:textColor="?attr/novaTextTitle"
                         android:textSize="11sp"
                         android:paddingStart="0dp"
                         android:paddingEnd="0dp"
@@ -425,7 +123,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="OPERA"
-                        android:textColor="#FFFFFF"
+                        android:textColor="?attr/novaTextTitle"
                         android:textSize="11sp"
                         android:paddingStart="0dp"
                         android:paddingEnd="0dp"
@@ -438,7 +136,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="MASQUE"
-                        android:textColor="#FFFFFF"
+                        android:textColor="?attr/novaTextTitle"
                         android:textSize="11sp"
                         android:paddingStart="0dp"
                         android:paddingEnd="0dp"
@@ -451,7 +149,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="PROTON"
-                        android:textColor="#FFFFFF"
+                        android:textColor="?attr/novaTextTitle"
                         android:textSize="11sp"
                         android:paddingStart="0dp"
                         android:paddingEnd="0dp"
@@ -464,7 +162,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="TOR"
-                        android:textColor="#FFFFFF"
+                        android:textColor="?attr/novaTextTitle"
                         android:textSize="11sp"
                         android:paddingStart="0dp"
                         android:paddingEnd="0dp"
@@ -496,7 +194,7 @@
                     android:clickable="true"
                     android:focusable="true"
                     android:text="Обновить профили Proton"
-                    android:textColor="#FFFFFF"
+                    android:textColor="?attr/novaTextTitle"
                     android:textSize="13sp"
                     android:visibility="gone" />
 
@@ -505,7 +203,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="Последний выход: неизвестно"
-                    android:textColor="#AAAAAA"
+                    android:textColor="?attr/novaTextHint"
                     android:textSize="12sp"
                     android:visibility="gone"/>
             </LinearLayout>
@@ -531,21 +229,20 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
+                android:background="?attr/novaCardBackground"
                 android:minHeight="64dp"
                 android:paddingLeft="16dp"
                 android:paddingTop="8dp"
                 android:paddingRight="16dp"
                 android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp">
+                android:layout_marginBottom="6dp">
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
                     android:text="Личные профили"
-                    android:textColor="#FFFFFF"
+                    android:textColor="?attr/novaTextTitle"
                     android:textSize="16sp"
                     android:textStyle="bold" />
 
@@ -554,7 +251,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="6dp"
                     android:text="Личные профили будут использоваться в первую очередь"
-                    android:textColor="#FFFFFF"
+                    android:textColor="?attr/novaTextTitle"
                     android:textSize="14sp" />
 
                 <TextView
@@ -562,7 +259,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="6dp"
-                    android:textColor="#7EEA87"
+                    android:textColor="?attr/novaAccent"
                     android:textSize="12sp"
                     android:visibility="gone" />
 
@@ -576,7 +273,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="6dp"
-                    android:textColor="#AAAAAA"
+                    android:textColor="?attr/novaTextHint"
                     android:textSize="12sp"
                     android:visibility="gone" />
 
@@ -592,7 +289,7 @@
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
                         android:text="Обходить московский узел Cloudflare (DME)"
-                        android:textColor="#FFFFFF"
+                        android:textColor="?attr/novaTextTitle"
                         android:textSize="16sp"
                         android:textStyle="bold" />
 
@@ -607,24 +304,23 @@
                     android:layout_height="wrap_content"
                     android:layout_marginBottom="4dp"
                     android:text="Меняет узел Cloudflare. Страна выхода при этом тоже может смениться — но не обязана, решает Cloudflare. Каждое переключение — переподключение."
-                    android:textColor="#AAAAAA"
+                    android:textColor="?attr/novaTextHint"
                     android:textSize="12sp" />
             </LinearLayout>
 
             <LinearLayout
-                android:id="@+id/row_main_background"
+                android:id="@+id/row_warp_configs"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
                 android:gravity="center_vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
+                android:background="?attr/novaCardBackground"
                 android:minHeight="64dp"
                 android:paddingLeft="16dp"
                 android:paddingTop="8dp"
                 android:paddingRight="16dp"
                 android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp"
+                android:layout_marginBottom="6dp"
                 android:clickable="true"
                 android:focusable="true">
 
@@ -637,17 +333,21 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Фон главного экрана"
-                        android:textColor="#FFFFFF"
+                        android:text="Конфигурации"
+                        android:textColor="?attr/novaTextTitle"
                         android:textSize="16sp"
-                        android:textStyle="bold" />
+                        android:textStyle="bold"
+                        android:drawableStart="@drawable/ic_nova_list"
+                        android:drawablePadding="14dp"
+                        android:drawableTint="?attr/novaIconTint" />
 
                     <TextView
+                        android:id="@+id/tv_warp_configs_note"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="3dp"
-                        android:text="Изображение, анимация или чистый фон"
-                        android:textColor="#AAAAAA"
+                        android:text="Открыть список встроенных, импортированных и ручных конфигураций"
+                        android:textColor="?attr/novaTextHint"
                         android:textSize="12sp" />
                 </LinearLayout>
 
@@ -656,309 +356,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginStart="12dp"
                     android:text="›"
-                    android:textColor="#FFFFFF"
-                    android:textSize="24sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/row_qs_tile"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
-                android:minHeight="64dp"
-                android:paddingLeft="16dp"
-                android:paddingTop="8dp"
-                android:paddingRight="16dp"
-                android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp"
-                android:clickable="true"
-                android:focusable="true">
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Значок в шторке"
-                        android:textColor="#FFFFFF"
-                        android:textSize="16sp"
-                        android:textStyle="bold"/>
-
-                    <TextView
-                        android:id="@+id/tv_qs_tile_note"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="3dp"
-                        android:text=""
-                        android:textColor="#AAAAAA"
-                        android:textSize="12sp"
-                        android:visibility="gone"/>
-                </LinearLayout>
-
-                <Switch
-                    android:id="@+id/sw_qs_tile"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:clickable="true"
-                    android:focusable="true"/>
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/row_dns_settings"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
-                android:minHeight="64dp"
-                android:paddingLeft="16dp"
-                android:paddingTop="8dp"
-                android:paddingRight="16dp"
-                android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp"
-                android:clickable="true"
-                android:focusable="true">
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Настройка DNS"
-                        android:textColor="#FFFFFF"
-                        android:textSize="16sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="3dp"
-                        android:text="Глобальный DNS и DNS для выбранного приложения"
-                        android:textColor="#AAAAAA"
-                        android:textSize="12sp" />
-                </LinearLayout>
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="12dp"
-                    android:text="›"
-                    android:textColor="#FFFFFF"
-                    android:textSize="24sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/row_notification_settings"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
-                android:minHeight="64dp"
-                android:paddingLeft="16dp"
-                android:paddingTop="8dp"
-                android:paddingRight="16dp"
-                android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp"
-                android:clickable="true"
-                android:focusable="true">
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Уведомление"
-                        android:textColor="#FFFFFF"
-                        android:textSize="16sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="3dp"
-                        android:text="Скорость и транспорт в шторке"
-                        android:textColor="#AAAAAA"
-                        android:textSize="12sp" />
-                </LinearLayout>
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="12dp"
-                    android:text="›"
-                    android:textColor="#FFFFFF"
-                    android:textSize="24sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/row_domain_bypass"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
-                android:minHeight="64dp"
-                android:paddingLeft="16dp"
-                android:paddingTop="8dp"
-                android:paddingRight="16dp"
-                android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp"
-                android:clickable="true"
-                android:focusable="true">
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Обход по доменам"
-                        android:textColor="#FFFFFF"
-                        android:textSize="16sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/tv_domain_bypass_summary"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="3dp"
-                        android:text="Свои домены мимо туннеля"
-                        android:textColor="#AAAAAA"
-                        android:textSize="12sp" />
-                </LinearLayout>
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="12dp"
-                    android:text="›"
-                    android:textColor="#FFFFFF"
-                    android:textSize="24sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/row_direct_flow"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
-                android:minHeight="64dp"
-                android:paddingLeft="16dp"
-                android:paddingTop="8dp"
-                android:paddingRight="16dp"
-                android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp"
-                android:clickable="true"
-                android:focusable="true">
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Прямой поток"
-                        android:textColor="#FFFFFF"
-                        android:textSize="16sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/tv_direct_flow_summary"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="3dp"
-                        android:text="Приложения всегда мимо туннеля"
-                        android:textColor="#AAAAAA"
-                        android:textSize="12sp" />
-                </LinearLayout>
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="12dp"
-                    android:text="›"
-                    android:textColor="#FFFFFF"
-                    android:textSize="24sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/row_add_widget"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
-                android:minHeight="64dp"
-                android:paddingLeft="16dp"
-                android:paddingTop="8dp"
-                android:paddingRight="16dp"
-                android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp"
-                android:clickable="true"
-                android:focusable="true">
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Виджет на рабочий стол"
-                        android:textColor="#FFFFFF"
-                        android:textSize="16sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="3dp"
-                        android:text="Две кнопки: подключение и следующий профиль"
-                        android:textColor="#AAAAAA"
-                        android:textSize="12sp" />
-                </LinearLayout>
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="12dp"
-                    android:text="+"
-                    android:textColor="#FFFFFF"
+                    android:textColor="?attr/novaTextTitle"
                     android:textSize="24sp"
                     android:textStyle="bold" />
             </LinearLayout>
@@ -969,14 +367,13 @@
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
                 android:gravity="center_vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
+                android:background="?attr/novaCardBackground"
                 android:minHeight="64dp"
                 android:paddingLeft="16dp"
                 android:paddingTop="8dp"
                 android:paddingRight="16dp"
                 android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp"
+                android:layout_marginBottom="6dp"
                 android:clickable="true"
                 android:focusable="true">
 
@@ -990,16 +387,19 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="SNI маскировка"
-                        android:textColor="#FFFFFF"
+                        android:textColor="?attr/novaTextTitle"
                         android:textSize="16sp"
-                        android:textStyle="bold" />
+                        android:textStyle="bold"
+                        android:drawableStart="@drawable/ic_nova_mask"
+                        android:drawablePadding="14dp"
+                        android:drawableTint="?attr/novaIconTint" />
 
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="3dp"
                         android:text="Имя в TLS-рукопожатии: авто или свой список"
-                        android:textColor="#AAAAAA"
+                        android:textColor="?attr/novaTextHint"
                         android:textSize="12sp" />
                 </LinearLayout>
 
@@ -1008,9 +408,115 @@
                     android:layout_height="wrap_content"
                     android:layout_marginStart="12dp"
                     android:text="›"
-                    android:textColor="#FFFFFF"
+                    android:textColor="?attr/novaTextTitle"
                     android:textSize="24sp"
                     android:textStyle="bold" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/row_awg_adaptation"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="?attr/novaCardBackground"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="6dp">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Адаптация к сети в фоновом режиме"
+                        android:textColor="?attr/novaTextTitle"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:drawableStart="@drawable/ic_nova_tune"
+                        android:drawablePadding="14dp"
+                        android:drawableTint="?attr/novaIconTint" />
+
+                    <TextView
+                        android:id="@+id/tv_awg_adaptation_summary"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Подбирает отпечатки встроенных профилей"
+                        android:textColor="?attr/novaTextHint"
+                        android:textSize="12sp"/>
+                </LinearLayout>
+
+                <Switch
+                    android:id="@+id/sw_awg_adaptation"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"/>
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/row_tunnel_mtu"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:background="?attr/novaCardBackground"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="6dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="MTU туннеля"
+                        android:textColor="?attr/novaTextTitle"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:drawableStart="@drawable/ic_nova_route"
+                        android:drawablePadding="14dp"
+                        android:drawableTint="?attr/novaIconTint" />
+
+                    <TextView
+                        android:id="@+id/tv_tunnel_mtu_value"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="12dp"
+                        android:text="1280"
+                        android:textColor="?attr/novaTextTitle"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <SeekBar
+                    android:id="@+id/sb_tunnel_mtu"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:progressTint="?attr/novaIconTint"
+                    android:thumbTint="?attr/novaIconTint" />
+
+                <TextView
+                    android:id="@+id/tv_tunnel_mtu_summary"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:text="Размер пакета внутри туннеля"
+                    android:textColor="?attr/novaTextHint"
+                    android:textSize="12sp" />
             </LinearLayout>
 
             <LinearLayout
@@ -1019,14 +525,13 @@
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
                 android:gravity="center_vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
+                android:background="?attr/novaCardBackground"
                 android:minHeight="64dp"
                 android:paddingLeft="16dp"
                 android:paddingTop="8dp"
                 android:paddingRight="16dp"
                 android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp"
+                android:layout_marginBottom="6dp"
                 android:clickable="true"
                 android:focusable="true">
 
@@ -1040,17 +545,20 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="Прокси для вызовов API Opera"
-                        android:textColor="#FFFFFF"
+                        android:textColor="?attr/novaTextTitle"
                         android:textSize="16sp"
-                        android:textStyle="bold" />
+                        android:textStyle="bold"
+                        android:drawableStart="@drawable/ic_nova_proxy"
+                        android:drawablePadding="14dp"
+                        android:drawableTint="?attr/novaIconTint" />
 
                     <TextView
                         android:id="@+id/tv_opera_api_proxy_note"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="3dp"
-                        android:text="Не задан"
-                        android:textColor="#AAAAAA"
+                        android:text="Свой не задан — используется прокси Nova"
+                        android:textColor="?attr/novaTextHint"
                         android:textSize="12sp" />
                 </LinearLayout>
 
@@ -1059,7 +567,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginStart="12dp"
                     android:text="›"
-                    android:textColor="#FFFFFF"
+                    android:textColor="?attr/novaTextTitle"
                     android:textSize="24sp"
                     android:textStyle="bold" />
             </LinearLayout>
@@ -1070,14 +578,13 @@
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
                 android:gravity="center_vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
+                android:background="?attr/novaCardBackground"
                 android:minHeight="64dp"
                 android:paddingLeft="16dp"
                 android:paddingTop="8dp"
                 android:paddingRight="16dp"
                 android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp"
+                android:layout_marginBottom="6dp"
                 android:clickable="true"
                 android:focusable="true">
 
@@ -1091,9 +598,12 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="Лицензия WARP+"
-                        android:textColor="#FFFFFF"
+                        android:textColor="?attr/novaTextTitle"
                         android:textSize="16sp"
-                        android:textStyle="bold" />
+                        android:textStyle="bold"
+                        android:drawableStart="@drawable/ic_nova_key"
+                        android:drawablePadding="14dp"
+                        android:drawableTint="?attr/novaIconTint" />
 
                     <TextView
                         android:id="@+id/tv_warp_license_note"
@@ -1101,7 +611,7 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="3dp"
                         android:text="Не задана — аккаунт бесплатный"
-                        android:textColor="#AAAAAA"
+                        android:textColor="?attr/novaTextHint"
                         android:textSize="12sp" />
                 </LinearLayout>
 
@@ -1110,11 +620,184 @@
                     android:layout_height="wrap_content"
                     android:layout_marginStart="12dp"
                     android:text="›"
-                    android:textColor="#FFFFFF"
+                    android:textColor="?attr/novaTextTitle"
                     android:textSize="24sp"
                     android:textStyle="bold" />
             </LinearLayout>
 
+            <TextView
+                android:id="@+id/hdr_group_routing"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:layout_marginBottom="8dp"
+                android:paddingStart="6dp"
+                android:paddingEnd="6dp"
+                android:fontFamily="sans-serif-medium"
+                android:letterSpacing="0.12"
+                android:text="МАРШРУТИЗАЦИЯ"
+                android:textColor="?attr/novaTextGroupFrom"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
+
+            <LinearLayout
+                android:id="@+id/row_dns_settings"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="?attr/novaCardBackground"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="6dp"
+                android:clickable="true"
+                android:focusable="true">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Настройка DNS"
+                        android:textColor="?attr/novaTextTitle"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:drawableStart="@drawable/ic_nova_dns"
+                        android:drawablePadding="14dp"
+                        android:drawableTint="?attr/novaIconTint" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="Глобальный DNS и DNS для выбранного приложения"
+                        android:textColor="?attr/novaTextHint"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:text="›"
+                    android:textColor="?attr/novaTextTitle"
+                    android:textSize="24sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/row_domain_bypass"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="?attr/novaCardBackground"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="6dp"
+                android:clickable="true"
+                android:focusable="true">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Обход по доменам"
+                        android:textColor="?attr/novaTextTitle"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:drawableStart="@drawable/ic_nova_split"
+                        android:drawablePadding="14dp"
+                        android:drawableTint="?attr/novaIconTint" />
+
+                    <TextView
+                        android:id="@+id/tv_domain_bypass_summary"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="Свои домены мимо туннеля"
+                        android:textColor="?attr/novaTextHint"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:text="›"
+                    android:textColor="?attr/novaTextTitle"
+                    android:textSize="24sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/row_direct_flow"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="?attr/novaCardBackground"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="6dp"
+                android:clickable="true"
+                android:focusable="true">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Прямой поток"
+                        android:textColor="?attr/novaTextTitle"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:drawableStart="@drawable/ic_nova_route"
+                        android:drawablePadding="14dp"
+                        android:drawableTint="?attr/novaIconTint" />
+
+                    <TextView
+                        android:id="@+id/tv_direct_flow_summary"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="Приложения всегда мимо туннеля"
+                        android:textColor="?attr/novaTextHint"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:text="›"
+                    android:textColor="?attr/novaTextTitle"
+                    android:textSize="24sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
 
             <LinearLayout
                 android:id="@+id/row_local_proxy"
@@ -1122,14 +805,13 @@
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
                 android:gravity="center_vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
+                android:background="?attr/novaCardBackground"
                 android:minHeight="64dp"
                 android:paddingLeft="16dp"
                 android:paddingTop="8dp"
                 android:paddingRight="16dp"
                 android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp"
+                android:layout_marginBottom="6dp"
                 android:clickable="true"
                 android:focusable="true">
 
@@ -1143,9 +825,12 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="Раздача через Nova"
-                        android:textColor="#FFFFFF"
+                        android:textColor="?attr/novaTextTitle"
                         android:textSize="16sp"
-                        android:textStyle="bold" />
+                        android:textStyle="bold"
+                        android:drawableStart="@drawable/ic_nova_share"
+                        android:drawablePadding="14dp"
+                        android:drawableTint="?attr/novaIconTint" />
 
                     <TextView
                         android:id="@+id/tv_local_proxy_note"
@@ -1153,7 +838,7 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="3dp"
                         android:text="Пустить в VPN устройства, подключённые к телефону"
-                        android:textColor="#AAAAAA"
+                        android:textColor="?attr/novaTextHint"
                         android:textSize="12sp" />
                 </LinearLayout>
 
@@ -1162,10 +847,545 @@
                     android:layout_height="wrap_content"
                     android:layout_marginStart="12dp"
                     android:text="›"
-                    android:textColor="#FFFFFF"
+                    android:textColor="?attr/novaTextTitle"
                     android:textSize="24sp"
                     android:textStyle="bold" />
             </LinearLayout>
+
+            <TextView
+                android:id="@+id/hdr_group_app"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:layout_marginBottom="8dp"
+                android:paddingStart="6dp"
+                android:paddingEnd="6dp"
+                android:fontFamily="sans-serif-medium"
+                android:letterSpacing="0.12"
+                android:text="ПРИЛОЖЕНИЕ"
+                android:textColor="?attr/novaTextGroupFrom"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="?attr/novaCardBackground"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="6dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Работать в фоне"
+                    android:textColor="?attr/novaTextTitle"
+                    android:textSize="16sp"
+                    android:textStyle="bold"
+                    android:drawableStart="@drawable/ic_nova_power"
+                    android:drawablePadding="14dp"
+                    android:drawableTint="?attr/novaIconTint" />
+
+                <Switch
+                    android:id="@+id/sw_background"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"/>
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/row_autostart"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="?attr/novaCardBackground"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="6dp"
+                android:clickable="true"
+                android:focusable="true"
+                android:visibility="gone">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Разрешить автозапуск"
+                    android:textColor="?attr/novaTextTitle"
+                    android:textSize="16sp"
+                    android:textStyle="bold"
+                    android:drawableStart="@drawable/ic_nova_star"
+                    android:drawablePadding="14dp"
+                    android:drawableTint="?attr/novaIconTint" />
+
+                <Switch
+                    android:id="@+id/sw_autostart"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"/>
+            </LinearLayout>
+
+            <!--
+                Подстрока к «Работать в фоне»: намеренно ниже основной строки и с
+                отрицательной отбивкой сверху — она поясняет соседа, а не живёт сама по себе.
+            -->
+            <TextView
+                android:id="@+id/row_background_vendor"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="6dp"
+                android:background="?attr/novaCardBackground"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center_vertical"
+                android:minHeight="44dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:text="Открыть доп. настройки фона"
+                android:textColor="?attr/novaAccent"
+                android:textSize="13sp"
+                android:visibility="gone" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="?attr/novaCardBackground"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="6dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Реконнект при обрыве связи"
+                    android:textColor="?attr/novaTextTitle"
+                    android:textSize="16sp"
+                    android:textStyle="bold"
+                    android:drawableStart="@drawable/ic_nova_reconnect"
+                    android:drawablePadding="14dp"
+                    android:drawableTint="?attr/novaIconTint" />
+
+                <Switch
+                    android:id="@+id/sw_autoreconnect"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"/>
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/row_qs_tile"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="?attr/novaCardBackground"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="6dp"
+                android:clickable="true"
+                android:focusable="true">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Значок в шторке"
+                        android:textColor="?attr/novaTextTitle"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:drawableStart="@drawable/ic_nova_tile"
+                        android:drawablePadding="14dp"
+                        android:drawableTint="?attr/novaIconTint" />
+
+                    <TextView
+                        android:id="@+id/tv_qs_tile_note"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text=""
+                        android:textColor="?attr/novaTextHint"
+                        android:textSize="12sp"
+                        android:visibility="gone"/>
+                </LinearLayout>
+
+                <Switch
+                    android:id="@+id/sw_qs_tile"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:clickable="true"
+                    android:focusable="true"/>
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/row_add_widget"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="?attr/novaCardBackground"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="6dp"
+                android:clickable="true"
+                android:focusable="true">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Виджет на рабочий стол"
+                        android:textColor="?attr/novaTextTitle"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:drawableStart="@drawable/ic_nova_widget"
+                        android:drawablePadding="14dp"
+                        android:drawableTint="?attr/novaIconTint" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="Две кнопки: подключение и следующий профиль"
+                        android:textColor="?attr/novaTextHint"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:text="+"
+                    android:textColor="?attr/novaTextTitle"
+                    android:textSize="24sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/row_main_background"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="?attr/novaCardBackground"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="6dp"
+                android:clickable="true"
+                android:focusable="true">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Фон главного экрана"
+                        android:textColor="?attr/novaTextTitle"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:drawableStart="@drawable/ic_nova_palette"
+                        android:drawablePadding="14dp"
+                        android:drawableTint="?attr/novaIconTint" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="Изображение, анимация или чистый фон"
+                        android:textColor="?attr/novaTextHint"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:text="›"
+                    android:textColor="?attr/novaTextTitle"
+                    android:textSize="24sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/row_app_theme"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="?attr/novaCardBackground"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="6dp"
+                android:clickable="true"
+                android:focusable="true">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Тема оформления"
+                        android:textColor="?attr/novaTextTitle"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:drawableStart="@drawable/ic_nova_theme"
+                        android:drawablePadding="14dp"
+                        android:drawableTint="?attr/novaIconTint" />
+
+                    <TextView
+                        android:id="@+id/tv_app_theme_note"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="Aurora mint"
+                        android:textColor="?attr/novaTextHint"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:text="›"
+                    android:textColor="?attr/novaTextTitle"
+                    android:textSize="24sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/row_notification_settings"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="?attr/novaCardBackground"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="6dp"
+                android:clickable="true"
+                android:focusable="true">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Уведомление"
+                        android:textColor="?attr/novaTextTitle"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:drawableStart="@drawable/ic_nova_bell"
+                        android:drawablePadding="14dp"
+                        android:drawableTint="?attr/novaIconTint" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="Скорость и транспорт в шторке"
+                        android:textColor="?attr/novaTextHint"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:text="›"
+                    android:textColor="?attr/novaTextTitle"
+                    android:textSize="24sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/hdr_group_updates"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:layout_marginBottom="8dp"
+                android:paddingStart="6dp"
+                android:paddingEnd="6dp"
+                android:fontFamily="sans-serif-medium"
+                android:letterSpacing="0.12"
+                android:text="ОБНОВЛЕНИЯ"
+                android:textColor="?attr/novaTextGroupFrom"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="?attr/novaCardBackground"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="6dp"
+                android:id="@+id/row_auto_update">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Автообновление приложения"
+                    android:textColor="?attr/novaTextTitle"
+                    android:textSize="16sp"
+                    android:textStyle="bold"
+                    android:drawableStart="@drawable/ic_nova_update"
+                    android:drawablePadding="14dp"
+                    android:drawableTint="?attr/novaIconTint" />
+
+                <Switch
+                    android:id="@+id/sw_auto_update"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"/>
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/row_manual_update_block"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:layout_marginBottom="6dp">
+
+                <TextView
+                    android:id="@+id/row_manual_update_check"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="?attr/novaCardBackground"
+                    android:clickable="true"
+                    android:drawableEnd="@drawable/ic_update_manual"
+                    android:drawablePadding="12dp"
+                    android:focusable="true"
+                    android:gravity="center_vertical"
+                    android:minHeight="64dp"
+                    android:paddingLeft="16dp"
+                    android:paddingTop="8dp"
+                    android:paddingRight="16dp"
+                    android:paddingBottom="8dp"
+                    android:text="Проверить обновления"
+                    android:textColor="?attr/novaTextTitle"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <ProgressBar
+                    android:id="@+id/pb_manual_update"
+                    style="?android:attr/progressBarStyleHorizontal"
+                    android:layout_width="match_parent"
+                    android:layout_height="4dp"
+                    android:layout_marginTop="8dp"
+                    android:indeterminate="false"
+                    android:indeterminateTint="?attr/novaAccent"
+                    android:max="100"
+                    android:progress="0"
+                    android:progressBackgroundTint="?attr/novaSeparator"
+                    android:progressTint="?attr/novaAccent"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/tv_manual_update_status"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:textColor="?attr/novaAccent"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/row_share_release"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="6dp"
+                android:background="?attr/novaCardBackground"
+                android:clickable="true"
+                android:drawableEnd="@drawable/ic_link_classic"
+                android:drawablePadding="10dp"
+                android:focusable="true"
+                android:gravity="center_vertical"
+                android:minHeight="64dp"
+                android:paddingLeft="16dp"
+                android:paddingTop="8dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:text="Скачать последнюю версию"
+                android:textColor="?attr/novaTextTitle"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:drawableStart="@drawable/ic_nova_download"
+                android:drawableTint="?attr/novaIconTint" />
+
+            <TextView
+                android:id="@+id/hdr_group_diagnostics"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:layout_marginBottom="8dp"
+                android:paddingStart="6dp"
+                android:paddingEnd="6dp"
+                android:fontFamily="sans-serif-medium"
+                android:letterSpacing="0.12"
+                android:text="ДИАГНОСТИКА"
+                android:textColor="?attr/novaTextGroupFrom"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
 
             <!-- Logging Row -->
             <LinearLayout
@@ -1173,14 +1393,13 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#20FFFFFF"
+                android:background="?attr/novaCardBackground"
                 android:minHeight="64dp"
                 android:paddingLeft="16dp"
                 android:paddingTop="8dp"
                 android:paddingRight="16dp"
                 android:paddingBottom="8dp"
-                android:layout_marginBottom="16dp">
+                android:layout_marginBottom="6dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -1199,9 +1418,12 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="Логирование"
-                            android:textColor="#FFFFFF"
+                            android:textColor="?attr/novaTextTitle"
                             android:textSize="16sp"
-                            android:textStyle="bold" />
+                            android:textStyle="bold"
+                            android:drawableStart="@drawable/ic_nova_log"
+                            android:drawablePadding="14dp"
+                            android:drawableTint="?attr/novaIconTint" />
 
                         <TextView
                             android:id="@+id/tv_logs_note"
@@ -1209,7 +1431,7 @@
                             android:layout_height="wrap_content"
                             android:layout_marginTop="3dp"
                             android:text="Выключено"
-                            android:textColor="#AAAAAA"
+                            android:textColor="?attr/novaTextHint"
                             android:textSize="12sp" />
                     </LinearLayout>
 
@@ -1240,7 +1462,7 @@
                         android:clickable="true"
                         android:focusable="true"
                         android:text="Стереть логи"
-                        android:textColor="#FFFFFF"
+                        android:textColor="?attr/novaTextTitle"
                         android:textSize="13sp" />
 
                     <TextView
@@ -1254,17 +1476,33 @@
                         android:clickable="true"
                         android:focusable="true"
                         android:text="Экспорт логов"
-                        android:textColor="#FFFFFF"
+                        android:textColor="?attr/novaTextTitle"
                         android:textSize="13sp" />
                 </LinearLayout>
             </LinearLayout>
+
+            <TextView
+                android:id="@+id/hdr_group_apps_vpn"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:layout_marginBottom="8dp"
+                android:paddingStart="6dp"
+                android:paddingEnd="6dp"
+                android:fontFamily="sans-serif-medium"
+                android:letterSpacing="0.12"
+                android:text="ПРИЛОЖЕНИЯ В ТУННЕЛЕ"
+                android:textColor="?attr/novaTextGroupFrom"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
 
             <TextView
                 android:id="@+id/tv_split_section_title"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Какие приложения используют VPN"
-                android:textColor="#AAAAAA"
+                android:textColor="?attr/novaTextHint"
                 android:textSize="14sp"
                 android:layout_marginBottom="8dp"/>
 
@@ -1273,7 +1511,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text=""
-                android:textColor="#13A10E"
+                android:textColor="?attr/novaAccent"
                 android:textSize="12sp"
                 android:visibility="gone"
                 android:layout_marginBottom="10dp"/>
@@ -1283,31 +1521,31 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:layout_marginBottom="16dp">
+                android:layout_marginBottom="6dp">
 
                 <RadioButton
                     android:id="@+id/rb_all"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="Все"
-                    android:textColor="#FFFFFF"
-                    android:buttonTint="#13A10E"/>
+                    android:textColor="?attr/novaTextTitle"
+                    android:buttonTint="?attr/novaAccent"/>
 
                 <RadioButton
                     android:id="@+id/rb_allow"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="Только выбранные"
-                    android:textColor="#FFFFFF"
-                    android:buttonTint="#13A10E"/>
+                    android:textColor="?attr/novaTextTitle"
+                    android:buttonTint="?attr/novaAccent"/>
 
                 <RadioButton
                     android:id="@+id/rb_disallow"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="Все, кроме выбранных"
-                    android:textColor="#FFFFFF"
-                    android:buttonTint="#13A10E"/>
+                    android:textColor="?attr/novaTextTitle"
+                    android:buttonTint="?attr/novaAccent"/>
             </RadioGroup>
 
             <EditText
@@ -1315,9 +1553,8 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:hint="Поиск приложений..."
-                android:textColor="#FFFFFF"
-                android:textColorHint="#80FFFFFF"
-                android:backgroundTint="#80FFFFFF"
+                android:textColor="?attr/novaTextTitle"
+                android:textColorHint="?attr/novaTextHint"
                 android:layout_marginTop="4dp"
                 android:layout_marginBottom="8dp"
                 android:inputType="text"/>
@@ -1334,7 +1571,7 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:text="Системные приложения"
-                    android:textColor="#FFFFFF"
+                    android:textColor="?attr/novaTextTitle"
                     android:textSize="14sp" />
 
                 <Switch
@@ -1358,7 +1595,7 @@
         android:layout_height="wrap_content"
         android:minHeight="44dp"
         android:background="@drawable/bg_liquid_glass_header"
-        android:textColor="#FFFFFF"
+        android:textColor="?attr/novaTextTitle"
         android:textSize="14sp"
         android:gravity="center"
         android:includeFontPadding="false"

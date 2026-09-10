@@ -26,7 +26,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="SNI маскировка"
-            android:textColor="#50C878"
+            android:textColor="?attr/novaAccent"
             android:textSize="24sp"
             android:textStyle="bold" />
 
@@ -35,15 +35,14 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
             android:text="Имя, которое видно провайдеру в рукопожатии, вместо настоящего. Работает там, где рукопожатие идёт по TLS: MASQUE, прокси Opera и обращения к API при регистрации."
-            android:textColor="#AAAAAA"
+            android:textColor="?attr/novaTextHint"
             android:textSize="12sp" />
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:background="@drawable/bg_settings_item"
-            android:backgroundTint="#20FFFFFF"
+            android:background="?attr/novaCardBackground"
             android:orientation="vertical"
             android:paddingLeft="16dp"
             android:paddingTop="12dp"
@@ -61,7 +60,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:text="Авто"
-                    android:textColor="#FFFFFF"
+                    android:textColor="?attr/novaTextTitle"
                     android:textSize="16sp" />
 
                 <TextView
@@ -70,7 +69,7 @@
                     android:layout_marginStart="32dp"
                     android:layout_marginBottom="8dp"
                     android:text="Приложение выбирает и меняет имя само: сначала российские, затем зарубежные. Если провайдер пускает только к разрешённым адресам, берутся одни российские."
-                    android:textColor="#AAAAAA"
+                    android:textColor="?attr/novaTextHint"
                     android:textSize="12sp" />
 
                 <RadioButton
@@ -78,7 +77,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:text="Свой список"
-                    android:textColor="#FFFFFF"
+                    android:textColor="?attr/novaTextTitle"
                     android:textSize="16sp" />
 
                 <TextView
@@ -86,7 +85,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginStart="32dp"
                     android:text="Имена через запятую. Перебираются по кругу: если одно не сработало, берётся следующее."
-                    android:textColor="#AAAAAA"
+                    android:textColor="?attr/novaTextHint"
                     android:textSize="12sp" />
             </RadioGroup>
 
@@ -95,15 +94,14 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
-                android:background="@drawable/bg_settings_item"
-                android:backgroundTint="#18FFFFFF"
+                android:background="?attr/novaCardBackground"
                 android:hint="vk.com, ya.ru, www.gosuslugi.ru"
-                android:textColorHint="#777777"
+                android:textColorHint="?attr/novaTextHint"
                 android:inputType="textMultiLine|textNoSuggestions"
                 android:minLines="2"
                 android:maxLines="6"
                 android:padding="12dp"
-                android:textColor="#FFFFFF"
+                android:textColor="?attr/novaTextTitle"
                 android:textSize="14sp"
                 android:visibility="gone" />
 
@@ -112,7 +110,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:textColor="#AAAAAA"
+                android:textColor="?attr/novaTextHint"
                 android:textSize="12sp"
                 android:visibility="gone" />
         </LinearLayout>
@@ -121,8 +119,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:background="@drawable/bg_settings_item"
-            android:backgroundTint="#20FFFFFF"
+            android:background="?attr/novaCardBackground"
             android:orientation="vertical"
             android:paddingLeft="16dp"
             android:paddingTop="12dp"
@@ -133,7 +130,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Сейчас"
-                android:textColor="#FFFFFF"
+                android:textColor="?attr/novaTextTitle"
                 android:textSize="16sp"
                 android:textStyle="bold" />
 
@@ -142,7 +139,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
-                android:textColor="#AAAAAA"
+                android:textColor="?attr/novaTextHint"
                 android:textSize="12sp" />
         </LinearLayout>
 
@@ -151,7 +148,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
             android:text="Профили WireGuard и AmneziaWG маскировать нечем: у них нет TLS, а значит и имени в рукопожатии. Их обфускацию задают параметры самого профиля (Jc, S1–S4, H1–H4, I1–I5)."
-            android:textColor="#777777"
+            android:textColor="?attr/novaTextHint"
             android:textSize="12sp" />
     </LinearLayout>
 </ScrollView>

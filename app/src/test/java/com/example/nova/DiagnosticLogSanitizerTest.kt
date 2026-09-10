@@ -46,4 +46,50 @@ class DiagnosticLogSanitizerTest {
         assertFalse(sanitized.contains("someone@example.com"))
         assertTrue(sanitized.contains("<email>"))
     }
+
+    @Test
+    fun `у адреса IPv4 скрывается хвост, а сеть и порт остаются`() {
+        val sanitized = DiagnosticLogSanitizer.sanitize("endpoint 188.114.97.3:939 отвечает")
+        assertTrue(sanitized.contains("188.114.97.***:939"))
+        assertFalse(sanitized.contains("97.3:"))
+    }
+
+    @Test
+    fun `локальные и служебные адреса не трогаются`() {
+        // 172.16.0.2 — внутренний адрес туннеля, общий у всех семян (I7).
+        val sanitized = DiagnosticLogSanitizer.sanitize(
+            "TUN 172.16.0.2, прокси 127.0.0.1:1080, маршрут 0.0.0.0/0, LAN 192.168.1.5"
+        )
+        assertTrue(sanitized.contains("172.16.0.2"))
+        assertTrue(sanitized.contains("127.0.0.1:1080"))
+        assertTrue(sanitized.contains("0.0.0.0/0"))
+        assertTrue(sanitized.contains("192.168.1.5"))
+    }
+
+    @Test
+    fun `известный публичный резолвер остаётся целиком`() {
+        val sanitized = DiagnosticLogSanitizer.sanitize("DNS 8.8.8.8 ответил за 40 мс")
+        assertTrue(sanitized.contains("8.8.8.8"))
+    }
+
+    @Test
+    fun `у адреса IPv6 не остаётся интерфейсной части`() {
+        val sanitized = DiagnosticLogSanitizer.sanitize("выход [2a02:6ea0:c024::17]:2408")
+        assertFalse(sanitized.contains("::17"))
+        assertTrue(sanitized.contains("2a02:6ea0:c024::***"))
+        assertTrue(sanitized.contains("2408"))
+    }
+
+    @Test
+    fun `полная запись IPv6 тоже теряет хвост`() {
+        val sanitized = DiagnosticLogSanitizer.sanitize("адрес 2a02:6ea0:c024:1:f06:b6b8:44c2:6e9e")
+        assertFalse(sanitized.contains("6e9e"))
+        assertTrue(sanitized.contains("2a02:6ea0:c024::***"))
+    }
+
+    @Test
+    fun `время в тексте адресом не считается`() {
+        val sanitized = DiagnosticLogSanitizer.sanitize("сессия шла 10:07:41 и оборвалась")
+        assertEquals("сессия шла 10:07:41 и оборвалась", sanitized)
+    }
 }

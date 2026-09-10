@@ -7638,8 +7638,23 @@ class ClientData(context: Context) {
             .apply()
     }
 
+    /**
+     * @param clearMasqueKey стирать ли заодно ключ MASQUE.
+     *
+     * Отдельный вход, потому что стирание здесь **непарное**: файл чистится, а
+     * память ядра о последнем выпуске — нет, и ближайший вызов возвращает ту же
+     * мёртвую запись обратно вместе с её `issued_at` (полный разбор — в KDoc
+     * `NovaVpnService.discardMasqueKey`). Пока сброс звали только после
+     * обновления приложения, это было безобидно: там ключ и должен уйти. С
+     * появлением cold reset посреди неудачного цикла тот же вызов начал отбирать
+     * исправный ключ мимо разбора, который специально решает его судьбу.
+     *
+     * По умолчанию `true` — прежнее поведение. Ставит `false` тот, кто уже
+     * принял решение сам и, если надо, стёр ключ парой.
+     */
     fun resetWarpRuntimeState(
         clearStoredConfig: Boolean,
+        clearMasqueKey: Boolean = true,
         nowMs: Long = System.currentTimeMillis(),
     ) {
         synchronized(warpVerifiedConfigsLock) {
@@ -7703,8 +7718,20 @@ class ClientData(context: Context) {
                 apply()
             }
             // Ключ MASQUE лежит в файле, а не в настройках, — стираем отдельно.
-            saveMasqueConfigJson(null)
-            saveWarpVerifiedConfigs((manualConfigs + preservedImportedConfigs).distinctBy { it.id })
+            if (clearMasqueKey) saveMasqueConfigJson(null)
+            val kept = (manualConfigs + preservedImportedConfigs).distinctBy { it.id }
+            // Счётчик со знаменателем, а не «сохранили» без числа (G11).
+            //
+            // Сброс — единственное место, где рабочий список конфигураций
+            // переписывается целиком, и «после обновления пропали импортированные
+            // профили» иначе нечем ни подтвердить, ни опровергнуть: в журнале об
+            // этом шаге не было ни строки.
+            LogManager.log(
+                "Сброс состояния: из ${getWarpVerifiedConfigs().size} конфигураций сохраняем " +
+                    "${kept.size} — импортированных ${preservedImportedConfigs.size}, " +
+                    "ручных ${manualConfigs.size}; остальное встроенные семена, они вернутся следом."
+            )
+            saveWarpVerifiedConfigs(kept)
             ensureBundledVerifiedWarpSeeds()
             clearTunnelUiSnapshot()
             setTrafficMaskActiveHost(null)
@@ -7832,7 +7859,19 @@ class ClientData(context: Context) {
                     .forEach(::remove)
                 apply()
             }
-            saveWarpVerifiedConfigs((manualConfigs + preservedImportedConfigs).distinctBy { it.id })
+            val kept = (manualConfigs + preservedImportedConfigs).distinctBy { it.id }
+            // Счётчик со знаменателем, а не «сохранили» без числа (G11).
+            //
+            // Сброс — единственное место, где рабочий список конфигураций
+            // переписывается целиком, и «после обновления пропали импортированные
+            // профили» иначе нечем ни подтвердить, ни опровергнуть: в журнале об
+            // этом шаге не было ни строки.
+            LogManager.log(
+                "Сброс состояния: из ${getWarpVerifiedConfigs().size} конфигураций сохраняем " +
+                    "${kept.size} — импортированных ${preservedImportedConfigs.size}, " +
+                    "ручных ${manualConfigs.size}; остальное встроенные семена, они вернутся следом."
+            )
+            saveWarpVerifiedConfigs(kept)
             ensureBundledVerifiedWarpSeeds()
             setTrafficMaskActiveHost(null)
             setWarpTrafficMaskActiveHost(null)
@@ -7840,6 +7879,25 @@ class ClientData(context: Context) {
     }
 
     // Split Tunneling
+    /**
+     * Ручной MTU туннеля WARP/AWG.
+     *
+     * Значение читают оба процесса, поэтому оно обязано ехать и в намерении
+     * реаплая (I19): `SharedPreferences` кэшируются попроцессно, и без extras
+     * ползунок сохранялся бы, писал в журнал и ничего не менял (G122).
+     */
+    fun getTunnelMtu(): Int = prefs.getInt("tunnel_mtu", NovaVpnService.TUNNEL_MTU_DEFAULT)
+        .coerceIn(NovaVpnService.TUNNEL_MTU_MIN, NovaVpnService.TUNNEL_MTU_MAX)
+
+    fun setTunnelMtu(mtu: Int) {
+        prefs.edit()
+            .putInt(
+                "tunnel_mtu",
+                mtu.coerceIn(NovaVpnService.TUNNEL_MTU_MIN, NovaVpnService.TUNNEL_MTU_MAX),
+            )
+            .commit()
+    }
+
     fun getSplitMode(): Int = prefs.getInt("split_mode", 0)
     fun setSplitMode(mode: Int) { prefs.edit().putInt("split_mode", mode).commit() }
     fun getSplitApps(): Set<String> = prefs.getStringSet("split_apps", emptySet()) ?: emptySet()

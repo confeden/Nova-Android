@@ -1,16 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Размеры объявлены по реальному содержимому, а не по формуле «две ячейки».
+    Размер — ровно две ячейки в ширину и одна строка в высоту, и добиться этого
+    одним `targetCellWidth`/`targetCellHeight` нельзя.
 
-    Рамка с кнопками занимает 144x76dp (12dp отступа + 52dp + 16dp зазор + 52dp +
-    12dp, и 12+52+12 по высоте). Прежние `minWidth="110dp"` и `minHeight="40dp"`
-    были меньше этого, и лаунчер выделял ячейку, в которую содержимое не влезало,
-    — виджет добавлялся обрезанным. Объявленные здесь 160x90dp дают тот же запас
-    поверх содержимого, что и системные отступы хоста на targetSdk 34.
+    Лаунчер считает занимаемые ячейки так: `targetCell*` берётся как желаемый
+    размер, но `minResizeWidth`/`minResizeHeight` переводятся в ячейки той же
+    формулой `ceil((dp + 30) / 70)` и работают как **нижняя граница**, ниже
+    которой желаемый размер не опускают. Прежние `minResizeWidth="160dp"` и
+    `minResizeHeight="90dp"` давали пол в 3x2 — и виджет вставал 3x2, сколько бы
+    ни было написано в `targetCell*`. Это и был «виджет 3x2 вместо 2x1».
 
-    `targetCellWidth`/`targetCellHeight` — с Android 12 лаунчер выбирает размер по
-    ним, а `minWidth`/`minHeight` остаются для более старых. 2x1 — та самая
-    горизонтальная ячейка, о которой шла речь.
+    Отсюда 110x40dp: `ceil(140/70) = 2` ячейки и `ceil(70/70) = 1` строка. То же
+    значение стоит в `minWidth`/`minHeight` — их читают лаунчеры до Android 12,
+    где `targetCell*` не существует вовсе.
+
+    Содержимое (`widget_nova.xml`) при этом 130x68dp и в одну строку помещается:
+    40dp здесь объявленный минимум, а не выделяемая высота. А если строка всё же
+    окажется ниже содержимого, кнопки не обрежутся: круг со значком лежит в `src`
+    с `adjustViewBounds`+`fitCenter` и под теснотой уменьшается целиком.
+
+    `resizeMode="horizontal"`: тянуть по высоте нечего — рамка всё равно по
+    содержимому. `maxResizeWidth` оставляет запас на растягивание вширь.
 
     `previewLayout` показывает в списке виджетов сам виджет; `previewImage`
     оставлен запасным путём для Android 7-11, где `previewLayout` не существует.
@@ -22,12 +32,11 @@
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
     android:initialLayout="@layout/widget_nova"
-    android:maxResizeHeight="180dp"
     android:maxResizeWidth="320dp"
-    android:minHeight="90dp"
-    android:minResizeHeight="90dp"
-    android:minResizeWidth="160dp"
-    android:minWidth="160dp"
+    android:minHeight="40dp"
+    android:minResizeHeight="40dp"
+    android:minResizeWidth="110dp"
+    android:minWidth="110dp"
     android:previewImage="@mipmap/ic_launcher"
     android:previewLayout="@layout/widget_nova"
     android:resizeMode="horizontal"

@@ -106,6 +106,21 @@ data class TorBridge(
         )
 
         /**
+         * Транспорты, которыми приложение действительно умеет подключаться.
+         *
+         * Ровно те три, что отдаёт `ConnectionSelectorPolicy.torBridgeTransportFor`.
+         * Всё остальное — мост, который нельзя выбрать: `snowflake` в
+         * `libgojni.so` не собран (pion/webrtc и `anet` ломают компоновку, G176),
+         * у `meek_lite` и `conjure` нет способа входа, `obfs3`/`obfs2` lyrebird не
+         * даёт вовсе. Сборщик их исправно приносил, хранил и считал: на экране
+         * стояло «живых мостов 37 (obfs4 15, webtunnel 5, snowflake 2, vanilla 15)»
+         * — тридцать семь, из которых подключиться могли тридцать пять. Счёт,
+         * которым нельзя воспользоваться, — неверный счёт, поэтому лишнее
+         * отбрасывается в разборе, а не прячется в отрисовке.
+         */
+        private val SUPPORTED_TRANSPORTS = setOf("obfs4", "webtunnel", "vanilla")
+
+        /**
          * Разбирает строку моста.
          *
          * Форматы: `<transport> <addr:port> <FPR> <key=value>...` и, для
@@ -135,6 +150,10 @@ data class TorBridge(
             if (parts.isEmpty()) return null
             val hasTransport = parts[0].lowercase() in KNOWN_TRANSPORTS
             val transport = if (hasTransport) parts[0].lowercase() else "vanilla"
+            // Подключиться этим мостом нельзя — значит и моста нет. Отказ здесь,
+            // в разборе: иначе строка доедет и до файла, и до счётчика, и до
+            // сводки на экране, и везде будет считаться годной.
+            if (transport !in SUPPORTED_TRANSPORTS) return null
             val rest = if (hasTransport) parts.drop(1) else parts
             val endpoint = rest.getOrNull(0)?.takeIf { it.contains(':') } ?: return null
             val fingerprint = rest.getOrNull(1)
@@ -149,8 +168,17 @@ data class TorBridge(
 
         fun fromJson(json: JSONObject): TorBridge? {
             val line = json.optString("line").takeIf { it.isNotBlank() } ?: return null
+            val transport = json.optString("transport").ifBlank { "vanilla" }
+            // Тот же отбор, что и в [parse], и по той же причине.
+            //
+            // Чтение из файла разбор не повторяет, поэтому без этой строки мосты,
+            // записанные прошлой версией, переживали бы правило: на экране стояло
+            // «живых мостов 37 (obfs4 15, webtunnel 5, vanilla 15)» — тридцать семь
+            // в сумме и тридцать пять в перечислении, то есть два невидимых
+            // подключиться не могли, а в счёт входили.
+            if (transport !in SUPPORTED_TRANSPORTS) return null
             return TorBridge(
-                transport = json.optString("transport").ifBlank { "vanilla" },
+                transport = transport,
                 line = line,
                 endpoint = json.optString("endpoint"),
                 fingerprint = json.optString("fingerprint"),
@@ -402,7 +430,7 @@ object TorBridgeManager {
                 "TOR: мосты ещё не загружались"
             }
         }
-        val parts = listOf("obfs4", "webtunnel", "snowflake", "vanilla")
+        val parts = listOf("obfs4", "webtunnel", "vanilla")
             .mapNotNull { kind -> snapshot.countOf(kind).takeIf { it > 0 }?.let { "$kind $it" } }
         return "TOR: живых мостов ${snapshot.bridges.size} (${parts.joinToString(", ")})"
     }
@@ -592,7 +620,7 @@ object TorBridgeManager {
 
         // Бюджет свой у каждого транспорта: см. PROBE_LIMIT_PER_TRANSPORT.
         val tcpCandidates = bridges
-            .filter { it.transport != "snowflake" && it.transport != "webtunnel" }
+            .filter { it.transport != "webtunnel" }
             .groupBy { it.transport }
             .flatMap { (_, list) -> list.take(PROBE_LIMIT_PER_TRANSPORT) }
         val webtunnelCandidates = bridges
@@ -619,9 +647,7 @@ object TorBridgeManager {
             emptyList()
         }
 
-        // `snowflake` добавляем без проверки: своего адреса у него нет, он живёт
-        // через брокера, и «мост» здесь — это набор фронтов.
-        return bridges.filter { it.transport == "snowflake" } + probed
+        return probed
     }
 
     /**
@@ -689,7 +715,8 @@ object TorBridgeManager {
     private fun fetchMoat(client: OkHttpClient, context: Context): List<TorBridge> {
         val payload = JSONObject()
             .put("country", "ru")
-            .put("transports", JSONArray(listOf("webtunnel", "snowflake", "obfs4")))
+            // snowflake не просим: транспорта в ядре нет, а место в ответе он занимает.
+            .put("transports", JSONArray(listOf("webtunnel", "obfs4")))
             .toString()
 
         runCatching { parseMoat(postJson(client, MOAT_SETTINGS_URL, payload)) }

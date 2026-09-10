@@ -57,4 +57,11 @@ class TorBridgeParseTest {
         assertTrue(bridge != null)
         assertNull(bridge!!.dialTarget())
     }
+
+    @Test
+    fun `snowflake отбрасывается - транспорта в ядре нет`() {
+        val line = "snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 " +
+            "url=https://example.invalid/"
+        assertNull(TorBridge.parse(line))
+    }
 }

@@ -60,6 +60,9 @@ object TorTransport {
     /** Порт SOCKS у tor по умолчанию — по нему и видно, жив ли он. */
     private const val DEFAULT_SOCKS_PORT = 9050
 
+    /** Как часто повторять неизменившуюся строку загрузки. */
+    private const val BOOTSTRAP_REPEAT_MS = 30_000L
+
     /** Как часто спрашивать tor о ходе загрузки. */
     private const val POLL_INTERVAL_MS = 1_000L
 
@@ -552,6 +555,7 @@ object TorTransport {
     private fun awaitBootstrap(service: TorService, isCancelled: () -> Boolean): Int {
         val deadline = SystemClock.elapsedRealtime() + BOOTSTRAP_TIMEOUT_MS
         var lastLogged = ""
+        var lastLoggedAtMs = SystemClock.elapsedRealtime()
         var silentPolls = 0
 
         while (SystemClock.elapsedRealtime() < deadline) {
@@ -573,10 +577,22 @@ object TorTransport {
             } else {
                 silentPolls = 0
             }
-            if (phase.isNotBlank() && phase != lastLogged) {
-                lastLogged = phase
+            // Сравнивается то, что попадёт в журнал, а не сырой ответ tor'а.
+            //
+            // В сыром есть поля, которые меняются на каждом опросе, поэтому
+            // «загрузка 95% — Establishing a Tor circuit» писалась двенадцать раз
+            // за пятьдесят секунд, ни разу не сообщив ничего нового. Но и молчать
+            // полторы минуты нельзя: «застряли на 95 %» — это тоже факт, и по нему
+            // отличают медленную сеть от мёртвой. Поэтому повтор раз в полминуты.
+            val line = summaryOf(phase)
+            val now = SystemClock.elapsedRealtime()
+            val repeatDue = now - lastLoggedAtMs >= BOOTSTRAP_REPEAT_MS
+            if (phase.isNotBlank() && (line != lastLogged || repeatDue)) {
+                val stuck = line == lastLogged
+                lastLogged = line
+                lastLoggedAtMs = now
                 lastBootstrapLine = phase.trim()
-                LogManager.log("TOR: ${summaryOf(phase)}")
+                LogManager.log(if (stuck) "TOR: всё ещё $line" else "TOR: $line")
             }
 
             if (phase.contains("PROGRESS=100") || phase.contains("TAG=done")) {

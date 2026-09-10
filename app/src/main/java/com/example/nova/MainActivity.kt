@@ -68,6 +68,16 @@ class MainActivity : AppCompatActivity() {
      */
     private var lastExitSnapshotLine: String? = null
 
+    /**
+     * Последняя причина, по которой экран показал прошлый снимок вместо замера.
+     *
+     * Опрос IP идёт раз в две секунды, и на Tor трасса не доходит **никогда**:
+     * узел выхода до неё не пускает. Одна и та же строка писалась тридцать раз в
+     * минуту и вытесняла из журнала всё остальное — включая ровно те строки, ради
+     * которых журнал и присылают. Пишем только на смене причины.
+     */
+    private var lastIpFallbackLine: String? = null
+
     companion object {
         /** Сколько ждать прогресс от новой фазы, прежде чем доверять состоянию сервиса. */
         private const val PROGRESS_PHASE_SWITCH_QUIET_MS = 1_500L
@@ -2069,18 +2079,27 @@ class MainActivity : AppCompatActivity() {
             val previous = TorEntryModeStore.read(this)
             val chosen = ConnectionSelectorPolicy.normalizeTorEntry(value)
             val changed = previous != chosen
-            // Запись в файл — это диск, а диск на главном потоке запрещён (I13).
-            // Поток свой, а не `lifecycleScope`: правка обязана дожить до конца,
-            // даже если экран закроют сразу после нажатия (I18).
-            Thread({ TorEntryModeStore.write(this, chosen) }, "NovaTorEntryWrite")
-                .apply { isDaemon = true; start() }
             val label = ConnectionSelectorPolicy.TOR_ENTRY_MODES
                 .firstOrNull { it.first == chosen }?.second ?: chosen
             // Переподключаем только на смене: повторное нажатие на уже выбранный
             // способ не должно ронять живой туннель.
-            val reconnecting = changed &&
-                SessionReapply.isSessionLikelyActive(this, clientData) &&
-                SessionReapply.applyToLiveSession(this, clientData)
+            val reconnecting = changed && SessionReapply.isSessionLikelyActive(this, clientData)
+            // Запись в файл — это диск, а диск на главном потоке запрещён (I13).
+            // Поток свой, а не `lifecycleScope`: правка обязана дожить до конца,
+            // даже если экран закроют сразу после нажатия (I18).
+            //
+            // Реаплай уходит **из того же потока и только после записи**: раньше
+            // он отправлялся сразу, а файл дописывался параллельно, и служба в
+            // `:vpn` успевала прочитать прежний способ входа — то есть человек
+            // жал «obfs4», видел «переподключаемся» и получал прежний вход.
+            // Контекст берётся приложения: поток переживает экран.
+            val appContext = applicationContext
+            Thread({
+                TorEntryModeStore.write(appContext, chosen)
+                if (reconnecting) {
+                    SessionReapply.applyToLiveSession(appContext, ClientData(appContext))
+                }
+            }, "NovaTorEntryWrite").apply { isDaemon = true; start() }
             LogManager.log(
                 "Главный экран: вход в Tor — $label, смена=$changed, переподключение=$reconnecting."
             )
@@ -2942,6 +2961,9 @@ class MainActivity : AppCompatActivity() {
                         lastExitSnapshotLine = line
                         LogManager.log(line)
                     }
+                    // Удачный замер закрывает прошлую причину: если она вернётся,
+                    // это уже новое событие, и увидеть его надо.
+                    if (effectiveSnapshot.measured) lastIpFallbackLine = null
                 }
 
                 if (
@@ -3098,7 +3120,7 @@ class MainActivity : AppCompatActivity() {
             activeTransport == lastObservedIpTransport
         }
         if (!transportMatches) {
-            LogManager.log(
+            logIpFallbackOnce(
                 "UI checkCurrentIp: трасса не дошла, но снимок снят на другом транспорте " +
                     "(${snapshotTransport.ifBlank { lastObservedIpTransport }} вместо $activeTransport) — " +
                     "прошлое наблюдение не подставляем."
@@ -3110,8 +3132,9 @@ class MainActivity : AppCompatActivity() {
             (tunnelSnapshot.ipv4.isNotBlank() || tunnelSnapshot.ipv6.isNotBlank() || tunnelSnapshot.country.isNotBlank()) &&
             tunnelSnapshot.backend.trim().equals(resolvedBackend.trim(), ignoreCase = true)
         ) {
-            LogManager.log(
-                "UI checkCurrentIp: трасса не дошла, показываем прошлый снимок туннеля — не свежее измерение."
+            logIpFallbackOnce(
+                "UI checkCurrentIp: трасса не дошла, показываем прошлый снимок туннеля " +
+                    "(${tunnelSnapshot.country.ifBlank { "--" }}) — не свежее измерение."
             )
             return IpSnapshot(
                 ipv4 = tunnelSnapshot.ipv4,
@@ -3128,8 +3151,9 @@ class MainActivity : AppCompatActivity() {
         val lastExitIp = lastExit.ip.trim()
         val lastExitCountry = lastExit.country.trim()
         if (lastExitIp.isBlank() && lastExitCountry.isBlank()) return null
-        LogManager.log(
-            "UI checkCurrentIp: трасса не дошла, показываем прошлое наблюдение — не свежее измерение."
+        logIpFallbackOnce(
+            "UI checkCurrentIp: трасса не дошла, показываем прошлое наблюдение " +
+                "(${lastExitCountry.ifBlank { "--" }}) — не свежее измерение."
         )
         return IpSnapshot(
             ipv4 = if (isIpv4Address(lastExitIp)) lastExitIp else "",
@@ -4023,25 +4047,47 @@ class MainActivity : AppCompatActivity() {
         return "${NovaVpnService.BACKEND_WARP}: $effectiveCountry"
     }
 
+    /**
+     * Пишет строку про подстановку прошлого наблюдения только на смене причины.
+     */
+    private fun logIpFallbackOnce(message: String) {
+        if (message == lastIpFallbackLine) return
+        lastIpFallbackLine = message
+        LogManager.log(message)
+    }
+
     private fun displayOrDots(ip: String): String {
         return ip.trim().ifBlank { "..." }
     }
 
+    /**
+     * Адрес на экране: сеть видна, хвост скрыт.
+     *
+     * Раньше было наоборот — `***.***.230.61`, — и это ровно та половина, которую
+     * скрывать и надо: сеть у всех, кто сидит на одном выходе, общая, а хвост
+     * принадлежит одному соединению. Экран попадает в отчёт об отказе не реже
+     * журнала: снимок экрана прислать проще всего. Направление маски теперь то же,
+     * что и в [DiagnosticLogSanitizer], и «сменился ли выход» по нему по-прежнему
+     * видно — вместе с провайдером. Кому нужен адрес целиком, тот жмёт на глаз:
+     * `isIpVisible` никуда не делся.
+     */
     private fun maskIpForDisplay(ip: String): String {
         val value = ip.trim()
         if (value.isBlank() || value == "...") return value
 
         val ipv4 = value.split(".")
         if (ipv4.size == 4) {
-            return "***.***.${ipv4[2]}.${ipv4[3]}"
+            return "${ipv4[0]}.${ipv4[1]}.${ipv4[2]}.***"
         }
 
         if (value.contains(":")) {
             val parts = value.split(":").toMutableList()
             val nonEmptyIndexes = parts.indices.filter { parts[it].isNotEmpty() }
             if (nonEmptyIndexes.isNotEmpty()) {
+                // Прячется хвост: интерфейсная часть, по которой устройство узнают
+                // между сеансами, а не префикс сети.
                 val hideCount = (nonEmptyIndexes.size / 2).coerceAtLeast(1)
-                for (index in nonEmptyIndexes.take(hideCount)) {
+                for (index in nonEmptyIndexes.takeLast(hideCount)) {
                     parts[index] = "***"
                 }
                 return parts.joinToString(":")

@@ -2065,7 +2065,7 @@ class SettingsActivity : AppCompatActivity() {
 
         // не в этой активности.
 
-        if (SessionReapply.launchControlledOperaRestart(this, clientData)) {
+        if (SessionReapply.launchControlledTunRestart(this, clientData)) {
 
             Toast.makeText(this, toastMessage, Toast.LENGTH_SHORT).show()
 
@@ -2080,7 +2080,7 @@ class SettingsActivity : AppCompatActivity() {
 
     private fun shouldUseControlledOperaRestartReapply(): Boolean =
 
-        SessionReapply.needsControlledOperaRestart(this, clientData)
+        SessionReapply.needsControlledTunRestart(this, clientData)
 
 
 

@@ -65,6 +65,16 @@ type ptProxy struct {
 	listener net.Listener
 	factory  base.ClientFactory
 
+	// Куда этому прокси разрешено звонить.
+	//
+	// Слушатель сидит на петле, но проверки прав у SOCKS нет никакой: любое
+	// приложение на телефоне может открыть его и получить дозвон наружу
+	// **мимо VPN** — сокет-то мы помечаем `protect()`. Поэтому цель сверяется
+	// со списком мостов, отданных tor'у в этой сессии: всё остальное получает
+	// отказ 0x02. Пустой список означает «этой сессии мосты не нужны», и тогда
+	// прокси не поднимается вовсе.
+	allowed map[string]struct{}
+
 	sessions atomic.Int64
 	accepted atomic.Int64
 	failed   atomic.Int64
@@ -101,7 +111,7 @@ var ptTransports = map[string]base.Transport{
 //
 // `stateDir` нужен транспортам, которые хранят состояние между запусками
 // (snowflake, meek_lite); obfs4 и webtunnel им не пользуются.
-func StartTorPtProxy(name string, listenAddr string, stateDir string) (string, error) {
+func StartTorPtProxy(name string, listenAddr string, stateDir string, allowedTargets string) (string, error) {
 	ptMu.Lock()
 	defer ptMu.Unlock()
 
@@ -139,7 +149,19 @@ func StartTorPtProxy(name string, listenAddr string, stateDir string) (string, e
 		return "", fmt.Errorf("pt: порт не занят: %w", err)
 	}
 
-	proxy := &ptProxy{name: transportName, listener: listener, factory: factory}
+	allowed := make(map[string]struct{})
+	for _, item := range strings.Split(allowedTargets, ",") {
+		item = strings.TrimSpace(strings.ToLower(item))
+		if item != "" {
+			allowed[item] = struct{}{}
+		}
+	}
+	if len(allowed) == 0 {
+		_ = listener.Close()
+		return "", errors.New("pt: список разрешённых мостов пуст")
+	}
+
+	proxy := &ptProxy{name: transportName, listener: listener, factory: factory, allowed: allowed}
 	ptRunning[transportName] = proxy
 	go proxy.serve()
 
@@ -201,6 +223,12 @@ func TorPtTransports() string {
 }
 
 func (p *ptProxy) serve() {
+	// Пауза после временной ошибки растёт, а после удачного приёма сбрасывается.
+	// Прежний цикл выходил на **любой** ошибке, а запись в реестре оставалась —
+	// снаружи это выглядело как «прокси есть, но соединения к нему не доходят»,
+	// и следующая попытка подключения его не поднимала, потому что он числился
+	// живым.
+	backoff := 10 * time.Millisecond
 	for {
 		conn, err := p.listener.Accept()
 		if err != nil {
@@ -208,9 +236,19 @@ func (p *ptProxy) serve() {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
-			log.Printf("pt %s: accept не удался: %v", p.name, err)
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				time.Sleep(backoff)
+				if backoff < time.Second {
+					backoff *= 2
+				}
+				continue
+			}
+			log.Printf("pt %s: accept не удался, слушатель снят: %v", p.name, err)
+			p.forget()
 			return
 		}
+		backoff = 10 * time.Millisecond
 		if p.sessions.Load() >= ptMaxSessions {
 			// Tor держит немного соединений к мосту; всё сверх этого — признак
 			// того, что что-то пошло вразнос, и молча копить такие соединения
@@ -229,6 +267,16 @@ func (p *ptProxy) serve() {
 			}
 		}()
 	}
+}
+
+// forget снимает прокси с учёта, чтобы следующий запуск поднял его заново.
+func (p *ptProxy) forget() {
+	ptMu.Lock()
+	if ptRunning[p.name] == p {
+		delete(ptRunning, p.name)
+	}
+	ptMu.Unlock()
+	p.closeOnce.Do(func() { _ = p.listener.Close() })
 }
 
 func (p *ptProxy) handle(client net.Conn) error {
@@ -250,6 +298,13 @@ func (p *ptProxy) handle(client net.Conn) error {
 		return err
 	}
 
+	if !p.isAllowed(target) {
+		// 0x02 — connection not allowed by ruleset: ровно тот код, который для
+		// этого и заведён в RFC 1928.
+		_ = socks5Reply(client, 0x02)
+		return fmt.Errorf("цель %s не входит в список мостов этой сессии", target)
+	}
+
 	args, err := parseBridgeArgs(params)
 	if err != nil {
 		_ = socks5Reply(client, 0x01)
@@ -269,14 +324,40 @@ func (p *ptProxy) handle(client net.Conn) error {
 		return err
 	}
 
-	bridge, err := p.factory.Dial("tcp", target, protectedDial, parsed)
+	// Дозвон идёт через замыкание, которое запоминает созданный сокет.
+	//
+	// Две причины, и обе проверены на чтении клиента webtunnel в lyrebird: там
+	// нет ни одного `SetDeadline`, поэтому подвисший мост держал бы горутину и
+	// место в лимите сессий вечно; и при неудачном рукопожатии он возвращает
+	// ошибку, не закрывая сокет, который открыли мы, — утечка помеченного
+	// дескриптора на каждую попытку.
+	var dialed atomic.Value
+	trackingDial := func(network, address string) (net.Conn, error) {
+		conn, err := protectedDial(network, address)
+		if err != nil {
+			return nil, err
+		}
+		_ = conn.SetDeadline(time.Now().Add(ptDialTimeout + ptAuthTimeout))
+		dialed.Store(conn)
+		return conn, nil
+	}
+
+	bridge, err := p.factory.Dial("tcp", target, trackingDial, parsed)
 	if err != nil {
+		if conn, ok := dialed.Load().(net.Conn); ok && conn != nil {
+			_ = conn.Close()
+		}
 		// 0x04 — host unreachable: tor по коду отличает «мост не отвечает» от
 		// «прокси сам не понял запрос» и не снимает мост со счетов зря.
 		_ = socks5Reply(client, 0x04)
 		return fmt.Errorf("мост %s: %w", target, err)
 	}
 	defer bridge.Close()
+
+	// Срок с дозвона снимается: дальше поток живёт столько, сколько нужно tor'у.
+	if conn, ok := dialed.Load().(net.Conn); ok && conn != nil {
+		_ = conn.SetDeadline(time.Time{})
+	}
 
 	if err := socks5Reply(client, 0x00); err != nil {
 		return err
@@ -290,6 +371,24 @@ func (p *ptProxy) handle(client net.Conn) error {
 
 	pipe(client, bridge)
 	return nil
+}
+
+// isAllowed сверяет цель со списком мостов этой сессии.
+//
+// Сверяется и «хост:порт» целиком, и один хост: у webtunnel в CONNECT приезжает
+// адрес-заглушка, а настоящая цель прячется в `url=`, поэтому туда же кладётся и
+// хост из этой ссылки.
+func (p *ptProxy) isAllowed(target string) bool {
+	lower := strings.ToLower(strings.TrimSpace(target))
+	if _, ok := p.allowed[lower]; ok {
+		return true
+	}
+	if host, _, err := net.SplitHostPort(lower); err == nil {
+		if _, ok := p.allowed[host]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // protectedDial — тот же дозвон, что и у прочего служебного трафика ядра:

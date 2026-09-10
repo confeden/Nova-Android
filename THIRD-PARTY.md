@@ -17,6 +17,11 @@ Nova распространяется на условиях GNU General Public L
 | [opera-proxy](https://github.com/Snawoot/opera-proxy) (Snawoot) | MIT |
 | [opera-proxy-android-wrapper](https://github.com/SLY-F0X/opera-proxy-android-wrapper) (SLY-F0X) | MIT |
 | [tun2proxy](https://github.com/tun2proxy/tun2proxy) | MIT |
+| [tor-android](https://github.com/guardianproject/tor-android) (Guardian Project) — сам `tor`, собранный для Android | BSD-3-Clause |
+| [tor](https://gitlab.torproject.org/tpo/core/tor) | BSD-3-Clause |
+| [jtorctl](https://github.com/guardianproject/jtorctl) — управляющее соединение с `tor` | BSD-3-Clause |
+| [lyrebird](https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird) — клиенты obfs4, webtunnel и meek_lite | BSD-2-Clause |
+| [goptlib](https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/goptlib) | CC0-1.0 |
 | OkHttp, AndroidX, Material Components, Apache Commons Compress | Apache License 2.0 |
 | Bouncy Castle | MIT |
 | XZ for Java | Public Domain |

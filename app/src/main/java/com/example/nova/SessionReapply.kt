@@ -164,6 +164,12 @@ object SessionReapply {
         }.isSuccess
     }
 
+    /** Сколько ждать после остановки, прежде чем поднимать новый сеанс. */
+    private const val POST_STOP_DELAY_MS = 2_600L
+
+    /** Метки системного VPN у транспортов поверх tun2proxy. */
+    private val TUN_PROXY_SESSION_LABELS = listOf("NovaOperaVPN", "NovaTorVPN")
+
     /** Желаемый транспорт по текущим предпочтениям — он же уходит в состояние службы. */
     fun desiredBackend(clientData: ClientData): String {
         // TOR проверяется первым: `shouldUseWarpTransport` отвечает на него `false`,
@@ -200,45 +206,57 @@ object SessionReapply {
     /**
      * Нужен ли безопасный `stop-then-start` вместо обычного реаплая.
      *
+     * Признак один, и он не про Opera, а про tun2proxy: у кого TUN держит он,
+     * тому мягкий реаплай запрещён. `stopOperaFallback` на этом пути зовёт
+     * `tun2proxy_stop()`, а тот безусловно поджигает «поспать две секунды →
+     * `exit(-1)`» — процесс `:vpn` после него обречён, и новый сеанс в нём
+     * поднимать нельзя (G3). Tor устроен ровно так же, как Opera и VLESS
+     * (`startProxyTunnel`, метка `NovaTorVPN`), поэтому попадает сюда же: замер
+     * 2026-09-10 на Pixel 4a показал, что смена входа webtunnel -> obfs4 на
+     * живом сеансе убивала `:vpn` через две секунды после «TOR: torrc записан»,
+     * и подключение умирало молча.
+     *
      * Ответ намеренно осторожный: ошибка в сторону «нужен» стоит нескольких
-     * лишних секунд, ошибка в другую сторону роняет `:vpn` (G3). Поэтому
-     * достаточно любого признака Opera — записанного транспорта, запомненного
-     * сеанса, живого системного VPN с её меткой или **желаемого** транспорта при
-     * живом сеансе.
+     * лишних секунд, ошибка в другую сторону роняет `:vpn`. Поэтому достаточно
+     * любого признака — записанного транспорта, запомненного сеанса, живого
+     * системного VPN с меткой или **желаемого** транспорта при живом сеансе.
      */
-    fun needsControlledOperaRestart(context: Context, clientData: ClientData): Boolean {
+    fun needsControlledTunRestart(context: Context, clientData: ClientData): Boolean {
         val persistedBackend = clientData.getServiceBackend().trim().uppercase()
-        if (persistedBackend.startsWith(NovaVpnService.BACKEND_OPERA)) return true
+        if (isTunProxyBackend(persistedBackend)) return true
 
         val restartKind = clientData.getRestartSession()?.kind?.trim()?.uppercase().orEmpty()
-        if (restartKind == "OPERA") return true
+        if (restartKind == "OPERA" || restartKind == NovaVpnService.BACKEND_TOR) return true
 
         val cm = context.getSystemService(ConnectivityManager::class.java)
-        val activeOperaVpn = cm?.allNetworks?.any { network ->
+        val activeTunProxyVpn = cm?.allNetworks?.any { network ->
             val caps = cm.getNetworkCapabilities(network) ?: return@any false
             if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return@any false
-            extractVpnTransportLabel(caps).contains("NovaOperaVPN", ignoreCase = true)
+            val label = extractVpnTransportLabel(caps)
+            TUN_PROXY_SESSION_LABELS.any { label.contains(it, ignoreCase = true) }
         } == true
-        if (activeOperaVpn) return true
+        if (activeTunProxyVpn) return true
 
-        return desiredBackend(clientData)
-            .trim()
-            .uppercase()
-            .startsWith(NovaVpnService.BACKEND_OPERA) && hasActiveNovaSystemVpn(context, clientData)
+        return isTunProxyBackend(desiredBackend(clientData).trim().uppercase()) &&
+            hasActiveNovaSystemVpn(context, clientData)
     }
+
+    /** Транспорты, у которых TUN держит tun2proxy: им мягкий реаплай запрещён. */
+    private fun isTunProxyBackend(backend: String): Boolean =
+        backend.startsWith(NovaVpnService.BACKEND_OPERA) || backend.startsWith(NovaVpnService.BACKEND_TOR)
 
     /**
      * Применить изменения прямо к идущему сеансу.
      *
-     * Сама выбирает путь: живая Opera — через остановку с ожиданием, всё
-     * остальное — мягким реаплаем.
+     * Сама выбирает путь: живой tun2proxy (Opera, Tor) — через остановку с
+     * ожиданием, всё остальное — мягким реаплаем.
      *
      * @return `false`, если запустить не удалось; вызывающему это надо сказать
      *         пользователю, а не проглотить (I4).
      */
     fun applyToLiveSession(context: Context, clientData: ClientData): Boolean {
-        return if (needsControlledOperaRestart(context, clientData)) {
-            launchControlledOperaRestart(context, clientData)
+        return if (needsControlledTunRestart(context, clientData)) {
+            launchControlledTunRestart(context, clientData)
         } else {
             launchDirect(context, clientData)
         }
@@ -258,15 +276,15 @@ object SessionReapply {
     }
 
     /**
-     * Остановка и запуск заново — единственный безопасный способ для Opera.
+     * Остановка и запуск заново — единственный безопасный способ поверх tun2proxy.
      *
      * Признак `controlledRestartPending` общий на процесс: настройки и главный
      * экран живут в одном, и второй `stop` поверх идущего опроса остановил бы уже
      * новый сеанс.
      */
-    fun launchControlledOperaRestart(context: Context, clientData: ClientData): Boolean {
+    fun launchControlledTunRestart(context: Context, clientData: ClientData): Boolean {
         if (controlledRestartPending) {
-            LogManager.log("Безопасный перезапуск Opera уже запланирован — настройки обновлены, ждём его.")
+            LogManager.log("Безопасный перезапуск уже запланирован — настройки обновлены, ждём его.")
             return true
         }
         val appContext = context.applicationContext
@@ -274,7 +292,10 @@ object SessionReapply {
         clientData.saveServiceState(NovaVpnService.STATE_CONNECTING, desiredBackend(clientData))
         clientData.markSoftReapplyPending(35_000L)
         return runCatching {
-            LogManager.log("Активный Opera-сеанс меняем через безопасный stop-then-start из основного процесса.")
+            LogManager.log(
+                "Активный сеанс поверх tun2proxy (${desiredBackend(clientData)}) меняем через " +
+                    "безопасный stop-then-start из основного процесса."
+            )
             ContextCompat.startForegroundService(
                 appContext,
                 Intent(appContext, NovaVpnService::class.java).apply {
@@ -285,7 +306,7 @@ object SessionReapply {
         }.onFailure { error ->
             controlledRestartPending = false
             clientData.clearSoftReapplyPending()
-            LogManager.log("Не удалось запустить безопасный Opera restart: ${error.message}")
+            LogManager.log("Не удалось запустить безопасный перезапуск: ${error.message}")
         }.isSuccess
     }
 
@@ -302,17 +323,25 @@ object SessionReapply {
     }
 
     private fun launchAfterStop(appContext: Context, clientData: ClientData) {
+        // Пауза переживает фитиль tun2proxy, а не просто «даёт системе выдохнуть».
+        //
+        // `tun2proxy_stop()` поджигает отсоединённый поток «поспать две секунды →
+        // `exit(-1)`», и прежние 800 мс запускали новый сеанс, пока старый процесс
+        // `:vpn` был ещё жив: замер 2026-09-10 на Pixel 4a показал, как обречённый
+        // процесс принимал REAPPLY, писал свой torrc и поднимал слушатель
+        // транспорта за полторы секунды до собственной смерти — то есть дрался за
+        // тот же файл с процессом, которому этот файл и читать.
         handler.postDelayed({
             controlledRestartPending = false
             clientData.markSoftReapplyPending(25_000L)
             runCatching {
-                LogManager.log("Старый Opera VPN полностью остановлен. Запускаем новый connect-сеанс в чистом процессе.")
+                LogManager.log("Старый VPN полностью остановлен. Запускаем новый connect-сеанс в чистом процессе.")
                 ContextCompat.startForegroundService(appContext, buildIntent(appContext, clientData))
             }.onFailure { error ->
                 clientData.clearSoftReapplyPending()
-                LogManager.log("Не удалось заново запустить VPN после безопасного Opera restart: ${error.message}")
+                LogManager.log("Не удалось заново запустить VPN после безопасного перезапуска: ${error.message}")
             }
-        }, 800L)
+        }, POST_STOP_DELAY_MS)
     }
 
     /**
@@ -331,8 +360,11 @@ object SessionReapply {
             if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return false
             if (isNovaVpnOwner(context, caps)) return true
             val transportInfo = extractVpnTransportLabel(caps)
+            // Метка сеанса Tor — «NovaTorVPN», и без неё живой Tor-туннель
+            // считался бы чужим: `hasActiveNovaSystemVpn` держится на трёх
+            // признаках, и молча терять один из них нельзя.
             return transportInfo.contains("NovaVPN", ignoreCase = true) ||
-                transportInfo.contains("NovaOperaVPN", ignoreCase = true)
+                TUN_PROXY_SESSION_LABELS.any { transportInfo.contains(it, ignoreCase = true) }
         }
 
         fun networkId(network: Network): Int = network.toString().toIntOrNull() ?: -1

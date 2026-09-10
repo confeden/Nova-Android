@@ -61,8 +61,16 @@ object DiagnosticLogSanitizer {
     private val emailRegex =
         Regex("""(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b""")
 
+    /**
+     * Кандидат в телефонный номер.
+     *
+     * Точка теперь входит в оба ограничителя: без этого длинное число перед
+     * адресом склеивалось с его первым октетом — «handshake 1757520123
+     * 188.114.97.3» превращалось в «handshake <phone>.114.97.3». Решение о
+     * замене принимает [looksLikePhone], а не само выражение.
+     */
     private val phoneRegex =
-        Regex("""(?<!\w)\+?\d[\d\-\s()]{7,}\d(?!\w)""")
+        Regex("""(?<![\w.])\+?\d[\d\-\s()]{7,}\d(?![\w.])""")
 
     private val keyValueRegex =
         Regex(
@@ -129,9 +137,15 @@ object DiagnosticLogSanitizer {
 
         value = bearerRegex.replace(value, "Bearer <hidden>")
         value = emailRegex.replace(value, "<email>")
-        value = phoneRegex.replace(value, "<phone>")
-        value = macRegex.replace(value, "<mac>")
 
+        // Адреса маскируются **до** телефонов, и порядок тут не вкусовой.
+        //
+        // В правиле телефона класс символов включает пробел, поэтому длинное
+        // число перед адресом съедало и первый октет: строка
+        // «handshake 1757520123 188.114.97.3:2408» превращалась в
+        // «handshake <phone>.114.97.3:2408», а остаток `.114.97.3` под правило
+        // адреса уже не подходил и уезжал в журнал как есть. Метки времени рядом
+        // с адресом — самая частая пара в этом файле, так что случай не редкий.
         value = ipv4Regex.replace(value) { match ->
             maskIpv4(match.value)
         }
@@ -139,6 +153,11 @@ object DiagnosticLogSanitizer {
         value = ipv6Regex.replace(value) { match ->
             maskIpv6(match.value)
         }
+
+        value = phoneRegex.replace(value) { match ->
+            if (looksLikePhone(match.value)) "<phone>" else match.value
+        }
+        value = macRegex.replace(value, "<mac>")
 
         return value
     }
@@ -163,6 +182,28 @@ object DiagnosticLogSanitizer {
         if (isLocalIpv4(octets)) return ip
 
         return "${parts[0]}.${parts[1]}.${parts[2]}.***"
+    }
+
+    /**
+     * Отличает номер от голого числа.
+     *
+     * Метка времени и дата — это те же десять-тринадцать цифр с разделителями, и
+     * слепое правило превращало их в `<phone>`, отнимая у журнала как раз то, по
+     * чему события сопоставляют: строка tun2proxy приезжала как
+     * `[<phone>:52:37 INFO tun2proxy]`. Номером считается либо запись с «+» на
+     * одиннадцать-пятнадцать цифр, либо одиннадцать цифр, начинающихся с 7 или 8.
+     * Само приложение таких чисел не пишет, а пользовательский номер выглядит
+     * ровно так.
+     */
+    private fun looksLikePhone(value: String): Boolean {
+        val digits = value.count { it.isDigit() }
+        if (value.startsWith("+")) return digits in 11..15
+        // Без «плюса» номером считается только российская запись: одиннадцать цифр,
+        // начинающихся с 7 или 8. Отметка времени в секундах — десять цифр, в
+        // миллисекундах — тринадцать, дата «2026-09-10 23» — те же десять; ни одна
+        // под это не подходит, и журнал их сохраняет.
+        val bare = value.filter { it.isDigit() }
+        return bare.length == 11 && (bare[0] == '7' || bare[0] == '8')
     }
 
     private fun isLocalIpv4(octets: List<Int>): Boolean = when {

@@ -65,6 +65,16 @@ object TorTransport {
     @Volatile
     private var lastPrivateDnsSnapshot: String = ""
 
+    /**
+     * Просьба остановиться, выставленная **вне** общего монитора.
+     *
+     * `start` держит `lock` до полутора минут ожидания загрузки, а `stop` берёт
+     * тот же монитор — значит остановка во время подъёма ждала бы конца подъёма.
+     * Флаг читают все ожидания внутри `start`, поэтому остановка доходит сразу.
+     */
+    @Volatile
+    private var stopRequested: Boolean = false
+
     /** Порт SOCKS уже загруженного tor, или 0. */
     @Volatile
     var socksPort: Int = 0
@@ -138,6 +148,17 @@ object TorTransport {
             "Нажмите «Отключите DoT» рядом с выбором входа."
     }
 
+    /**
+     * То же для журнала, но **без имени сервера**.
+     *
+     * Журнал уходит в отчёты об отказах, а выбранный резолвер — это признак
+     * человека не хуже адреса: на экране он нужен, в присланном файле — нет.
+     */
+    fun privateDnsWarningForLog(context: Context): String {
+        if (strictPrivateDnsHost(context).isBlank()) return ""
+        return "TOR: в системе включён строгий «Частный DNS» — через Tor имена резолвиться не будут."
+    }
+
     /** Последняя строка о ходе загрузки — для экрана и журнала. */
     fun bootstrapSummary(): String = lastBootstrapLine
 
@@ -149,6 +170,27 @@ object TorTransport {
      *   него остановка пользователем ждала бы полного тайм-аута загрузки.
      */
     fun start(
+        context: Context,
+        bridges: List<TorBridge>,
+        entryMode: String,
+        isCancelled: () -> Boolean,
+    ): Int {
+        // Прошлый сеанс разбирается **до** взятия монитора и безусловно.
+        //
+        // Иначе смена способа входа на живом туннеле давала худший из возможных
+        // исходов: `startTorPtProxy` при живом слушателе возвращал прежний
+        // адрес, новый torrc никто не перечитывал, а `awaitBootstrap` получал от
+        // **старого** tor'а сразу «100 %» — в журнале «вход webtunnel», а трафик
+        // продолжал идти через прежние мосты.
+        if (boundService != null || socksPort != 0) {
+            LogManager.log("TOR: разбираем прежний сеанс перед новым.")
+            stop(context)
+        }
+        stopRequested = false
+        return startLocked(context, bridges, entryMode, isCancelled)
+    }
+
+    private fun startLocked(
         context: Context,
         bridges: List<TorBridge>,
         entryMode: String,
@@ -192,7 +234,12 @@ object TorTransport {
             try {
                 // Порт выбирает ядро: занятый фиксированный порт — это отказ там,
                 // где отказывать не за что.
-                nova.Nova.startTorPtProxy(mode, "127.0.0.1:0", context.applicationContext.filesDir.absolutePath)
+                nova.Nova.startTorPtProxy(
+                    mode,
+                    "127.0.0.1:0",
+                    context.applicationContext.filesDir.absolutePath,
+                    allowedTargetsFor(usable),
+                )
             } catch (error: Throwable) {
                 LogManager.log("TOR: транспорт $mode в ядре не поднялся: ${error.message}")
                 return 0
@@ -221,14 +268,16 @@ object TorTransport {
         }
         LogManager.log("TOR: torrc записан (${torrc.length()} Б), запускаем tor.")
 
-        val service = bindTorService(context, isCancelled)
+        val cancelled = { stopRequested || isCancelled() }
+
+        val service = bindTorService(context, cancelled)
         if (service == null) {
             LogManager.log("TOR: служба tor не поднялась.")
             stop(context)
             return 0
         }
 
-        val port = awaitBootstrap(service, isCancelled)
+        val port = awaitBootstrap(service, cancelled)
         if (port <= 0) {
             LogManager.log("TOR: загрузка не завершилась. ${lastBootstrapLine.ifBlank { "без сообщений" }}")
             stop(context)
@@ -246,7 +295,14 @@ object TorTransport {
      * Порядок обратный запуску и он важен: пока tor жив, он держит соединения
      * через obfs4, и закрытие слушателя первым оставило бы их висеть.
      */
-    fun stop(context: Context) = synchronized(lock) {
+    fun stop(context: Context) {
+        // Флаг ставится **до** монитора: подъём может держать его минутами, а
+        // остановка обязана доходить сразу.
+        stopRequested = true
+        stopLocked(context)
+    }
+
+    private fun stopLocked(context: Context) = synchronized(lock) {
         val appContext = context.applicationContext
 
         connection?.let { active ->
@@ -264,6 +320,29 @@ object TorTransport {
 
         socksPort = 0
         obfs4Address = ""
+    }
+
+    /**
+     * Куда прокси этой сессии разрешено звонить: адреса мостов и хосты из `url=`.
+     *
+     * Список нужен потому, что у локального SOCKS нет проверки прав вовсе: без
+     * него любое приложение на телефоне получило бы через него дозвон наружу
+     * мимо VPN — сокет-то помечается `protect()`.
+     */
+    private fun allowedTargetsFor(bridges: List<TorBridge>): String {
+        val targets = linkedSetOf<String>()
+        bridges.forEach { bridge ->
+            bridge.dialTarget()?.let { (host, port) -> targets += "$host:$port" }
+            targets += bridge.endpoint.trim().lowercase()
+            // У webtunnel настоящая цель — хост из `url=`, а в CONNECT приезжает
+            // заглушка; tor подставит туда именно его.
+            bridge.url.takeIf { it.isNotBlank() }?.let { url ->
+                runCatching { java.net.URI(url).host }.getOrNull()?.let { host ->
+                    targets += host.lowercase()
+                }
+            }
+        }
+        return targets.filter { it.isNotBlank() }.joinToString(",")
     }
 
     /**
@@ -324,6 +403,14 @@ object TorTransport {
         val appContext = context.applicationContext
         val intent = Intent(appContext, TorService::class.java)
 
+        // Прежняя привязка снимается: затирание поля оставляло её висеть, и
+        // остановить такой tor было уже нечем — `unbindService` снимает только
+        // последнюю.
+        connection?.let { previous ->
+            runCatching { appContext.unbindService(previous) }
+            connection = null
+        }
+
         val serviceConnection = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
                 boundService = (binder as? TorService.LocalBinder)?.service
@@ -342,6 +429,9 @@ object TorTransport {
             false
         }
         if (!bound) {
+            // Отвязывать надо даже после `false`: система всё равно записала
+            // заявку, и без этого она протекает.
+            runCatching { appContext.unbindService(serviceConnection) }
             connection = null
             return null
         }
@@ -370,11 +460,27 @@ object TorTransport {
     private fun awaitBootstrap(service: TorService, isCancelled: () -> Boolean): Int {
         val deadline = SystemClock.elapsedRealtime() + BOOTSTRAP_TIMEOUT_MS
         var lastLogged = ""
+        var silentPolls = 0
 
         while (SystemClock.elapsedRealtime() < deadline) {
             if (isCancelled()) return 0
+            if (boundService == null) {
+                // Служба отвалилась — ждать полтора тайм-аута незачем, и молчать
+                // об этом тоже нельзя (I4).
+                LogManager.log("TOR: служба tor отвалилась во время загрузки.")
+                return 0
+            }
 
             val phase = runCatching { service.getInfo("status/bootstrap-phase") }.getOrNull().orEmpty()
+            if (phase.isBlank()) {
+                silentPolls++
+                if (silentPolls >= 10) {
+                    LogManager.log("TOR: управляющее соединение молчит десять опросов подряд — сдаёмся.")
+                    return 0
+                }
+            } else {
+                silentPolls = 0
+            }
             if (phase.isNotBlank() && phase != lastLogged) {
                 lastLogged = phase
                 lastBootstrapLine = phase.trim()
@@ -382,7 +488,12 @@ object TorTransport {
             }
 
             if (phase.contains("PROGRESS=100") || phase.contains("TAG=done")) {
-                val port = service.socksPort
+                // Порт спрашивается у самого tor, а поле службы — только запасной
+                // путь: оно статическое и переживает прошлый сеанс, то есть на
+                // втором подключении могло бы вернуть порт уже мёртвого tor'а.
+                val reported = runCatching { service.getInfo("net/listeners/socks") }.getOrNull().orEmpty()
+                val port = Regex(":(\\d+)").findAll(reported).lastOrNull()?.groupValues?.get(1)?.toIntOrNull()
+                    ?: service.socksPort
                 if (port > 0) return port
             }
 

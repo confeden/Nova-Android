@@ -1,0 +1,9 @@
+- Tor is now a transport: the TOR button brings up a tunnel and app traffic goes through the Tor network.
+- The entry is selectable: WEBTUNNEL, OBFS4, VANILLA or no bridges, ordered by how likely each is to work from Russia.
+- Bridges are collected and liveness-checked by the app itself.
+- A hint about the system Private DNS: in strict mode no name resolves over Tor, and the app explains what to switch.
+- Ten themes with a picker; settings split into six groups with icons.
+- A 2x1 home-screen widget whose round buttons no longer get clipped.
+- Manual tunnel MTU, 1000-1440 in steps of 10, 1280 by default.
+- A Disconnect action in the notification shade.
+- Logs are anonymised: the network stays visible, the host does not; each session starts with build, Android and device.

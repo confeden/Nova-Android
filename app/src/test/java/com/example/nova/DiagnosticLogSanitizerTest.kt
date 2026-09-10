@@ -92,4 +92,45 @@ class DiagnosticLogSanitizerTest {
         val sanitized = DiagnosticLogSanitizer.sanitize("сессия шла 10:07:41 и оборвалась")
         assertEquals("сессия шла 10:07:41 и оборвалась", sanitized)
     }
+
+    @Test
+    fun `метка времени рядом с адресом не срывает маску`() {
+        // Правило телефона допускает пробелы внутри числа и раньше съедало
+        // первый октет вместе с меткой времени, оставляя хвост открытым.
+        val sanitized = DiagnosticLogSanitizer.sanitize("handshake 1757520123 188.114.97.3:2408")
+        assertTrue(sanitized, sanitized.contains("188.114.97.***:2408"))
+        assertFalse(sanitized.contains("97.3:"))
+    }
+
+    @Test
+    fun `список портов перед адресом тоже не мешает`() {
+        val sanitized = DiagnosticLogSanitizer.sanitize("Ports 1080 1081 1082 188.114.97.3")
+        assertTrue(sanitized, sanitized.contains("188.114.97.***"))
+    }
+
+    @Test
+    fun `настоящий номер по-прежнему скрывается`() {
+        val sanitized = DiagnosticLogSanitizer.sanitize("контакт +7 999 123-45-67 и всё")
+        assertFalse(sanitized.contains("999"))
+        assertTrue(sanitized.contains("<phone>"))
+    }
+
+    @Test
+    fun `метка времени номером не считается`() {
+        val sanitized = DiagnosticLogSanitizer.sanitize("cycle 1757520123 done")
+        assertEquals("cycle 1757520123 done", sanitized)
+    }
+
+    @Test
+    fun `дата рядом со временем остаётся в журнале`() {
+        val line = "[2026-09-10 23:52:37 INFO  tun2proxy] - Beginning #26"
+        assertEquals(line, DiagnosticLogSanitizer.sanitize(line))
+    }
+
+    @Test
+    fun `номер без плюса всё ещё скрывается`() {
+        val sanitized = DiagnosticLogSanitizer.sanitize("звонил 8 999 123 45 67 вчера")
+        assertTrue(sanitized.contains("<phone>"))
+        assertFalse(sanitized.contains("999"))
+    }
 }

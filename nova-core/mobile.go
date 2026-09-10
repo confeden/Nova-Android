@@ -113,13 +113,16 @@ func GetDomainBypassStats() string {
 // An empty listenAddr means loopback with any free port. Binding anything but a
 // loopback address is refused: the port has no authentication, so exposing it
 // would hand anyone an open proxy to the bridge. stateDir is used by transports
-// that keep state between runs (snowflake, meek_lite).
+// that keep state between runs (snowflake, meek_lite). allowedTargets is the
+// comma separated list of bridge addresses this session may dial: the listener
+// has no authentication, so anything outside that list is refused. An empty
+// list is an error, not an open proxy.
 //
 // Comments here stay ASCII on purpose: gomobile copies them into generated Java
 // that javac compiles with the platform encoding (see engine/tor_obfs4.go for
 // the reasoning behind this proxy, in Russian).
-func StartTorPtProxy(name string, listenAddr string, stateDir string) (string, error) {
-	return novaengine.StartTorPtProxy(name, listenAddr, stateDir)
+func StartTorPtProxy(name string, listenAddr string, stateDir string, allowedTargets string) (string, error) {
+	return novaengine.StartTorPtProxy(name, listenAddr, stateDir, allowedTargets)
 }
 
 // StopTorPtProxy closes every pluggable-transport listener.

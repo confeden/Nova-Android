@@ -3101,6 +3101,10 @@ class NovaVpnService : OperaNativeVpnService() {
             allowBlockingWait = true,
         )
         runCatching { XrayBridge.stop() }
+        // Сеанс Tor снимается здесь же: у него нет владельца, и без этого новая
+        // фаза перехватывала бы уже работающий tor — новый torrc он не читает, а
+        // `awaitBootstrap` сразу получал бы «100 %» от прежнего.
+        stopTorSessionQuietly()
         closeActiveInterface()
         markTransportStatePrepared(connectGenerationId)
         return isConnectGenerationCurrent(connectGenerationId)
@@ -5592,6 +5596,7 @@ class NovaVpnService : OperaNativeVpnService() {
             } catch (t: Throwable) {
                 LogManager.log("Не удалось остановить ядро Xray при остановке сервиса: ${t.message}")
             }
+            stopTorSessionQuietly()
             LocalDnsProxyManager.stop(LogManager::log)
             LocalAppProxyManager.stop(this, LogManager::log)
             PriorityDns.reset()
@@ -8353,7 +8358,11 @@ class NovaVpnService : OperaNativeVpnService() {
             dnsLabel = "",
         )
         applyCoreDomainBypassPolicy(clientData, backendLabel)
-        applyOperaSplitTunnelPolicy(builder, clientData)
+        if (isTorBackendLabel(backendLabel)) {
+            applyTorSplitTunnelPolicy(builder, clientData)
+        } else {
+            applyOperaSplitTunnelPolicy(builder, clientData)
+        }
         val connectivityManager = getSystemService(android.net.ConnectivityManager::class.java)
         val underlyingNetwork = selectUnderlyingNetwork(connectivityManager)
         observedUnderlyingNetworkId = underlyingNetwork?.toString()
@@ -8364,12 +8373,30 @@ class NovaVpnService : OperaNativeVpnService() {
             enableIpv6DefaultRoute = false,
             connectivityManager = connectivityManager,
             underlyingNetwork = underlyingNetwork,
-            bypassAddresses = directBypassDnsAddresses(
-                plainDnsServers = dnsServers,
-                coreInterceptHandlesDns = false,
-                connectivityManager = connectivityManager,
-                underlyingNetwork = underlyingNetwork,
-            ) + domainBypassAddresses(underlyingNetwork),
+            // На Tor мимо туннеля не выводится ни один резолвер, и обход по
+            // доменам тоже не применяется.
+            //
+            // Вырез маршрута для шифрованного резолвера — это ровно та утечка,
+            // против которой человек и включает Tor: имена он спрашивал бы у
+            // резолвера владельца со своего настоящего адреса, пока трафик идёт
+            // через цепочку. Связать одно с другим после этого тривиально.
+            // Имена на Tor разрешает выходной узел: перехвата ядра тут нет (fd у
+            // tun2proxy, G22), а его виртуальный DNS отдаёт на имя подставной
+            // адрес и дальше соединяется по имени через SOCKS.
+            bypassAddresses = if (isTorBackendLabel(backendLabel)) {
+                LogManager.log(
+                    "TOR: мимо туннеля не выведен ни один резолвер и ни один домен — " +
+                        "имена разрешает выходной узел."
+                )
+                emptySet()
+            } else {
+                directBypassDnsAddresses(
+                    plainDnsServers = dnsServers,
+                    coreInterceptHandlesDns = false,
+                    connectivityManager = connectivityManager,
+                    underlyingNetwork = underlyingNetwork,
+                ) + domainBypassAddresses(underlyingNetwork)
+            },
         )
         applyUnderlyingNetworkHint(
             builder = builder,
@@ -9125,11 +9152,19 @@ class NovaVpnService : OperaNativeVpnService() {
     /** Разбирает связку Tor целиком. Порядок обратный подъёму. */
     private fun stopTorTransport() {
         stopOperaFallback(joinTimeoutMs = 2500L, stopProxyManager = false)
-        try {
-            TorTransport.stop(this)
-        } catch (t: Throwable) {
-            LogManager.log("TOR: остановка не удалась: ${t.message}")
-        }
+        stopTorSessionQuietly()
+    }
+
+    /**
+     * Снимает сеанс Tor, кем бы он ни был поднят.
+     *
+     * Зовётся и перед новой фазой, и на общей остановке: у сеанса Tor нет
+     * владельца, и без этого он переживал и смену способа входа, и выключение
+     * VPN — tor оставался в процессе `:vpn` вместе со слушателем транспорта.
+     */
+    private fun stopTorSessionQuietly() {
+        runCatching { TorTransport.stop(this) }
+            .onFailure { LogManager.log("TOR: остановка сеанса не удалась: ${it.message}") }
     }
 
     private fun runOperaFallbackUntilStable(
@@ -23090,6 +23125,68 @@ class NovaVpnService : OperaNativeVpnService() {
         }
     }
 
+    /**
+     * Обычные исключения: собственный пакет и «прямые» приложения.
+     *
+     * Свой пакет исключается **всегда**, и это не удобство, а условие работы:
+     * сокеты самого tor принадлежат нам, и внутри собственного туннеля они
+     * замкнулись бы на tun2proxy, то есть сами на себя.
+     */
+    private fun applyDefaultSplitTunnelExclusions(builder: Builder, directApps: Collection<String>) {
+        try {
+            builder.addDisallowedApplication(packageName)
+        } catch (error: Exception) {
+            LogManager.log("Opera split tunneling: не удалось исключить пакет Nova из VPN: ${error.message}")
+        }
+        for (pkg in directApps) {
+            try {
+                builder.addDisallowedApplication(pkg)
+            } catch (error: Exception) {
+                LogManager.log("Opera split tunneling: не удалось исключить пакет $pkg из VPN: ${error.message}")
+            }
+        }
+    }
+
+    /**
+     * Раздельное туннелирование для Tor: только то, что выбрал человек.
+     *
+     * Ни закрытого списка «прямых» приложений, ни адресов обхода по доменам. На
+     * любом другом транспорте это осознанный размен, а на приватном — тихая
+     * утечка: человек выбрал Tor, а часть трафика идёт мимо него и никто об этом
+     * не говорит. Явный выбор пользователя остаётся: это его решение, а не наше
+     * умолчание.
+     */
+    private fun applyTorSplitTunnelPolicy(builder: Builder, clientData: ClientData) {
+        val splitMode = clientData.getSplitMode()
+        val selectedApps = clientData.getSplitApps()
+            .map { it.trim() }
+            .filter { it.isNotBlank() && it != packageName }
+            .distinct()
+
+        if (splitMode == 1 && selectedApps.isNotEmpty()) {
+            var applied = 0
+            for (pkg in selectedApps) {
+                runCatching {
+                    builder.addAllowedApplication(pkg)
+                    applied++
+                }.onFailure { LogManager.log("TOR: не удалось разрешить пакет $pkg: ${it.message}") }
+            }
+            LogManager.log("TOR: через туннель идут только выбранные приложения ($applied).")
+            return
+        }
+
+        applyDefaultSplitTunnelExclusions(builder, if (splitMode == 2) selectedApps else emptyList())
+        LogManager.log(
+            if (splitMode == 2 && selectedApps.isNotEmpty()) {
+                "TOR: через туннель идут все, кроме Nova и выбранных (${selectedApps.size}). " +
+                    "Закрытый список «прямого потока» на Tor не применяется."
+            } else {
+                "TOR: через туннель идут все приложения, кроме самой Nova. " +
+                    "Закрытый список «прямого потока» и обход по доменам на Tor не применяются."
+            }
+        )
+    }
+
     private fun applyOperaSplitTunnelPolicy(builder: Builder, clientData: ClientData) {
         val splitMode = clientData.getSplitMode()
         val directApps = DirectAppsPolicy.resolve(this, clientData)
@@ -23110,12 +23207,23 @@ class NovaVpnService : OperaNativeVpnService() {
                         LogManager.log("Opera split tunneling: не удалось разрешить пакет $pkg: ${error.message}")
                     }
                 }
-                LogManager.log(
-                    "Opera split tunneling: только выбранные приложения " +
-                        "(${selectedApps.size}), пакет Nova остаётся вне VPN, так как allow-list не включает его."
-                )
                 if (applied == 0) {
-                    LogManager.log("Opera split tunneling: список allow пуст, трафик Nova и остальные приложения остаются вне VPN.")
+                    // Пустой allow-list — это не «VPN ни для кого», а «VPN для
+                    // всех»: `addAllowedApplication` просто ни разу не вызван, и
+                    // ограничения нет. Прежняя строка журнала утверждала
+                    // обратное, а туннель захватывал в том числе Nova — то есть
+                    // tor звонил бы мосту через собственный туннель. Уходим в
+                    // безопасную ветку: свой пакет и прямые приложения наружу.
+                    LogManager.log(
+                        "Opera split tunneling: список allow пуст — это VPN для всех, включая Nova. " +
+                            "Ставим обычное исключение своего пакета вместо него."
+                    )
+                    applyDefaultSplitTunnelExclusions(builder, directApps)
+                } else {
+                    LogManager.log(
+                        "Opera split tunneling: только выбранные приложения " +
+                            "(${selectedApps.size}), пакет Nova остаётся вне VPN, так как allow-list не включает его."
+                    )
                 }
             }
 
@@ -23139,18 +23247,7 @@ class NovaVpnService : OperaNativeVpnService() {
             }
 
             else -> {
-                try {
-                    builder.addDisallowedApplication(packageName)
-                } catch (error: Exception) {
-                    LogManager.log("Opera split tunneling: не удалось исключить пакет Nova из VPN: ${error.message}")
-                }
-                for (pkg in directApps) {
-                    try {
-                        builder.addDisallowedApplication(pkg)
-                    } catch (error: Exception) {
-                        LogManager.log("Opera split tunneling: не удалось исключить пакет $pkg из VPN: ${error.message}")
-                    }
-                }
+                applyDefaultSplitTunnelExclusions(builder, directApps)
                 LogManager.log(
                     "Opera split tunneling: все приложения, кроме Nova и прямых " +
                         "(${directApps.size}), идут через VPN."

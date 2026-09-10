@@ -44,6 +44,22 @@ object TorTransport {
     /** Сколько ждать полной загрузки tor. Через мост это десятки секунд, не единицы. */
     const val BOOTSTRAP_TIMEOUT_MS = 150_000L
 
+    /**
+     * Ответ [start], означающий «в этом процессе больше нельзя, нужен свежий».
+     *
+     * Отдельное значение, а не `0`: ноль — это «сеанс не поднялся», и лечится он
+     * сообщением человеку, а это — «поднимать здесь опасно», и лечится сменой
+     * процесса. Смешивать их нельзя, потому что цена ошибки разная: во втором
+     * случае следующий вызов `tor_run_main` обрывает процесс сигналом.
+     */
+    const val NEEDS_FRESH_PROCESS = -1
+
+    /** Сколько ждать, пока прежний tor действительно уйдёт. */
+    private const val SHUTDOWN_WAIT_MS = 8_000L
+
+    /** Порт SOCKS у tor по умолчанию — по нему и видно, жив ли он. */
+    private const val DEFAULT_SOCKS_PORT = 9050
+
     /** Как часто спрашивать tor о ходе загрузки. */
     private const val POLL_INTERVAL_MS = 1_000L
 
@@ -74,6 +90,22 @@ object TorTransport {
      */
     @Volatile
     private var stopRequested: Boolean = false
+
+    /**
+     * Запускался ли tor в этом процессе хоть раз.
+     *
+     * `libtor` держит своё состояние в глобальных переменных, и повторный
+     * `tor_run_main` поверх ещё живого предыдущего обрывает процесс: в tombstone
+     * это `hs_circuitmap_init` → `tor_abort_` → `abort`, сигнал 6. Замер на
+     * Pixel 4a 2026-09-11 поймал два таких обрыва — оба там, где новый сеанс
+     * стартовал, не дождавшись, пока прежний tor доедет до конца.
+     *
+     * Сам по себе повтор законен: если прежний tor успел закрыться, второй
+     * запуск проходит (проверено там же). Поэтому признак не запрещает второй
+     * запуск, а включает ожидание перед ним.
+     */
+    @Volatile
+    private var torRanInThisProcess: Boolean = false
 
     /** Порт SOCKS уже загруженного tor, или 0. */
     @Volatile
@@ -119,25 +151,48 @@ object TorTransport {
             @Suppress("DEPRECATION")
             runCatching { manager.allNetworks.toList() }.getOrDefault(emptyList()).forEach(::add)
         }
+        // Ответ собирается по всем сетям и **докладывается один раз**.
+        //
+        // Прежняя строка писалась внутри цикла и делила один признак на все сети
+        // сразу: VPN отвечал «выключен», Wi-Fi — «строгий», признак перещёлкивался
+        // на каждом круге, и обе строки печатались снова и снова. Ни одного нового
+        // факта при этом не сообщалось.
+        //
+        // Имени сервера в строке нет намеренно. Выбранный человеком резолвер — это
+        // признак не хуже адреса, а журнал уходит в отчёты об отказах; на экране
+        // имя показывается (там оно и нужно), в журнал не попадает.
+        var strictHost = ""
+        var sawPrivateDns = false
         for (network in networks.distinct()) {
             val properties = runCatching { manager.getLinkProperties(network) }.getOrNull() ?: continue
-            val active = AndroidCompat.isPrivateDnsActive(properties)
-            val name = AndroidCompat.getPrivateDnsServerName(properties).trim()
-            // Одна строка на изменение ответа: без неё «подсказки нет» и «строгого
-            // режима нет» неразличимы, а это два разных состояния (I4).
-            val snapshot = "$active|$name"
-            if (snapshot != lastPrivateDnsSnapshot) {
-                lastPrivateDnsSnapshot = snapshot
-                LogManager.log("TOR: частный DNS сети — активен=$active, имя=${name.ifBlank { "-" }}.")
-            }
-            if (!active) continue
-            val host = name
+            if (!AndroidCompat.isPrivateDnsActive(properties)) continue
+            sawPrivateDns = true
             // Имя сервера пустое — это режим «автоматически»: там система сама
             // откатывается на обычный DNS, если DoT не отвечает, и Tor он не
             // мешает. Строгим считается только режим с именем.
-            if (host.isNotBlank()) return host
+            val name = AndroidCompat.getPrivateDnsServerName(properties).trim()
+            if (name.isNotBlank() && strictHost.isBlank()) strictHost = name
         }
-        return ""
+
+        val snapshot = when {
+            strictHost.isNotBlank() -> "strict"
+            sawPrivateDns -> "auto"
+            else -> "off"
+        }
+        if (snapshot != lastPrivateDnsSnapshot) {
+            lastPrivateDnsSnapshot = snapshot
+            // Молчать нельзя (I4): «подсказки нет» и «строгого режима нет» — два
+            // разных состояния, и различают их именно по этой строке.
+            LogManager.log(
+                when (snapshot) {
+                    "strict" -> "TOR: системный «Частный DNS» в строгом режиме — имена через Tor " +
+                        "резолвиться не будут."
+                    "auto" -> "TOR: системный «Частный DNS» в режиме «автоматически» — Tor он не мешает."
+                    else -> "TOR: системный «Частный DNS» выключен."
+                }
+            )
+        }
+        return strictHost
     }
 
     /** Одна строка предупреждения для экрана; пусто, если предупреждать не о чем. */
@@ -182,11 +237,22 @@ object TorTransport {
         // адрес, новый torrc никто не перечитывал, а `awaitBootstrap` получал от
         // **старого** tor'а сразу «100 %» — в журнале «вход webtunnel», а трафик
         // продолжал идти через прежние мосты.
-        if (boundService != null || socksPort != 0) {
+        if (boundService != null || socksPort != 0 || torRanInThisProcess) {
+            val previousSocksPort = socksPort
             LogManager.log("TOR: разбираем прежний сеанс перед новым.")
             stop(context)
+            if (!awaitTorGone(previousSocksPort)) {
+                // Второй `tor_run_main` поверх живого первого — это не отказ
+                // подключения, а обрыв процесса по `abort()`. Отступаем.
+                LogManager.log(
+                    "TOR: прежний tor за ${SHUTDOWN_WAIT_MS} мс не закрылся. Второй запуск в этом " +
+                        "процессе оборвал бы его сигналом, поэтому просим свежий процесс :vpn."
+                )
+                return NEEDS_FRESH_PROCESS
+            }
         }
         stopRequested = false
+        torRanInThisProcess = true
         return startLocked(context, bridges, entryMode, isCancelled)
     }
 
@@ -321,6 +387,32 @@ object TorTransport {
         socksPort = 0
         obfs4Address = ""
     }
+
+    /**
+     * Ждёт, пока прежний tor отпустит свой порт SOCKS.
+     *
+     * Признак внешний намеренно: `stopService` возвращается сразу, а поток tor'а
+     * в этот момент ещё внутри `tor_run_main`, и никакого «уже закрылся» из
+     * привязки не видно — мы её сами и сняли. Слушатель SOCKS tor открывает при
+     * старте и закрывает при выходе, поэтому «в подключении отказано» — это ровно
+     * «процесса tor больше нет».
+     */
+    private fun awaitTorGone(previousSocksPort: Int): Boolean {
+        val port = previousSocksPort.takeIf { it > 0 } ?: DEFAULT_SOCKS_PORT
+        val deadline = SystemClock.elapsedRealtime() + SHUTDOWN_WAIT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (!socksPortAccepts(port)) return true
+            Thread.sleep(200L)
+        }
+        return !socksPortAccepts(port)
+    }
+
+    private fun socksPortAccepts(port: Int): Boolean = runCatching {
+        java.net.Socket().use { socket ->
+            socket.connect(java.net.InetSocketAddress("127.0.0.1", port), 300)
+            true
+        }
+    }.getOrDefault(false)
 
     /**
      * Куда прокси этой сессии разрешено звонить: адреса мостов и хосты из `url=`.

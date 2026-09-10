@@ -3188,6 +3188,23 @@ class NovaVpnService : OperaNativeVpnService() {
      * Отправляем до смерти: широковещание уходит через system_server, и выживание
      * отправителя ему уже не нужно.
      */
+    /**
+     * Уводит процесс `:vpn` со сцены, чтобы сеанс поднялся в свежем.
+     *
+     * Обычно этим занимается фитиль tun2proxy: после `tun2proxy_stop()` процесс
+     * гибнет сам. Здесь фитиля нет — tun2proxy на этом пути даже не стартовал, —
+     * а `libtor` второй раз в одном процессе подниматься отказывается, обрывая
+     * его сигналом. Уходим сами и предсказуемо: основной процесс уже предупреждён
+     * и ждёт нашей смерти, чтобы повторить запуск.
+     */
+    private fun scheduleVpnProcessExit() {
+        startSafeServiceThread("NovaVpnProcessExit") {
+            Thread.sleep(600L)
+            LogManager.log("Процесс :vpn завершает себя, чтобы сеанс поднялся в чистом.")
+            android.os.Process.killProcess(android.os.Process.myPid())
+        }
+    }
+
     private fun requestRestartFromMainProcess() {
         runCatching {
             sendBroadcast(
@@ -9003,6 +9020,21 @@ class NovaVpnService : OperaNativeVpnService() {
         try {
             val socksPort = TorTransport.start(this, bridges, entryMode, cancelled)
             if (cancelled()) return true
+            if (socksPort == TorTransport.NEEDS_FRESH_PROCESS) {
+                // Тот же приём, что после фитиля tun2proxy: процесс объявляется
+                // непригодным, основной поднимает сеанс заново в свежем. Разница
+                // одна — умереть этот процесс сам не собирается, поэтому уходим
+                // мы сами, дождавшись, пока разбор сеанса закончится.
+                LogManager.log(
+                    "TOR: этот процесс :vpn для нового сеанса tor непригоден. Просим основной " +
+                        "процесс поднять подключение заново в свежем."
+                )
+                requestRestartFromMainProcess()
+                stopTorSessionQuietly()
+                closeActiveInterface()
+                scheduleVpnProcessExit()
+                return true
+            }
             if (socksPort <= 0) {
                 publishTransportNotice(
                     clientData,

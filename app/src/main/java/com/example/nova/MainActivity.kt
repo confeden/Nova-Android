@@ -2099,6 +2099,13 @@ class MainActivity : AppCompatActivity() {
                 if (reconnecting) {
                     SessionReapply.applyToLiveSession(appContext, ClientData(appContext))
                 }
+                // Селектор перерисовывается **после** записи, а не рядом с ней.
+                //
+                // Он читает тот же файл, и синхронный вызов заставал его прежним:
+                // нажатая кнопка отскакивала на старый способ входа, хотя выбор уже
+                // применялся. Пока запись идёт, на экране остаётся то, что человек
+                // нажал, — это и есть верное состояние.
+                runOnUiThread { if (!isFinishing && !isDestroyed) refreshMainRegionSelector() }
             }, "NovaTorEntryWrite").apply { isDaemon = true; start() }
             LogManager.log(
                 "Главный экран: вход в Tor — $label, смена=$changed, переподключение=$reconnecting."
@@ -2111,7 +2118,6 @@ class MainActivity : AppCompatActivity() {
             if (reconnecting) {
                 updateUiByState(NovaVpnService.STATE_CONNECTING)
             }
-            refreshMainRegionSelector()
             return
         }
         clientData.setOperaSubRegionPreference(value)

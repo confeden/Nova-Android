@@ -3933,7 +3933,7 @@ class SettingsActivity : AppCompatActivity() {
 
             button.buttonTintList = greenTint
 
-            button.setTextColor(Color.WHITE)
+            button.setTextColor(NovaTheme.color(this, R.attr.novaTextTitle))
 
         }
 
@@ -4672,7 +4672,9 @@ class SettingsActivity : AppCompatActivity() {
 
         titleView.text = "Выбор протокола"
 
-        titleView.setTextColor(Color.parseColor("#F3C94A"))
+        // Тема, а не литерал: карточка «Выбор протокола» — самая заметная на
+        // экране, и золотая на фиолетовой Proton или медной PoE она выглядит чужой.
+        titleView.setTextColor(NovaTheme.color(this, R.attr.novaTextTitle))
 
         val options = buildList {
 
@@ -4696,7 +4698,7 @@ class SettingsActivity : AppCompatActivity() {
 
         radioGroup.setOnCheckedChangeListener(null)
 
-        val yellowTint = ColorStateList.valueOf(Color.parseColor("#F3C94A"))
+        val yellowTint = ColorStateList.valueOf(NovaTheme.color(this, R.attr.novaAccent))
 
         buttons.forEachIndexed { index, button ->
 
@@ -4726,7 +4728,7 @@ class SettingsActivity : AppCompatActivity() {
 
             button.buttonTintList = yellowTint
 
-            button.setTextColor(Color.WHITE)
+            button.setTextColor(NovaTheme.color(this, R.attr.novaTextTitle))
 
         }
 

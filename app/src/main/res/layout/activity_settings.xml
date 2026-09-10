@@ -75,7 +75,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="Выбор протокола/региона"
-                    android:textColor="#F3C94A"
+                    android:textColor="?attr/novaTextTitle"
                     android:textSize="16sp"
                     android:textStyle="bold"
                     android:layout_marginBottom="2dp"/>
@@ -103,7 +103,7 @@
                         android:paddingEnd="0dp"
                         android:layout_marginEnd="10dp"
                         android:maxLines="1"
-                        android:buttonTint="#F3C94A"/>
+                        android:buttonTint="?attr/novaAccent"/>
 
                     <RadioButton
                         android:id="@+id/rb_exit_ru"
@@ -116,7 +116,7 @@
                         android:paddingEnd="0dp"
                         android:layout_marginEnd="10dp"
                         android:maxLines="1"
-                        android:buttonTint="#F3C94A"/>
+                        android:buttonTint="?attr/novaAccent"/>
 
                     <RadioButton
                         android:id="@+id/rb_exit_opera"
@@ -129,7 +129,7 @@
                         android:paddingEnd="0dp"
                         android:layout_marginEnd="10dp"
                         android:maxLines="1"
-                        android:buttonTint="#F3C94A"/>
+                        android:buttonTint="?attr/novaAccent"/>
 
                     <RadioButton
                         android:id="@+id/rb_exit_masque"
@@ -142,7 +142,7 @@
                         android:paddingEnd="0dp"
                         android:layout_marginEnd="10dp"
                         android:maxLines="1"
-                        android:buttonTint="#F3C94A"/>
+                        android:buttonTint="?attr/novaAccent"/>
 
                     <RadioButton
                         android:id="@+id/rb_exit_proton"
@@ -155,7 +155,7 @@
                         android:paddingEnd="0dp"
                         android:layout_marginEnd="10dp"
                         android:maxLines="1"
-                        android:buttonTint="#F3C94A"/>
+                        android:buttonTint="?attr/novaAccent"/>
 
                     <RadioButton
                         android:id="@+id/rb_exit_tor"
@@ -168,7 +168,7 @@
                         android:paddingEnd="0dp"
                         android:layout_marginEnd="10dp"
                         android:maxLines="1"
-                        android:buttonTint="#F3C94A"/>
+                        android:buttonTint="?attr/novaAccent"/>
                 </com.example.nova.FlowRadioGroup>
 
                 <!--

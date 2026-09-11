@@ -64,8 +64,6 @@ import java.util.TimeZone
 
 import androidx.appcompat.app.AppCompatActivity
 
-import androidx.appcompat.widget.SwitchCompat
-
 import androidx.core.content.ContextCompat
 
 import androidx.lifecycle.lifecycleScope
@@ -226,9 +224,6 @@ class SettingsActivity : AppCompatActivity() {
      * а под кнопкой висел бы итог позапрошлого выпуска.
      */
     private var warpGenerateRequestedAtMs = 0L
-
-    /** Начальная расстановка переключателей WARP не должна выглядеть как нажатие. */
-    private var suppressWarpGenerateSwitchCallback = false
 
     private val warpGenerateRefreshRunnable = Runnable {
 
@@ -831,7 +826,10 @@ class SettingsActivity : AppCompatActivity() {
 
         updateLocalProxySummary(tvLocalProxyNote)
 
-        setupWarpGenerateCard()
+        // Карточки «Личные профили» больше нет; из неё пережила только сводка по
+        // мостам Tor, и её достаточно позвать напрямую.
+
+        refreshTorBridgeStatus()
 
         rowWarpConfigs.setOnClickListener {
 
@@ -2405,25 +2403,16 @@ class SettingsActivity : AppCompatActivity() {
 
 
 
-    private fun isNovaSessionLikelyActive(): Boolean {
-
-        val serviceState = clientData.getServiceState()
-
-        if (serviceState == NovaVpnService.STATE_CONNECTED || serviceState == NovaVpnService.STATE_CONNECTING) {
-
-            return true
-
-        }
-
-        if (clientData.getRestartSession() != null) {
-
-            return true
-
-        }
-
-        return hasActiveNovaSystemVpn()
-
-    }
+    /**
+     * Есть ли прямо сейчас живой сеанс Nova.
+     *
+     * Логика теперь ровно одна и лежит в [SessionReapply.isSessionLikelyActive].
+     * Здесь была её дословная вторая копия — тот самый G49: правку носили в один
+     * файл, а второй тихо оставался со старым ответом. Экран настроек спрашивает
+     * общий источник, поэтому любое уточнение предиката действует и здесь.
+     */
+    private fun isNovaSessionLikelyActive(): Boolean =
+        SessionReapply.isSessionLikelyActive(this, clientData)
 
     
 
@@ -2556,23 +2545,6 @@ class SettingsActivity : AppCompatActivity() {
 
     }
 
-    /**
-     * То же самое для `SwitchCompat`.
-     *
-     * Перегрузка, а не общий тип: `SwitchCompat` наследуется от `CompoundButton`, а
-     * не от платформенного `Switch`, и в соседнюю функцию не проходит. Списки
-     * состояний те же самые — геометрия и палитра переключателей подобраны вручную
-     * после того, как обновление appcompat поменяло умолчания библиотеки, и выводить
-     * их заново нельзя.
-     */
-    private fun applyLiquidSwitchTint(switch: SwitchCompat) {
-
-        switch.thumbTintList = ContextCompat.getColorStateList(this, R.color.switch_thumb_tint_liquid)
-
-        switch.trackTintList = ContextCompat.getColorStateList(this, R.color.switch_track_tint_liquid)
-
-    }
-
     
 
     private fun setupFooterLink(textView: TextView) {
@@ -2620,6 +2592,31 @@ class SettingsActivity : AppCompatActivity() {
         }
 
         
+
+        // Левая часть подписи до сердечка приглушена ролью C, чтобы шапка
+        // не спорила яркостью со ссылкой. Литералов цвета здесь нет (I21).
+
+        val heartIndex = fullText.indexOf('❤')
+
+        if (heartIndex > 0) {
+
+            spannableString.setSpan(
+
+                android.text.style.ForegroundColorSpan(
+
+                    NovaTheme.color(this@SettingsActivity, R.attr.novaTextValue)
+
+                ),
+
+                0,
+
+                heartIndex,
+
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+
+            )
+
+        }
 
         val startIndex = fullText.indexOf(linkText)
 
@@ -4379,74 +4376,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
 
-    /**
-     * Карточка «Свои профили WARP»: кнопка выпуска и два переключателя.
-     *
-     * Обе настройки читаются с рабочего потока. Это не осторожность впрок: первое
-     * обращение к `SharedPreferences` тянет с диска весь файл настроек, а карточка
-     * собирается в `onCreate` — то есть ровно в том кадре, который пользователь
-     * ждёт после нажатия «Настройки».
-     *
-     * Обработчики ставятся сразу, а положение приезжает позже под флагом
-     * [suppressWarpGenerateSwitchCallback]: без флага начальная расстановка была бы
-     * неотличима от нажатия и писала бы в журнал «пользователь включил» на каждом
-     * заходе на экран.
-     */
-    private fun setupWarpGenerateCard() {
-
-        val swAvoidColo = findViewById<SwitchCompat>(R.id.sw_avoid_moscow_colo) ?: return
-
-        applyLiquidSwitchTint(swAvoidColo)
-
-        // Переключателя «использовать свои профили» здесь больше нет: личные
-        // профили используются в первую очередь всегда. Кнопка выпуска переехала
-        // в карточку выбора протокола и переименовывается по состоянию
-        // ([bindProtonRefreshButton]).
-
-        swAvoidColo.setOnCheckedChangeListener { _, isChecked ->
-
-            if (suppressWarpGenerateSwitchCallback) return@setOnCheckedChangeListener
-
-            lifecycleScope.launch(Dispatchers.IO) {
-
-                clientData.setAvoidedColoSwitchEnabled(isChecked)
-
-                LogManager.log(
-                    if (isChecked) {
-                        "Узел Cloudflare: обход нежелательных узлов " +
-                            "(${ExitColoPolicy.DEFAULT_AVOIDED.joinToString(", ")}) включён."
-                    } else {
-                        "Узел Cloudflare: обход нежелательных узлов выключен."
-                    }
-                )
-
-            }
-
-        }
-
-        lifecycleScope.launch(Dispatchers.IO) {
-
-            val avoidColo = clientData.isAvoidedColoSwitchEnabled()
-
-            withContext(Dispatchers.Main) {
-
-                if (isFinishing || isDestroyed) return@withContext
-
-                suppressWarpGenerateSwitchCallback = true
-
-                swAvoidColo.isChecked = avoidColo
-
-                suppressWarpGenerateSwitchCallback = false
-
-            }
-
-        }
-
-        refreshTorBridgeStatus()
-
-    }
-
-    /** Строка о мостах Tor в карточке личных профилей. */
+    /** Строка о мостах Tor — под селектором протокола, рядом с кнопкой TOR. */
     private fun refreshTorBridgeStatus() {
         val view = findViewById<TextView>(R.id.tv_tor_bridges_status) ?: return
         lifecycleScope.launch(Dispatchers.IO) {

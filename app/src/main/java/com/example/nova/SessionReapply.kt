@@ -97,6 +97,18 @@ object SessionReapply {
             putExtra(NovaVpnService.EXTRA_REAPPLY_SNI_MASK_MODE, clientData.getSniMaskMode())
             putExtra(NovaVpnService.EXTRA_REAPPLY_SNI_MASK_LIST, clientData.getSniCustomListRaw())
             putExtra(NovaVpnService.EXTRA_REAPPLY_TUNNEL_MTU, clientData.getTunnelMtu())
+            // Вид уведомления — по той же причине, что и всё остальное здесь (I19).
+            // Экран «Уведомление» шлёт своё намерение только живой службе, а при
+            // выключенном VPN службы нет: без этих двух полей переключатель,
+            // нажатый до подключения, не действовал бы до перезапуска процесса.
+            putExtra(
+                NovaVpnService.EXTRA_NOTIFICATION_DETAILS_ENABLED,
+                clientData.isNotificationDetailsEnabled(),
+            )
+            putExtra(
+                NovaVpnService.EXTRA_NOTIFICATION_COLLAPSED,
+                clientData.isNotificationCollapsed(),
+            )
             // «Обход по доменам» — по той же причине: список, записанный экраном, в
             // процессе `:vpn` не виден, и без extras он бы сохранялся и не действовал.
             putExtra(
@@ -193,13 +205,34 @@ object SessionReapply {
      * запомненный сеанс для перезапуска и, наконец, реально существующий
      * системный VPN. Одного состояния мало — оно пишется файлом и может отставать
      * на доли секунды после старта.
+     *
+     * Первые два считаются **только пока жив процесс `:vpn`**: без него они врут
+     * (см. комментарий в теле). Третий проверяется всегда и сам по себе.
      */
     fun isSessionLikelyActive(context: Context, clientData: ClientData): Boolean {
-        val serviceState = clientData.getServiceState()
-        if (serviceState == NovaVpnService.STATE_CONNECTED || serviceState == NovaVpnService.STATE_CONNECTING) {
-            return true
+        // Два локальных признака из трёх умеют врать в сторону «сеанс есть», и
+        // оба врут именно тогда, когда сеанса нет.
+        //
+        // `restart_session` лежит в `SharedPreferences`, а их процесс UI после
+        // чужой записи не перечитывает никогда (I2): всё, что осталось в файле
+        // от прогона, закончившегося не кнопкой «Отключить» — убитый фитилём
+        // `:vpn` (G3, G179), SIGABRT второго `tor_run_main` (G185), смахнутое
+        // приложение, — замерзает в этом процессе до перезапуска. Состояние в
+        // общем файле после смерти `:vpn` остаётся тем, каким его записали
+        // последним. Ответ «сеанс жив» на выключенном VPN превращает выбор
+        // настройки в подключение, которого никто не просил.
+        //
+        // Живая служба — необходимое условие: сеанс без процесса `:vpn` не
+        // существует. Живой системный VPN проверяется отдельно и последним: он
+        // сам себе доказательство, и у него свои три признака (I16).
+        val liveRuntime = isNovaVpnServiceRunning(context)
+        if (liveRuntime) {
+            val serviceState = clientData.getServiceState()
+            if (serviceState == NovaVpnService.STATE_CONNECTED || serviceState == NovaVpnService.STATE_CONNECTING) {
+                return true
+            }
+            if (clientData.getRestartSession() != null) return true
         }
-        if (clientData.getRestartSession() != null) return true
         return hasActiveNovaSystemVpn(context, clientData)
     }
 

@@ -53,9 +53,22 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:text="Резолверы опрашиваются сверху вниз, все — шифрованные. Последняя строка — открытый резолвер провайдера: он отвечает, только когда не ответил ни один защищённый, и его можно выключить. Потяните строку за ручку слева, чтобы изменить порядок; нажмите — чтобы изменить адрес."
+                android:text="Резолверы опрашиваются сверху вниз, все — шифрованные. Последняя строка — открытый резолвер провайдера: он отвечает, только когда не ответил ни один защищённый, и его можно выключить. Нажмите «Изменить порядок», чтобы переставить строки и добавить свой резолвер; нажатие на строку меняет адрес."
                 android:textColor="?attr/novaTextHint"
                 android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/btn_dns_reorder"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/bg_settings_action_dark"
+                android:gravity="center"
+                android:paddingHorizontal="12dp"
+                android:text="Изменить порядок"
+                android:textColor="?attr/novaTextTitle"
+                android:textSize="15sp"
+                android:textStyle="bold" />
 
             <androidx.recyclerview.widget.RecyclerView
                 android:id="@+id/rv_dns_rules"

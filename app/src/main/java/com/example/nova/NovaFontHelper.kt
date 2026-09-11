@@ -24,7 +24,7 @@ object NovaFontHelper {
         R.id.row_share_release,
         R.id.btn_create_new,
         R.id.btn_paste_config,
-        R.id.btn_imported_only,
+        R.id.tv_configs_source_label,
         R.id.tv_discovery_status,
         R.id.tv_discovery_progress,
         R.id.tv_empty,

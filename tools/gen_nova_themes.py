@@ -455,8 +455,10 @@ def themes():
         out.append('        <item name="android:minHeight">44dp</item>\n')
         out.append('        <item name="android:paddingLeft">18dp</item>\n')
         out.append('        <item name="android:paddingRight">18dp</item>\n')
+        # Вертикального поля у кнопки диалога быть не должно: `ButtonBarLayout`
+        # с `gravity="bottom"` вычитает его дважды и срезает верх подложки на
+        # столько же (см. NovaDialogs.apply). Отбивку снизу даёт padding полосы.
         out.append('        <item name="android:layout_marginStart">8dp</item>\n')
-        out.append('        <item name="android:layout_marginBottom">4dp</item>\n')
         out.append("    </style>\n")
         out.append('\n    <style name="Widget.Nova.DialogButtonPrimary.%s" '
                    'parent="@style/Widget.Nova.DialogButton.%s">\n' % (style, style))

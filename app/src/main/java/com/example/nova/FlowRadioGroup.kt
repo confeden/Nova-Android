@@ -1,9 +1,16 @@
 package com.example.nova
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BlurMaskFilter
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
 import android.util.AttributeSet
 import android.view.View
 import android.view.ViewGroup
+import android.widget.CompoundButton
 import android.widget.RadioGroup
 
 /**
@@ -78,6 +85,144 @@ class FlowRadioGroup @JvmOverloads constructor(
             field = value
             requestLayout()
         }
+
+    /**
+     * Цвет неоновой подсветки выбранной кнопки. 0 — подсветки нет.
+     *
+     * Умолчание «нет» намеренно: тот же вид собирает селектор в настройках
+     * (`activity_settings.xml`), где кнопки — обычные радиокнопки с кружком, а не
+     * овальные бейджи, и ореол вокруг них смысла не имеет.
+     */
+    var selectionGlowColor: Int = 0
+        set(value) {
+            if (field == value) return
+            field = value
+            haloBitmap = null
+            invalidate()
+        }
+
+    private var haloBitmap: Bitmap? = null
+    private var haloW = 0
+    private var haloH = 0
+    private var haloColor = 0
+    private val haloPad = 6f * resources.displayMetrics.density
+    private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+
+    /** Своя кисть для растра: через неё ореол гаснет вместе с кнопкой. */
+    private val haloPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+
+    /**
+     * Отметка двигается — надо перерисовать **группу**, а не кнопку.
+     *
+     * Ореол рисует группа, и в аппаратном конвейере список отрисовки родителя не
+     * пересобирается только оттого, что ребёнок себя пометил грязным: сияние
+     * осталось бы под прежней кнопкой. `RadioGroup` держит свой контроль
+     * исключительности на скрытом слоте `setOnCheckedChangeWidgetListener`,
+     * поэтому публичный слушатель кнопки свободен и взаимное исключение не
+     * ломает. `check()` перекрыт заодно — программная отметка идёт мимо касания.
+     */
+    override fun onViewAdded(child: View) {
+        super.onViewAdded(child)
+        (child as? CompoundButton)?.setOnCheckedChangeListener { _, _ ->
+            if (selectionGlowColor != 0) invalidate()
+        }
+    }
+
+    override fun check(id: Int) {
+        super.check(id)
+        if (selectionGlowColor != 0) invalidate()
+    }
+
+    override fun dispatchDraw(canvas: Canvas) {
+        val checked = if (selectionGlowColor != 0) {
+            findViewById<View>(checkedRadioButtonId)?.takeIf { it.width > 0 && it.height > 0 }
+        } else null
+
+        // Кнопка гаснет до 0.45 (`ConnectionSelectorPolicy.DISABLED_ALPHA`), когда
+        // выбор заперт — идёт регистрация устройства или Opera не поддержана.
+        // `View.alpha` действует только на саму кнопку, а свет и обводку рисует
+        // группа: без этого множителя погашенный чип светился бы в полную силу и
+        // читался как доступный.
+        val fade = checked?.alpha ?: 1f
+
+        // Ореол — под кнопками: подложка самой кнопки полупрозрачная, и свет
+        // должен лежать на фоне, а не поверх подписи.
+        if (checked != null) {
+            haloFor(checked.width, checked.height)?.let {
+                haloPaint.alpha = (255 * fade).toInt().coerceIn(0, 255)
+                canvas.drawBitmap(it, checked.left - haloPad, checked.top - haloPad, haloPaint)
+            }
+        }
+        super.dispatchDraw(canvas)
+        // Ядро — поверх: 1dp обводка тем же цветом. Радиус берётся от **высоты
+        // кнопки**, а не константой 18dp: на тесном экране кнопка сжимается до
+        // 22dp (`applyRegionChipHeights`), и фиксированный радиус перестал бы
+        // совпадать с формой подложки.
+        if (checked != null) {
+            val w = 1f * resources.displayMetrics.density
+            // Порядок обязателен: `color` перезаписывает и альфа-канал, поэтому
+            // альфа ставится после цвета. Восстанавливать её не надо — цвет
+            // присваивается заново на каждом кадре.
+            ringPaint.color = selectionGlowColor
+            ringPaint.alpha = (Color.alpha(selectionGlowColor) * fade).toInt().coerceIn(0, 255)
+            ringPaint.strokeWidth = w
+            val r = checked.height / 2f
+            canvas.drawRoundRect(
+                checked.left + w / 2f, checked.top + w / 2f,
+                checked.right - w / 2f, checked.bottom - w / 2f,
+                r, r, ringPaint,
+            )
+        }
+    }
+
+    /**
+     * Ореол считается один раз на размер и цвет, а не на кадр.
+     *
+     * `BlurMaskFilter` не работает на аппаратном холсте, но ему и не нужен живой:
+     * растр рисуется программным `Canvas`, а на экран уходит обычным
+     * `drawBitmap`. Так эффект есть, а весь вид в программный слой не падает
+     * (`LatencyGraphView` отказался от размытия именно из-за этого).
+     * Все кнопки группы одной ширины (`uniformItemWidth`), поэтому растр один.
+     */
+    private fun haloFor(w: Int, h: Int): Bitmap? {
+        haloBitmap?.let { if (w == haloW && h == haloH && selectionGlowColor == haloColor) return it }
+        if (w <= 0 || h <= 0) return null
+        val bmp = Bitmap.createBitmap(
+            w + (2 * haloPad).toInt(), h + (2 * haloPad).toInt(), Bitmap.Config.ARGB_8888,
+        )
+        val c = Canvas(bmp)
+        val core = RectF(haloPad, haloPad, haloPad + w, haloPad + h)
+        val radius = h / 2f
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            isDither = true
+            style = Paint.Style.FILL
+        }
+        val red = Color.red(selectionGlowColor)
+        val green = Color.green(selectionGlowColor)
+        val blue = Color.blue(selectionGlowColor)
+        // Лестница как в `StrokeTextView.drawLineHalo`: форма у всех слоёв одна,
+        // меняется только радиус размытия. Расширять вместе с радиусом нельзя —
+        // у каждого слоя свой силуэт, и на дальнем крае проступают кольца.
+        //
+        // Размытие именно `OUTER`, а не `NORMAL`. `NORMAL` красит и внутренность
+        // силуэта, а слоёв двенадцать, и их прозрачности складываются: кнопка
+        // заливалась цветом акцента целиком и читалась как нажатая, а не как
+        // подсвеченная. `OUTER` рисует **только снаружи** контура — внутри
+        // остаётся подложка кнопки, снаружи свет. Это и есть неоновая вывеска:
+        // яркая линия и мягкое зарево вокруг неё.
+        for (layer in HALO_LAYERS) {
+            val alpha = (HALO_BASE_ALPHA * layer[1]).toInt().coerceIn(0, 255)
+            if (alpha <= 0) continue
+            paint.color = Color.argb(alpha, red, green, blue)
+            paint.maskFilter = BlurMaskFilter((haloPad * layer[0]).coerceAtLeast(1f), BlurMaskFilter.Blur.OUTER)
+            c.drawRoundRect(core, radius, radius, paint)
+        }
+        haloBitmap = bmp
+        haloW = w
+        haloH = h
+        haloColor = selectionGlowColor
+        return bmp
+    }
 
     /** Индекс, после которого план требует перенос. Пусто — плана нет. */
     private fun planBreaks(): Set<Int> {
@@ -221,5 +366,20 @@ class FlowRadioGroup @JvmOverloads constructor(
             if (child.visibility == View.GONE) continue
             action(child, child.layoutParams as ViewGroup.MarginLayoutParams)
         }
+    }
+
+    private companion object {
+        /** Пары «доля радиуса — доля непрозрачности». Взяты у `StrokeTextView`. */
+        private val HALO_LAYERS = arrayOf(
+            floatArrayOf(1.00f, 0.14f), floatArrayOf(0.84f, 0.18f),
+            floatArrayOf(0.70f, 0.23f), floatArrayOf(0.58f, 0.29f),
+            floatArrayOf(0.47f, 0.36f), floatArrayOf(0.37f, 0.44f),
+            floatArrayOf(0.29f, 0.53f), floatArrayOf(0.22f, 0.63f),
+            floatArrayOf(0.16f, 0.73f), floatArrayOf(0.11f, 0.83f),
+            floatArrayOf(0.07f, 0.92f), floatArrayOf(0.04f, 1.00f),
+        )
+
+        /** «Мягко, а не резко»: у кнопки 36dp сильнее выглядит тревогой. */
+        private const val HALO_BASE_ALPHA = 96
     }
 }

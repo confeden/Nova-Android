@@ -16,12 +16,13 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
-import android.text.Html
 import android.view.View
 import android.view.WindowManager
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
@@ -108,7 +109,36 @@ class WarpConfigsActivity : AppCompatActivity() {
     private lateinit var btnCreate: TextView
     private lateinit var btnPaste: TextView
     private lateinit var btnAdapt: TextView
-    private lateinit var btnImportedOnly: TextView
+    private lateinit var rgConfigsSource: FlowRadioGroup
+    private lateinit var rbConfigsBuiltIn: RadioButton
+    private lateinit var rbConfigsImported: RadioButton
+
+    /**
+     * Слушатель источника держится в поле.
+     *
+     * `updateImportedOnlyUi` ставит отметку программно, а `check()` неотличим
+     * от нажатия пользователя (G100): пять точек импорта включают режим
+     * импортированных сами (`revealImportedConfigs` и четыре ветки импорта), и
+     * без снятия слушателя каждая из них заходила бы сюда как «выбор
+     * пользователя» — с повторной записью настройки и лишней перерисовкой.
+     */
+    private val configsSourceListener = RadioGroup.OnCheckedChangeListener { _, checkedId ->
+        val nextEnabled = checkedId == R.id.rb_configs_imported
+        if (nextEnabled == clientData.isImportedWarpOnlyModeEnabled()) {
+            return@OnCheckedChangeListener
+        }
+        clientData.setImportedWarpOnlyModeEnabled(nextEnabled)
+        updateImportedOnlyUi(cachedImportedCount)
+        // Переключение показывает другой срез тех же данных, а не другие данные:
+        // оба списка уже посчитаны и лежат в кэше. Читаем с диска только если
+        // кэша ещё нет — то есть при первом открытии экрана.
+        if (cachedAllConfigs.isEmpty()) {
+            renderConfigs()
+        } else {
+            renderCachedConfigsIfAvailable()
+        }
+    }
+
     private lateinit var tvStatus: TextView
     private lateinit var tvProgress: TextView
     private lateinit var trailView: WarpDiscoveryTrailView
@@ -449,7 +479,12 @@ class WarpConfigsActivity : AppCompatActivity() {
         btnCreate = findViewById(R.id.btn_create_new)
         btnPaste = findViewById(R.id.btn_paste_config)
         btnAdapt = findViewById(R.id.btn_adapt_network)
-        btnImportedOnly = findViewById(R.id.btn_imported_only)
+        rgConfigsSource = findViewById(R.id.rg_configs_source)
+        rbConfigsBuiltIn = findViewById(R.id.rb_configs_builtin)
+        rbConfigsImported = findViewById(R.id.rb_configs_imported)
+        // Строки набираются по ширине, а не по плану: при переносе левый край
+        // обеих строк должен стоять на одной вертикали с подписью слева.
+        rgConfigsSource.alignRowsToStart = true
         tvStatus = findViewById(R.id.tv_discovery_status)
         tvProgress = findViewById(R.id.tv_discovery_progress)
         trailView = findViewById(R.id.view_discovery_trail)
@@ -472,7 +507,6 @@ class WarpConfigsActivity : AppCompatActivity() {
             btnCreate,
             btnPaste,
             btnAdapt,
-            btnImportedOnly,
         )
 
         btnCreate.setOnClickListener {
@@ -487,21 +521,7 @@ class WarpConfigsActivity : AppCompatActivity() {
                 startAdaptation()
             }
         }
-        btnImportedOnly.setOnClickListener {
-            val nextEnabled = !clientData.isImportedWarpOnlyModeEnabled()
-            clientData.setImportedWarpOnlyModeEnabled(nextEnabled)
-            updateImportedOnlyUi(cachedImportedCount)
-            // Переключение вкладки показывает другой срез тех же данных, а не другие
-            // данные. Перечитывать хранилище при каждом нажатии незачем: оба списка уже
-            // посчитаны и лежат в кэше, а перезагрузка отдаёт список заново и потому
-            // выглядит как задержка на ровном месте. Читаем с диска только если кэша
-            // ещё нет — то есть при первом открытии экрана.
-            if (cachedAllConfigs.isEmpty()) {
-                renderConfigs()
-            } else {
-                renderCachedConfigsIfAvailable()
-            }
-        }
+        rgConfigsSource.setOnCheckedChangeListener(configsSourceListener)
 
         seedCurrentSuccessIfNeeded()
         importPendingLocalBatchIfAny()
@@ -1183,18 +1203,20 @@ class WarpConfigsActivity : AppCompatActivity() {
 
     private fun updateImportedOnlyUi(importedCount: Int = countVisibleConfigs(importedOnly = true)) {
         val importedOnly = clientData.isImportedWarpOnlyModeEnabled()
-        val textHtml = if (importedOnly) {
-            "Активно: <font color='#F3C94A'>импортированные</font>"
-        } else {
-            "Активно: <font color='#50C878'>встроенные</font>"
+        val target = if (importedOnly) R.id.rb_configs_imported else R.id.rb_configs_builtin
+        // Отметка двигается только когда она и правда не та, и слушатель на это
+        // время снимается: программная простановка неотличима от нажатия (G100),
+        // а сюда приходят все пять точек импорта, включающих режим сами.
+        if (rgConfigsSource.checkedRadioButtonId != target) {
+            rgConfigsSource.setOnCheckedChangeListener(null)
+            rgConfigsSource.check(target)
+            rgConfigsSource.setOnCheckedChangeListener(configsSourceListener)
         }
-        btnImportedOnly.text = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            Html.fromHtml(textHtml, Html.FROM_HTML_MODE_LEGACY)
-        } else {
-            @Suppress("DEPRECATION")
-            Html.fromHtml(textHtml)
-        }
-        btnImportedOnly.alpha = if (importedOnly && importedCount <= 0) 0.78f else 1f
+        // Режим импортированных включён, а импортированных профилей нет — прежняя
+        // кнопка гасла до 0.78, и признак сохранён на подписи варианта. Выбрать
+        // его по-прежнему можно: иначе строка «Пока нет импортированных
+        // конфигураций» (renderConfigItems, :283) стала бы недостижимой.
+        rbConfigsImported.alpha = if (importedOnly && importedCount <= 0) 0.78f else 1f
     }
 
     private fun showPasteDialog() {

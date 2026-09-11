@@ -19,18 +19,30 @@
         android:paddingRight="24dp"
         android:paddingBottom="0dp">
 
+        <!--
+            Группа выбирает транспорт, а не вид значения: «Любой» означает, что
+            приложение спросит резолвер обоими путями и первым пойдёт тот, что на
+            этой сети отвечает быстрее — 443 и 853 блокируют порознь.
+
+            Кнопки «Обычный» здесь нет и быть не может: адрес открытого правила
+            уезжает в вырез маршрута, а это утечка имён наружу. Незашифрованной
+            остаётся ровно одна ступень — резолвер провайдера, и она в списке уже
+            стоит последней.
+        -->
         <RadioGroup
             android:id="@+id/rg_dns_rule_kind"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal">
 
-            <!--
-                Кнопки «Обычный» здесь больше нет: незашифрованной остаётся ровно
-                одна ступень — резолвер провайдера, и она в списке уже стоит
-                последней. Добавить второй открытый резолвер значило бы вернуть
-                вырез маршрута к нему, то есть вернуть утечку имён наружу.
-            -->
+            <RadioButton
+                android:id="@+id/rb_dns_rule_any"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="8dp"
+                android:fontFamily="sans-serif"
+                android:text="Любой" />
+
             <RadioButton
                 android:id="@+id/rb_dns_rule_doh"
                 android:layout_width="wrap_content"

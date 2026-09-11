@@ -2,8 +2,13 @@
 - The entry is selectable: WEBTUNNEL, OBFS4, VANILLA or no bridges, ordered by how likely each is to work from Russia.
 - Bridges are collected and liveness-checked by the app itself.
 - A hint about the system Private DNS: in strict mode no name resolves over Tor, and the app explains what to switch.
-- Ten themes with a picker; settings split into six groups with icons.
+- Choosing a protocol, a region or a Tor entry while the VPN is off no longer starts a connection on its own.
+- DNS screen: an explicit reorder mode, and a transport choice per resolver - Any, DoH or DoT, Any by default.
+- The notification is expanded with a Disconnect button; a new setting collapses it back.
+- Ten themes with a picker; settings split into six groups with icons; the selected protocol button glows in the theme colour.
+- Configurations: a Built-in / Imported choice instead of a toggle button.
 - A 2x1 home-screen widget whose round buttons no longer get clipped.
 - Manual tunnel MTU, 1000-1440 in steps of 10, 1280 by default.
-- A Disconnect action in the notification shade.
 - Logs are anonymised: the network stays visible, the host does not; each session starts with build, Android and device.
+- Dialog buttons are no longer clipped along their top edge.
+- The Personal profiles card and the Moscow Cloudflare node switch are gone from Settings.

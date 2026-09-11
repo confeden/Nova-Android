@@ -198,62 +198,13 @@
                     android:textSize="13sp"
                     android:visibility="gone" />
 
-                <TextView
-                    android:id="@+id/tv_exit_last"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Последний выход: неизвестно"
-                    android:textColor="?attr/novaTextHint"
-                    android:textSize="12sp"
-                    android:visibility="gone"/>
-            </LinearLayout>
-
-            <!--
-                Личные профили.
-
-                Переключателя «использовать свои профили» здесь больше нет:
-                однажды выпущенные личные профили используются в первую очередь
-                всегда, и выпускаются сами при первом подключении. Осталась
-                строка, которая это объясняет, состояние выпуска и обход узла.
-
-                Кнопки выпуска здесь тоже нет — она переехала в карточку выбора
-                протокола и переименовывается по состоянию («Сгенерировать» /
-                «Обновить»), как попросил владелец.
-
-                Собрана по тем же правилам, что и блок логирования: карточка вертикальная,
-                отступы 16dp по горизонтали и 8dp по вертикали, внутренние строки с
-                переключателем — минимальной высоты 48dp.
-            -->
-            <LinearLayout
-                android:id="@+id/row_warp_generate_block"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:background="?attr/novaCardBackground"
-                android:minHeight="64dp"
-                android:paddingLeft="16dp"
-                android:paddingTop="8dp"
-                android:paddingRight="16dp"
-                android:paddingBottom="8dp"
-                android:layout_marginBottom="6dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="Личные профили"
-                    android:textColor="?attr/novaTextTitle"
-                    android:textSize="16sp"
-                    android:textStyle="bold" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:text="Личные профили будут использоваться в первую очередь"
-                    android:textColor="?attr/novaTextTitle"
-                    android:textSize="14sp" />
-
+                <!--
+                    Ход выпуска личных профилей Cloudflare. Строка живёт рядом с
+                    кнопкой, которая его и запускает: карточку «Личные профили»
+                    владелец попросил убрать, а вид обязан остаться — без него
+                    [refreshWarpGenerateState] выходит на `?: return` и больше
+                    никогда не отпирает кнопку.
+                -->
                 <TextView
                     android:id="@+id/tv_warp_generate_status"
                     android:layout_width="match_parent"
@@ -263,11 +214,7 @@
                     android:textSize="12sp"
                     android:visibility="gone" />
 
-                <!--
-                    Пояснения про личные профили здесь больше нет: владелец
-                    попросил убрать. Строки выше достаточно, а абзац серого текста
-                    на экране, где и без него плотно, читают единицы.
-                -->
+                <!-- Сводка по мостам Tor — под кнопкой TOR, которая их собирает. -->
                 <TextView
                     android:id="@+id/tv_tor_bridges_status"
                     android:layout_width="match_parent"
@@ -277,35 +224,14 @@
                     android:textSize="12sp"
                     android:visibility="gone" />
 
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:minHeight="48dp"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical">
-
-                    <TextView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="Обходить московский узел Cloudflare (DME)"
-                        android:textColor="?attr/novaTextTitle"
-                        android:textSize="16sp"
-                        android:textStyle="bold" />
-
-                    <androidx.appcompat.widget.SwitchCompat
-                        android:id="@+id/sw_avoid_moscow_colo"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content" />
-                </LinearLayout>
-
                 <TextView
-                    android:layout_width="match_parent"
+                    android:id="@+id/tv_exit_last"
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginBottom="4dp"
-                    android:text="Меняет узел Cloudflare. Страна выхода при этом тоже может смениться — но не обязана, решает Cloudflare. Каждое переключение — переподключение."
+                    android:text="Последний выход: неизвестно"
                     android:textColor="?attr/novaTextHint"
-                    android:textSize="12sp" />
+                    android:textSize="12sp"
+                    android:visibility="gone"/>
             </LinearLayout>
 
             <LinearLayout
@@ -1593,17 +1519,17 @@
         android:id="@+id/tv_footer"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:minHeight="44dp"
+        android:minHeight="30dp"
         android:background="@drawable/bg_liquid_glass_header"
         android:textColor="?attr/novaTextTitle"
         android:textSize="14sp"
         android:gravity="center"
         android:includeFontPadding="false"
         android:paddingLeft="16dp"
-        android:paddingTop="10dp"
+        android:paddingTop="6dp"
         android:paddingRight="16dp"
-        android:paddingBottom="10dp"
-        android:layout_marginTop="8dp"
-        android:layout_marginBottom="16dp"/>
+        android:paddingBottom="6dp"
+        android:layout_marginTop="6dp"
+        android:layout_marginBottom="12dp"/>
 
 </LinearLayout>

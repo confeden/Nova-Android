@@ -656,7 +656,6 @@
         <item name="android:paddingLeft">18dp</item>
         <item name="android:paddingRight">18dp</item>
         <item name="android:layout_marginStart">8dp</item>
-        <item name="android:layout_marginBottom">4dp</item>
     </style>
 
     <style name="Widget.Nova.DialogButtonPrimary.Auroramint" parent="@style/Widget.Nova.DialogButton.Auroramint">
@@ -677,7 +676,6 @@
         <item name="android:paddingLeft">18dp</item>
         <item name="android:paddingRight">18dp</item>
         <item name="android:layout_marginStart">8dp</item>
-        <item name="android:layout_marginBottom">4dp</item>
     </style>
 
     <style name="Widget.Nova.DialogButtonPrimary.DNSAI" parent="@style/Widget.Nova.DialogButton.DNSAI">
@@ -698,7 +696,6 @@
         <item name="android:paddingLeft">18dp</item>
         <item name="android:paddingRight">18dp</item>
         <item name="android:layout_marginStart">8dp</item>
-        <item name="android:layout_marginBottom">4dp</item>
     </style>
 
     <style name="Widget.Nova.DialogButtonPrimary.Proton" parent="@style/Widget.Nova.DialogButton.Proton">
@@ -719,7 +716,6 @@
         <item name="android:paddingLeft">18dp</item>
         <item name="android:paddingRight">18dp</item>
         <item name="android:layout_marginStart">8dp</item>
-        <item name="android:layout_marginBottom">4dp</item>
     </style>
 
     <style name="Widget.Nova.DialogButtonPrimary.Charcoalbirch" parent="@style/Widget.Nova.DialogButton.Charcoalbirch">
@@ -740,7 +736,6 @@
         <item name="android:paddingLeft">18dp</item>
         <item name="android:paddingRight">18dp</item>
         <item name="android:layout_marginStart">8dp</item>
-        <item name="android:layout_marginBottom">4dp</item>
     </style>
 
     <style name="Widget.Nova.DialogButtonPrimary.Graphenegolden" parent="@style/Widget.Nova.DialogButton.Graphenegolden">
@@ -761,7 +756,6 @@
         <item name="android:paddingLeft">18dp</item>
         <item name="android:paddingRight">18dp</item>
         <item name="android:layout_marginStart">8dp</item>
-        <item name="android:layout_marginBottom">4dp</item>
     </style>
 
     <style name="Widget.Nova.DialogButtonPrimary.Cyberneon" parent="@style/Widget.Nova.DialogButton.Cyberneon">
@@ -782,7 +776,6 @@
         <item name="android:paddingLeft">18dp</item>
         <item name="android:paddingRight">18dp</item>
         <item name="android:layout_marginStart">8dp</item>
-        <item name="android:layout_marginBottom">4dp</item>
     </style>
 
     <style name="Widget.Nova.DialogButtonPrimary.PathofExile1" parent="@style/Widget.Nova.DialogButton.PathofExile1">
@@ -803,7 +796,6 @@
         <item name="android:paddingLeft">18dp</item>
         <item name="android:paddingRight">18dp</item>
         <item name="android:layout_marginStart">8dp</item>
-        <item name="android:layout_marginBottom">4dp</item>
     </style>
 
     <style name="Widget.Nova.DialogButtonPrimary.PathofExile2" parent="@style/Widget.Nova.DialogButton.PathofExile2">
@@ -824,7 +816,6 @@
         <item name="android:paddingLeft">18dp</item>
         <item name="android:paddingRight">18dp</item>
         <item name="android:layout_marginStart">8dp</item>
-        <item name="android:layout_marginBottom">4dp</item>
     </style>
 
     <style name="Widget.Nova.DialogButtonPrimary.GTAVIViceSunset" parent="@style/Widget.Nova.DialogButton.GTAVIViceSunset">
@@ -845,7 +836,6 @@
         <item name="android:paddingLeft">18dp</item>
         <item name="android:paddingRight">18dp</item>
         <item name="android:layout_marginStart">8dp</item>
-        <item name="android:layout_marginBottom">4dp</item>
     </style>
 
     <style name="Widget.Nova.DialogButtonPrimary.GTAVIViceNight" parent="@style/Widget.Nova.DialogButton.GTAVIViceNight">

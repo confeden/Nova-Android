@@ -1,5 +1,9 @@
 package com.example.nova
 
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+
 /**
  * Приоритетный резолвер владельца: `dns.dns-ai.ru` по DNS-over-HTTPS.
  *
@@ -151,78 +155,189 @@ object PriorityDns {
             cachedFromLastResort = false
         }
         synchronized(hostLock) { hostCache.clear() }
-        synchronized(transportLock) {
-            cachedTransportDoh = true
-            cachedTransportNetworkKey = ""
-            cachedTransportAtMs = 0L
-        }
+        synchronized(transportLock) { transportCache.clear() }
     }
 
-    // -- какой транспорт до нашего резолвера быстрее -------------------------
+    // -- какой транспорт до резолвера быстрее --------------------------------
 
-    private val transportLock = Any()
-    private var cachedTransportDoh: Boolean = true
-    private var cachedTransportNetworkKey: String = ""
-    private var cachedTransportAtMs: Long = 0L
+    /** Имя правила и адреса, по которым до него дозваниваться на замере. */
+    class TransportProbeTarget(val host: String, val addresses: List<String>)
 
     /**
-     * DoH или DoT — что быстрее отвечает на этой сети.
+     * Предел на **всю пачку** замеров, а не на каждый хост.
+     *
+     * Считать по одному нельзя: `userDnsPlan` зовётся из
+     * `establishTunnelInterface`, то есть на каждую попытку подключения, а их в
+     * обходе бывает полсотни. Шесть правил «любой» по два соединения с пределом
+     * полторы секунды — это до восемнадцати секунд на попытку, и заплачены они
+     * были бы ровно за порядок строк в цепочке.
+     *
+     * Поэтому замеры идут разом, а не подряд, и через этот срок обрываются. Кто
+     * не успел — идёт в цепочку в порядке «сначала DoH»: обе цели в ней всё
+     * равно есть, и ответит та, что жива. Пропущенный замер стоит порядка, но
+     * не правильности.
+     */
+    const val TRANSPORT_PROBE_BUDGET_MS = 1_200L
+
+    /**
+     * Потолок потоков на пачку.
+     *
+     * Соединения ставятся параллельно и по портам тоже: последовательные 443 и
+     * 853 у одного хоста съели бы весь бюджет вдвоём, если первый порт мёртв, —
+     * и живой второй остался бы неизмеренным.
+     */
+    private const val TRANSPORT_PROBE_THREADS = 12
+
+    private class TransportEntry(
+        val doh: Boolean,
+        /** Ответил ли хоть один порт. Неответ помним недолго — как и неудачу резолва. */
+        val decided: Boolean,
+        val networkKey: String,
+        val atMs: Long,
+    )
+
+    private class TransportMeasurement(val target: TransportProbeTarget) {
+        val doh = AtomicInteger(-1)
+        val dot = AtomicInteger(-1)
+    }
+
+    private val transportLock = Any()
+    private val transportCache = HashMap<String, TransportEntry>()
+
+    private fun transportKey(host: String): String = host.trim().lowercase()
+
+    private fun transportIsFresh(entry: TransportEntry?, networkKey: String, now: Long): Boolean {
+        if (entry == null || entry.networkKey != networkKey) return false
+        val ttl = if (entry.decided) SUCCESS_TTL_MS else FAILURE_TTL_MS
+        return now - entry.atMs < ttl
+    }
+
+    /**
+     * DoH или DoT — что быстрее отвечает на этой сети. **Замера не делает.**
+     *
+     * Мерит [warmTransportPreferences] — разом и с общим пределом; здесь только
+     * читается то, что она успела намерить. Ничего не намерено — впереди идёт
+     * DoH: 443 сливается с обычным вебом и режется точечно, а 853 однозначно
+     * называет протокол и режется целиком.
+     *
+     * @return true — впереди DoH, false — DoT.
+     */
+    fun preferredTransportIsDoh(host: String, networkKey: String): Boolean {
+        val key = transportKey(host)
+        if (key.isEmpty()) return true
+        val now = System.currentTimeMillis()
+        val entry = synchronized(transportLock) { transportCache[key] } ?: return true
+        return if (transportIsFresh(entry, networkKey, now)) entry.doh else true
+    }
+
+    /**
+     * Меряет транспорт сразу у всех правил «любой» — одной пачкой.
      *
      * Меряется **время установления TCP-соединения** к 443 и 853, а не полный
      * запрос: полный обмен стоит дороже, а вопрос стоит ровно один — «какой порт
      * здесь вообще жив и отвечает быстрее». Порт, к которому соединение не
      * встаёт, проигрывает по определению.
      *
-     * Результат живёт с тем же сроком, что и адреса: `establishTunnelInterface`
-     * вызывается на каждую попытку подключения, а их в обходе бывает полсотни, и
-     * незакэшированная гонка добавляла бы свою цену пятьдесят раз подряд.
+     * Результат живёт с тем же сроком, что и адреса, и по той же причине: без
+     * кэша каждая из полусотни попыток подключения платила бы за пачку заново.
      *
      * @param probe замер задержки TCP в миллисекундах; `-1` — не отвечает.
-     * @return true — впереди DoH, false — DoT.
+     * @param budgetMs предел на всю пачку; см. [TRANSPORT_PROBE_BUDGET_MS].
      */
-    fun preferredTransportIsDoh(
+    fun warmTransportPreferences(
+        targets: List<TransportProbeTarget>,
         networkKey: String,
-        addresses: List<String>,
         probe: (String, Int) -> Int,
         logger: (String) -> Unit,
-    ): Boolean {
+        budgetMs: Long = TRANSPORT_PROBE_BUDGET_MS,
+    ) {
         val now = System.currentTimeMillis()
-        synchronized(transportLock) {
-            if (cachedTransportNetworkKey == networkKey &&
-                cachedTransportAtMs != 0L &&
-                now - cachedTransportAtMs < SUCCESS_TTL_MS
-            ) {
-                return cachedTransportDoh
+        // Тёплая сеть не платит ничего: то, что уже намерено и не протухло, в
+        // пачку не попадает, и без единого холодного хоста мы вообще не заходим
+        // ни в потоки, ни в журнал.
+        val cold = LinkedHashMap<String, TransportProbeTarget>()
+        for (target in targets) {
+            val key = transportKey(target.host)
+            if (key.isEmpty() || cold.containsKey(key)) continue
+            val fresh = synchronized(transportLock) {
+                transportIsFresh(transportCache[key], networkKey, now)
             }
+            if (!fresh) cold[key] = target
         }
-        val target = addresses.firstOrNull { it.isNotBlank() } ?: HOST
-        val dohMs = runCatching { probe(target, 443) }.getOrDefault(-1)
-        val dotMs = runCatching { probe(target, 853) }.getOrDefault(-1)
-        // Ничей отказ не считается победой другого: если не отвечают оба, остаётся
-        // умолчание DoH, потому что 443 сливается с обычным вебом и режется точечно,
-        // а 853 однозначно называет протокол и режется целиком.
-        val doh = when {
-            dohMs >= 0 && dotMs < 0 -> true
-            dotMs >= 0 && dohMs < 0 -> false
-            dohMs >= 0 && dotMs >= 0 -> dohMs <= dotMs
-            else -> true
+        if (cold.isEmpty()) return
+
+        val pending = cold.values.map { TransportMeasurement(it) }
+        val pool = runCatching {
+            Executors.newFixedThreadPool(
+                (pending.size * 2).coerceAtMost(TRANSPORT_PROBE_THREADS)
+            ) { runnable -> Thread(runnable, "nova-dns-transport").apply { isDaemon = true } }
+        }.getOrNull()
+        if (pool == null) {
+            // Молчать нельзя (I4): порядок в цепочке останется неизмеренным, и
+            // это надо видеть в журнале, а не выводить из времени подключения.
+            logger("DNS-правила: замер транспорта не запустился — цепочка идёт в порядке «сначала DoH».")
+            return
         }
-        val changed = synchronized(transportLock) {
-            val previous = cachedTransportDoh
-            val previousKey = cachedTransportNetworkKey
-            cachedTransportDoh = doh
-            cachedTransportNetworkKey = networkKey
-            cachedTransportAtMs = System.currentTimeMillis()
-            previous != doh || previousKey != networkKey
+        val startedAt = System.currentTimeMillis()
+        runCatching {
+            pending.forEach { measurement ->
+                val address = measurement.target.addresses.firstOrNull { it.isNotBlank() }
+                    ?: measurement.target.host
+                pool.execute {
+                    measurement.doh.set(runCatching { probe(address, 443) }.getOrDefault(-1))
+                }
+                pool.execute {
+                    measurement.dot.set(runCatching { probe(address, 853) }.getOrDefault(-1))
+                }
+            }
+            pool.shutdown()
+            pool.awaitTermination(budgetMs, TimeUnit.MILLISECONDS)
         }
-        if (changed) {
+        // Опоздавших не ждём: соединение, не вставшее за общий срок, для порядка
+        // в цепочке уже проиграло, а держать за него весь подъём туннеля — та
+        // самая цена, ради которой пачка и заведена.
+        runCatching { pool.shutdownNow() }
+
+        val settledAt = System.currentTimeMillis()
+        var timedOut = 0
+        for (measurement in pending) {
+            val dohMs = measurement.doh.get()
+            val dotMs = measurement.dot.get()
+            val decided = dohMs >= 0 || dotMs >= 0
+            // Ничей отказ не считается победой другого: если не отвечают оба, остаётся
+            // умолчание DoH, потому что 443 сливается с обычным вебом и режется точечно,
+            // а 853 однозначно называет протокол и режется целиком.
+            val doh = when {
+                dohMs >= 0 && dotMs < 0 -> true
+                dotMs >= 0 && dohMs < 0 -> false
+                dohMs >= 0 && dotMs >= 0 -> dohMs <= dotMs
+                else -> true
+            }
+            if (!decided) timedOut += 1
+            val host = measurement.target.host
+            val changed = synchronized(transportLock) {
+                val key = transportKey(host)
+                val previous = transportCache[key]
+                transportCache[key] = TransportEntry(doh, decided, networkKey, settledAt)
+                previous == null || previous.doh != doh || previous.networkKey != networkKey
+            }
+            if (!changed) continue
+            val tail = "(443 → ${if (dohMs >= 0) "$dohMs мс" else "нет ответа"}, " +
+                "853 → ${if (dotMs >= 0) "$dotMs мс" else "нет ответа"})."
             logger(
-                "Наш DNS: быстрее ${if (doh) "DoH" else "DoT"} " +
-                    "(443 → ${if (dohMs >= 0) "$dohMs мс" else "нет ответа"}, " +
-                    "853 → ${if (dotMs >= 0) "$dotMs мс" else "нет ответа"})."
+                if (host.equals(HOST, ignoreCase = true)) {
+                    "Наш DNS: быстрее ${if (doh) "DoH" else "DoT"} $tail"
+                } else {
+                    "DNS-правило $host: быстрее ${if (doh) "DoH" else "DoT"} $tail"
+                }
             )
         }
-        return doh
+        // Цена пачки не должна быть невидимой: она платится на подъёме туннеля.
+        logger(
+            "DNS-правила: транспорт замерен у ${pending.size} хостов за " +
+                "${settledAt - startedAt} мс, без ответа в срок — $timedOut " +
+                "(бюджет $budgetMs мс)."
+        )
     }
 
     // -- произвольные хосты пользовательских правил --------------------------

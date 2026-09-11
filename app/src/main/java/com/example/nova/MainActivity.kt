@@ -177,6 +177,9 @@ class MainActivity : AppCompatActivity() {
         /** Какую долю шага полосы занимает отступ, пока места хватает. */
         private const val CHIP_ROW_GAP_SHARE = 0.14f
 
+        /** Запас вокруг группы под неоновый ореол выбранной кнопки. */
+        private const val SELECTION_GLOW_PAD_DP = 6f
+
         private const val STATE_PENDING_STATUS_TEXT = "pending_status_text"
         private const val STATE_START_FLOW_ACTIVE = "start_flow_active"
         private const val START_FLOW_TRANSIENT_PENDING_MS = 60_000L
@@ -1271,7 +1274,10 @@ class MainActivity : AppCompatActivity() {
         // ждёт следующего.
         ProtonProfileManager.addListener(protonProgressListener)
         resumeProtonPreparationIfPending()
-        // Регион мог смениться в настройках, пока экран был свёрнут.
+        // Регион мог смениться в настройках, пока экран был свёрнут. Тема — тоже,
+        // а её главный экран сам не пересоздаёт, поэтому акцент ореола читается
+        // заново здесь же.
+        applySelectionGlowAccent()
         refreshMainRegionSelector()
         refreshProtonAvailableCountries()
         refreshWarpDiscoverySnapshotFromStorage()
@@ -1836,7 +1842,13 @@ class MainActivity : AppCompatActivity() {
         if (settingsTop <= 0 || connectBottom <= 0 || settingsTop <= connectBottom) return
         val density = resources.displayMetrics.density
         val topMargin = (mainRegionScroll?.layoutParams as? ViewGroup.MarginLayoutParams)?.topMargin ?: 0
-        val usable = settingsTop - connectBottom - topMargin - (SELECTOR_BOTTOM_RESERVE_DP * density).toInt()
+        // Поля под ореол берутся из того же промежутка: у обеих групп они сверху
+        // и снизу, то есть четыре штуки. Не вычесть их — значит вернуть G111:
+        // `wrap_content` в `ConstraintLayout` нижнюю границу не соблюдает, и
+        // строка подрегиона снова ляжет поверх «Настроек».
+        val glowPad = (SELECTION_GLOW_PAD_DP * density).toInt()
+        val usable = settingsTop - connectBottom - topMargin -
+            (SELECTOR_BOTTOM_RESERVE_DP * density).toInt() - 4 * glowPad
         if (usable <= 0) return
         // Сжимается **и** отступ между полосами, а не только сама кнопка.
         //
@@ -1897,6 +1909,20 @@ class MainActivity : AppCompatActivity() {
         (mainSubRegionGroup as? FlowRadioGroup)?.let { group ->
             group.alignRowsToStart = true
             group.uniformItemWidth = true
+        }
+        // Акцент берётся у выбранной темы, а не литералом: тем десять, и зелёный
+        // ореол на «GTA VI Vice Night» — это чужой цвет. Главный экран своих
+        // `nova*` не объявляет (тема окна — `Theme.Nova`), поэтому атрибут
+        // разрешается через обёртку темы настроек — та же, что у диалогов.
+        // Считается **один раз** на сборку экрана: `NovaTheme.current` читает
+        // `SharedPreferences`, и в перерисовке селектора этому места нет (I13).
+        applySelectionGlowAccent()
+        val glowPad = (SELECTION_GLOW_PAD_DP * resources.displayMetrics.density).toInt()
+        listOfNotNull(mainRegionGroup as? FlowRadioGroup, mainSubRegionGroup).forEach { group ->
+            // Место под ореол — собственные поля группы, а не `clipChildren=false`
+            // у предков: строка подрегиона у Proton бывает из десяти стран и
+            // прокручивается, и без обрезки она вылезла бы за края экрана.
+            group.setPadding(glowPad, glowPad, glowPad, glowPad)
         }
         mainRegionButtons = ConnectionSelectorPolicy.BUTTON_IDS.mapNotNull { findViewById<RadioButton>(it) }
         if (mainRegionButtons.size < ConnectionSelectorPolicy.SIZE) {
@@ -2059,7 +2085,7 @@ class MainActivity : AppCompatActivity() {
             // выбранную кнопку не должно ронять живой туннель.
             val changed = !previous.equals(value.trim(), ignoreCase = true)
             val reconnecting = changed &&
-                SessionReapply.isSessionLikelyActive(this, clientData) &&
+                hasLiveSessionToReapply() &&
                 SessionReapply.applyToLiveSession(this, clientData)
             LogManager.log(
                 "Главный экран: страна выхода Proton — $label, смена=$changed, переподключение=$reconnecting."
@@ -2083,7 +2109,7 @@ class MainActivity : AppCompatActivity() {
                 .firstOrNull { it.first == chosen }?.second ?: chosen
             // Переподключаем только на смене: повторное нажатие на уже выбранный
             // способ не должно ронять живой туннель.
-            val reconnecting = changed && SessionReapply.isSessionLikelyActive(this, clientData)
+            val reconnecting = changed && hasLiveSessionToReapply()
             // Запись в файл — это диск, а диск на главном потоке запрещён (I13).
             // Поток свой, а не `lifecycleScope`: правка обязана дожить до конца,
             // даже если экран закроют сразу после нажатия (I18).
@@ -2376,7 +2402,7 @@ class MainActivity : AppCompatActivity() {
                     // конца сеанса идёт прежний транспорт. Ровно тот рассинхрон,
                     // ради которого немедленное переподключение и делалось; в
                     // настройках этот же путь давно идёт через реаплай.
-                    reconnecting = SessionReapply.isSessionLikelyActive(this, clientData) &&
+                    reconnecting = hasLiveSessionToReapply() &&
                         SessionReapply.applyToLiveSession(this, clientData)
                     LogManager.log(
                         "Главный экран: выпуск Proton закончен, профилей ${outcome.profiles.size} — " +
@@ -2439,7 +2465,7 @@ class MainActivity : AppCompatActivity() {
         val label = ConnectionSelectorPolicy.LABELS
             .getOrNull(ConnectionSelectorPolicy.indexOf(value))
             .orEmpty()
-        if (!SessionReapply.isSessionLikelyActive(this, clientData)) {
+        if (!hasLiveSessionToReapply()) {
             Toast.makeText(this, "Выбрано: $label", Toast.LENGTH_SHORT).show()
             refreshMainRegionSelector()
             return
@@ -5704,6 +5730,60 @@ class MainActivity : AppCompatActivity() {
         val activeVpn = findCurrentVpnNetwork() ?: return false
         return isSystemVpnLikelyNova(activeVpn)
     }
+
+    /**
+     * Есть ли прямо сейчас что переподключать.
+     *
+     * Выбор входа в Tor при выключённом VPN обязан только записаться. Реаплай на
+     * этом пути идёт безопасным `stop-then-start`: `needsControlledTunRestart`
+     * отвечает «да» на любой сохранённый `TOR`/`OPERA`, а сохранённый бэкенд
+     * после остановленного Tor так и остаётся `TOR`. Дальше
+     * `launchControlledTunRestart` сам поднимает службу намерением
+     * `STOP_FOR_SOFT_RESTART` и через 2,6 с шлёт ей `REAPPLY_CURRENT_SESSION`, а
+     * тот стартует полноценное подключение — то есть выключенный VPN включался
+     * сам, без «ПОДКЛЮЧИТЬ».
+     *
+     * Признак берётся тот же, которым экран рисует состояние: если человек видит
+     * «НЕ ПОДКЛЮЧЕНО», не запускается ничего.
+     */
+    /**
+     * Цвет ореола — у текущей темы, и перечитывается на каждом возврате.
+     *
+     * Тему выбирают на экране настроек, а `recreate()` там делает только сам
+     * экран настроек: главный экран остаётся в стопе со своим полем и, прочитай
+     * он акцент один раз при сборке, светил бы цветом прошлой темы до тех пор,
+     * пока систему не заставят пересоздать активность. Сеттер
+     * `selectionGlowColor` на том же цвете выходит сразу, поэтому обычный возврат
+     * не стоит ни кадра, а `NovaTheme.current` после первого чтения ходит в уже
+     * загруженную карту настроек (I13).
+     */
+    private fun applySelectionGlowAccent() {
+        val themedForAccent = android.view.ContextThemeWrapper(
+            this,
+            NovaTheme.optionFor(NovaTheme.current(this)).styleRes,
+        )
+        val accent = NovaTheme.color(themedForAccent, R.attr.novaAccent)
+        listOfNotNull(mainRegionGroup as? FlowRadioGroup, mainSubRegionGroup).forEach { group ->
+            group.selectionGlowColor = accent
+        }
+    }
+
+    private fun isTunnelLiveForReapply(): Boolean =
+        (vpnState == NovaVpnService.STATE_CONNECTED || vpnState == NovaVpnService.STATE_CONNECTING) &&
+            (hasLiveNovaVpn() || isNovaVpnServiceRunning())
+
+    /**
+     * Единственный ответ на «есть ли что переподключать» для всего экрана.
+     *
+     * Условие было выписано в четырёх местах — три кнопки селектора и обработчик
+     * итога выпуска Proton, — и при первой же правке три из четырёх обновили, а
+     * четвёртое осталось со старым ответом. Это в точности G49, и стоило оно
+     * ровно того же: путь Proton сам поднимает службу `:vpn` для пробы профилей,
+     * поэтому именно у него «служба жива» оказывается истиной чаще всего — и
+     * именно он продолжал подключаться с выключенного экрана.
+     */
+    private fun hasLiveSessionToReapply(): Boolean =
+        isTunnelLiveForReapply() && SessionReapply.isSessionLikelyActive(this, clientData)
 
     private fun resolveStartupState(persistedState: String): String {
         if (persistedState == NovaVpnService.STATE_STOPPED && isRecentLocalStop()) {

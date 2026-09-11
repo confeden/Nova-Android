@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Строка уведомления VPN со своей кнопкой «Отключить».
+
+    Кнопка нарисована прямо в макете, а не добавлена действием уведомления:
+    действия видны только в развёрнутой карточке, а попросить систему открыть её
+    приложение не может — такого API в Android нет.
+
+    ЦВЕТА ЗДЕСЬ НАМЕРЕННО ЛИТЕРАЛЬНЫЕ, `?attr/nova*` ПРИМЕНЯТЬ НЕЛЬЗЯ. Этот макет
+    разворачивает SystemUI в своей теме уведомления, и атрибуты темы приложения в
+    ней не существуют — получится не ошибка сборки, а чёрное по чёрному или падение
+    в чужом процессе. Правило I21 про `?attr/nova*` действует для экранов настроек;
+    здесь работает обратное. Тот же случай, что и `notification_update_ready.xml`.
+    Цвет и размер подписи берутся у платформенных стилей
+    `TextAppearance.Material.Notification.*` — ровно тех, которыми система красит
+    свои собственные строки. `?android:attr/textColorPrimary` здесь не годится:
+    замерено на Pixel 4a, с ним строка приезжала заметно тусклее соседних
+    уведомлений. У кнопки заливка сплошная и своя пара цветов — почему, написано
+    в `bg_notification_disconnect.xml`.
+
+    Высота держится под ~48dp: свёрнутый шаблон `DecoratedCustomViewStyle` отдаёт
+    своему макету примерно две строки текста, всё, что выше, обрезается. Замерено
+    на Pixel 4a: заголовок плюс две строки подписи — это три строки, и нижняя
+    уезжала под срез вместе со скоростью.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/notification_vpn_root"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingStart="0dp"
+    android:paddingTop="2dp"
+    android:paddingEnd="0dp"
+    android:paddingBottom="2dp">
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <!--
+            Отдельной строки «Nova VPN» здесь нет, и это выбор из двух зол.
+
+            Кнопка «Отключить» съедает у строки около сотни dp, и подробности
+            («MASQUE · RU · ↓ 1,4 МБ/с ↑ 0,2 МБ/с») обрывались многоточием ровно
+            на скорости — то есть настройка «Скорость и транспорт» показывала
+            меньше, чем до появления кнопки. Двух строк подписи и заголовка
+            вместе свёрнутая карточка не вмещает (замерено), а из двух строк
+            выбрана та, которую человек включал сознательно: имя приложения
+            несут значок слева и шапка развёрнутой карточки, а скорость больше
+            ниоткуда не взять. `setContentTitle("Nova VPN")` на самом уведомлении
+            при этом остаётся — им пользуются и обычная ветка, и озвучка.
+        -->
+        <TextView
+            android:id="@+id/tv_vpn_notification_subtitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="1dp"
+            android:ellipsize="end"
+            android:maxLines="2"
+            android:textAppearance="@android:style/TextAppearance.Material.Notification" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/btn_vpn_notification_disconnect"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:background="@drawable/bg_notification_disconnect"
+        android:paddingStart="10dp"
+        android:paddingTop="6dp"
+        android:paddingEnd="10dp"
+        android:paddingBottom="6dp"
+        android:text="Отключить"
+        android:textColor="#FFE6FFF0"
+        android:textSize="12sp" />
+</LinearLayout>

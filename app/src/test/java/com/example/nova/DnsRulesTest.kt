@@ -1,7 +1,9 @@
 package com.example.nova
 
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -188,6 +190,153 @@ class DnsRulesTest {
         assertEquals(
             "${PriorityDns.DOT_URL}|192.144.59.14|186.246.49.127",
             rule.toUpstream(DnsRouteMode.DIRECT, PriorityDns.DOT_URL),
+        )
+    }
+
+    @Test
+    fun `the transport survives a round trip`() {
+        val rule = DnsRule(
+            id = "x",
+            kind = DnsRule.Kind.DOH,
+            value = "https://dns.google/dns-query",
+            bootstrap = listOf("8.8.8.8"),
+            transport = DnsRule.Transport.ANY,
+        )
+        assertEquals(rule, DnsRule.fromJson(rule.toJson()))
+        assertEquals("any", rule.toJson().optString("transport"))
+    }
+
+    /**
+     * Отсутствие поля — это файл прошлой версии, а не выбор «любой» (I3).
+     *
+     * Прочитать его как «любой» значило бы при обновлении молча превратить пять
+     * работающих DoH-резолверов в пары с замером — то есть добавить каждой
+     * попытке подключения цену, которой человек не просил.
+     */
+    @Test
+    fun `an absent transport is derived from the kind`() {
+        fun restored(kind: String, value: String): DnsRule? = DnsRule.fromJson(
+            JSONObject().put("id", "x").put("kind", kind).put("value", value)
+        )
+        assertEquals(
+            DnsRule.Transport.DOH,
+            restored("doh", "https://dns.comss.one/dns-query")?.transport,
+        )
+        assertEquals(DnsRule.Transport.DOT, restored("dot", "tls://dns.quad9.net")?.transport)
+        // У нашей строки транспорт всегда «любой»: ради автовыбора она и заведена.
+        assertEquals(DnsRule.Transport.ANY, restored("auto", PriorityDns.HOST)?.transport)
+        assertEquals(DnsRule.Transport.DOH, restored("provider", "provider")?.transport)
+    }
+
+    /** Встроенные резолверы спрашиваются тем транспортом, который отвечает быстрее. */
+    @Test
+    fun `the shipped resolvers ask on whichever transport answers first`() {
+        assertEquals(
+            listOf("owner", "comss", "geohide", "xbox", "cloudflare", "google"),
+            DnsRulesStore.defaults()
+                .filter { it.transport == DnsRule.Transport.ANY }
+                .map { it.id },
+        )
+    }
+
+    /**
+     * Миграция вправе трогать только то, что клали мы (I1).
+     *
+     * Строка, которую человек добавил или поправил, пришла из диалога с явно
+     * выбранным DoH или DoT, и переписать этот выбор молча нельзя.
+     */
+    @Test
+    fun `the transport upgrade touches only untouched shipped rules`() {
+        val shipped = DnsRulesStore.defaults().first { it.id == "comss" }
+            .copy(transport = DnsRule.Transport.DOH)
+        assertEquals(
+            DnsRule.Transport.ANY,
+            DnsRulesStore.upgradedToAnyTransport(shipped).transport,
+        )
+        // Адрес поправлен — строка больше не наша, выбор остаётся за человеком.
+        val edited = shipped.copy(value = "https://dns.comss.one/resolve")
+        assertEquals(
+            DnsRule.Transport.DOT,
+            DnsRulesStore.upgradedToAnyTransport(
+                edited.copy(transport = DnsRule.Transport.DOT)
+            ).transport,
+        )
+        // Чужое правило не трогаем вовсе.
+        val mine = DnsRule(id = "mine", kind = DnsRule.Kind.DOT, value = "tls://dns.quad9.net")
+        assertEquals(mine, DnsRulesStore.upgradedToAnyTransport(mine))
+        // Провайдерская ступень остаётся собой: транспорта у неё нет.
+        val provider = DnsRulesStore.defaults().last()
+        assertEquals(provider, DnsRulesStore.upgradedToAnyTransport(provider))
+    }
+
+    /**
+     * Транспорт не расширяет вырез маршрута (I8, D10, G96).
+     *
+     * Вырез — это `excludeRoute` на весь адрес: попади туда bootstrap чужого
+     * резолвера, любое приложение с зашитым `8.8.8.8` слало бы открытый запрос
+     * мимо туннеля. Выбор транспорта к этому списку отношения не имеет и иметь
+     * не должен.
+     */
+    @Test
+    fun `the carve-out does not depend on the transport`() {
+        val rules = listOf(
+            DnsRule(
+                id = "owner",
+                kind = DnsRule.Kind.AUTO,
+                value = PriorityDns.HOST,
+                bootstrap = listOf("192.144.59.14"),
+            ),
+            DnsRule(
+                id = "google",
+                kind = DnsRule.Kind.DOH,
+                value = "https://dns.google/dns-query",
+                bootstrap = listOf("8.8.8.8"),
+            ),
+        )
+        val expected = listOf("192.144.59.14", "8.8.8.8")
+        for (transport in DnsRule.Transport.values()) {
+            assertEquals(
+                expected,
+                DnsRuleSet(
+                    rules.map { it.copy(transport = transport) },
+                    DnsRouteMode.DIRECT,
+                ).directBypassAddresses(),
+            )
+        }
+    }
+
+    /**
+     * Открытого транспорта нет и быть не может.
+     *
+     * Адрес открытого правила уезжает в вырез маршрута, то есть его запросы
+     * покидают туннель в открытую. Поэтому у выбора ровно три значения, и ни
+     * одна ошибка экрана не должна уметь изготовить четвёртое.
+     */
+    @Test
+    fun `create cannot manufacture a plaintext transport`() {
+        assertEquals(3, DnsRule.Transport.values().size)
+        assertTrue(DnsRule.Transport.values().none { it.storageValue() == "plain" })
+        // Вид, у которого транспорта нет, чужой выбор не принимает.
+        assertEquals(
+            DnsRule.Transport.DOH,
+            DnsRule.create(
+                DnsRule.Kind.PLAIN,
+                "1.1.1.1",
+                transport = DnsRule.Transport.ANY,
+            )?.transport,
+        )
+        // Новое правило заводится «любым»: спрашивается то, что отвечает быстрее.
+        assertEquals(
+            DnsRule.Transport.ANY,
+            DnsRule.create(DnsRule.Kind.DOH, "https://dns.google/dns-query")?.transport,
+        )
+        assertEquals(
+            DnsRule.Transport.DOT,
+            DnsRule.create(
+                DnsRule.Kind.DOT,
+                "dns.quad9.net",
+                transport = DnsRule.Transport.DOT,
+            )?.transport,
         )
     }
 }

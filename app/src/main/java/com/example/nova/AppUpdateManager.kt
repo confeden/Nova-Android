@@ -1106,9 +1106,15 @@ object AppUpdateManager {
         channelId: String,
         subtitle: String = "",
         showDisconnect: Boolean = false,
+        collapsed: Boolean = false,
     ): Notification {
         val readyVersion = getReadyDownloadedVersion(context)
         val openAppIntent = buildOpenAppPendingIntent(context, 5005)
+        // Своя строка — единственный способ показать «Отключить», не заставляя
+        // разворачивать карточку: Android не даёт попросить систему открыть её.
+        // Только когда кнопка вообще нужна и сверху не висит «обновление готово»:
+        // у той ветки свой макет, и два макета в одном уведомлении не уживаются.
+        val ownRow = showDisconnect && !collapsed && readyVersion.isBlank()
         val builder = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(R.drawable.ic_qs_nova)
             .setOnlyAlertOnce(true)
@@ -1122,7 +1128,10 @@ object AppUpdateManager {
         // `DecoratedCustomViewStyle` рисует кнопки под своим макетом, поэтому
         // отключиться можно и когда сверху висит «обновление готово». Иначе
         // человек терял бы кнопку ровно в тот день, когда вышла новая версия.
-        if (showDisconnect) {
+        // При `ownRow` действия не добавляем вовсе: `DecoratedCustomViewStyle`
+        // рисует их под своим макетом, и кнопка вышла бы дважды — один раз в
+        // самой строке, второй раз системным действием под ней.
+        if (showDisconnect && !ownRow) {
             builder.addAction(
                 NotificationCompat.Action.Builder(
                     R.drawable.ic_widget_power,
@@ -1141,6 +1150,17 @@ object AppUpdateManager {
                 .setStyle(NotificationCompat.DecoratedCustomViewStyle())
                 .setCustomContentView(customView)
                 .setCustomBigContentView(customView)
+                .build()
+        }
+
+        if (ownRow) {
+            val row = buildVpnStatusRemoteViews(context, subtitle, buildDisconnectPendingIntent(context))
+            return builder
+                .setContentTitle("Nova VPN")
+                .setContentText(subtitle)
+                .setStyle(NotificationCompat.DecoratedCustomViewStyle())
+                .setCustomContentView(row)
+                .setCustomBigContentView(row)
                 .build()
         }
 
@@ -1643,6 +1663,27 @@ object AppUpdateManager {
         subtitle = "Нажми, чтобы установить обновление",
         clickPendingIntent = installPendingIntent,
     )
+
+    /**
+     * Строка уведомления VPN со своей кнопкой «Отключить».
+     *
+     * Кнопка нарисована внутри макета, а не добавлена действием: действия видны
+     * только в развёрнутой карточке, а развернуть её из приложения нельзя.
+     */
+    private fun buildVpnStatusRemoteViews(
+        context: Context,
+        subtitle: String,
+        disconnectPendingIntent: PendingIntent,
+    ): RemoteViews {
+        return RemoteViews(context.packageName, R.layout.notification_vpn_status).apply {
+            setTextViewText(R.id.tv_vpn_notification_subtitle, subtitle)
+            setViewVisibility(
+                R.id.tv_vpn_notification_subtitle,
+                if (subtitle.isBlank()) android.view.View.GONE else android.view.View.VISIBLE,
+            )
+            setOnClickPendingIntent(R.id.btn_vpn_notification_disconnect, disconnectPendingIntent)
+        }
+    }
 
     private fun getReadyDownloadedUpdate(
         context: Context,

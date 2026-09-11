@@ -84,10 +84,23 @@ object NovaDialogs {
         view.setTypeface(view.typeface, android.graphics.Typeface.BOLD)
 
         // Между кнопками нужен зазор: с подложкой они иначе слипаются в одну
-        // полосу, и «Отмена» читается как часть «Сохранить».
+        // полосу, и «Отмена» читается как часть «Сохранить». Зазор даёт только
+        // `marginStart`.
+        //
+        // Вертикального отступа здесь быть не может. `ButtonBarLayout` — это
+        // `LinearLayout` с `android:gravity="bottom"`, а он вычитает
+        // вертикальные поля дважды: один раз в `layoutHorizontal`
+        // (`childTop = childBottom - childHeight - lp.bottomMargin`), второй —
+        // в поправке на базовую линию (`maxDescent[INDEX_BOTTOM]` считался с
+        // полями, `descent` — без). В высоту полосы поле входит один раз,
+        // поэтому кнопка встаёт ровно на `paddingTop - bottomMargin` и при
+        // `bottomMargin = paddingTop = 4dp` — на нулевую отметку, выше
+        // padding-бокса. `clipToPadding` там по умолчанию включён, и верхние
+        // 4dp подложки — обводка и верх скруглений — просто не рисуются.
+        // Отбивку снизу даёт `paddingBottom="4dp"` самой полосы.
         (view.layoutParams as? ViewGroup.MarginLayoutParams)?.let { params ->
             params.marginStart = dp(context, 8f)
-            params.bottomMargin = dp(context, 4f)
+            params.bottomMargin = 0
             view.layoutParams = params
         }
     }

@@ -24,6 +24,20 @@ data class DnsRule(
     val value: String,
     val bootstrap: List<String> = emptyList(),
     val enabled: Boolean = true,
+    /**
+     * Каким транспортом говорить с этим резолвером.
+     *
+     * [Transport.ANY] — обоими, в порядке замера: 443 и 853 блокируют порознь, и
+     * какой из них жив сегодня, знает только сеть. Проигравший из цепочки не
+     * выбрасывается — замер решает лишь, кого пробовать первым.
+     *
+     * Открытого варианта здесь нет и быть не может: адрес открытого правила
+     * уезжает в вырез маршрута, а это утечка имён наружу (I8, D10, G96).
+     *
+     * Умолчание выводится из [kind], а не берётся «любым»: файл прошлой версии
+     * этого поля не везёт, и «поля нет» — это не «человек выбрал любой» (I3).
+     */
+    val transport: Transport = Transport.derive(kind),
 ) {
     /**
      * Чем разговаривать с резолвером.
@@ -40,6 +54,44 @@ data class DnsRule(
      *   правиле лежит не адрес, а метка.
      */
     enum class Kind { PLAIN, DOH, DOT, AUTO, PROVIDER }
+
+    /**
+     * Транспорт до резолвера — отдельно от [Kind].
+     *
+     * [Kind] — это **форма значения**: `https://имя/путь` у DoH, `tls://имя` у
+     * DoT, голое имя у [Kind.AUTO]. Транспорт — это выбор человека, каким из них
+     * с этим резолвером разговаривать, и он бывает шире формы: правилу,
+     * записанному как DoH, можно разрешить и DoT к тому же имени.
+     *
+     * Открытого варианта нет намеренно — см. [DnsRule.transport].
+     */
+    enum class Transport {
+        ANY, DOH, DOT;
+
+        fun storageValue(): String = name.lowercase()
+
+        companion object {
+            fun parse(raw: String?): Transport? = when (raw?.trim()?.lowercase()) {
+                "any", "auto" -> ANY
+                "doh" -> DOH
+                "dot" -> DOT
+                else -> null
+            }
+
+            /**
+             * Чего человек не выбирал, то выводим из вида.
+             *
+             * «Поля нет» — это файл прошлой версии, а не «любой» (I3): прочитать
+             * отсутствие как [ANY] значило бы молча превратить пять работающих
+             * DoH-резолверов в пары с замером при первом же обновлении.
+             */
+            fun derive(kind: Kind): Transport = when (kind) {
+                Kind.AUTO -> ANY
+                Kind.DOT -> DOT
+                else -> DOH
+            }
+        }
+    }
 
     /**
      * Шифрованный ли резолвер. Решает, можно ли пускать его в гонку путей.
@@ -97,6 +149,7 @@ data class DnsRule(
         .put("kind", kind.name.lowercase())
         .put("value", value)
         .put("enabled", enabled)
+        .put("transport", transport.storageValue())
         .put("bootstrap", JSONArray().also { array -> bootstrap.forEach(array::put) })
 
     companion object {
@@ -116,12 +169,21 @@ data class DnsRule(
                     normalizeAddress(bootstrapJson!!.optString(i))?.let(::add)
                 }
             }
+            // Отсутствие поля — файл прошлой версии, а не выбор «любой» (I3).
+            // У видов, где транспорт ничего не значит, он и не читается: у
+            // открытого и провайдерского его нет, у нашего он всегда «любой» —
+            // ради автовыбора эта строка и заведена.
+            val transport = when (kind) {
+                Kind.AUTO, Kind.PLAIN, Kind.PROVIDER -> Transport.derive(kind)
+                else -> Transport.parse(json.optString("transport")) ?: Transport.derive(kind)
+            }
             return DnsRule(
                 id = json.optString("id").takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString(),
                 kind = kind,
                 value = value,
                 bootstrap = bootstrap.distinct(),
                 enabled = !json.has("enabled") || json.optBoolean("enabled", true),
+                transport = transport,
             )
         }
 
@@ -157,6 +219,11 @@ data class DnsRule(
                     } else {
                         trimmed
                     }
+                    // `https://имя/путь` здесь — это DoH-ссылка, попавшая не в тот
+                    // вид: склеив её, получили бы `tls://https://имя/путь`, хостом
+                    // стало бы «https», а имя резолвера уехало бы в путь — правило
+                    // молча выпало бы из цепочки. Отказ вслух лучше (I4).
+                    if (body.contains("://") || body.contains('/')) return null
                     val host = body.substringBefore(':').trim().trim('[', ']')
                     if (host.isEmpty() || host.any { it.isWhitespace() }) return null
                     "tls://$body"
@@ -179,13 +246,32 @@ data class DnsRule(
         /** Метка провайдерского правила: адрес у него появляется только на сети. */
         const val PROVIDER_VALUE: String = "provider"
 
-        fun create(kind: Kind, value: String, bootstrap: List<String> = emptyList()): DnsRule? {
+        /**
+         * Новое правило.
+         *
+         * Транспорт у нового правила по умолчанию «любой»: владелец просил, чтобы
+         * спрашивалось то, что отвечает быстрее. У видов, где транспорт ничего не
+         * значит, выбор пользователя **отбрасывается** и берётся выведенный —
+         * иначе ошибка в экране смогла бы изготовить открытый резолвер, а его
+         * адрес уезжает в вырез маршрута (I8, D10, G96).
+         */
+        fun create(
+            kind: Kind,
+            value: String,
+            bootstrap: List<String> = emptyList(),
+            transport: Transport = Transport.ANY,
+        ): DnsRule? {
             val normalized = normalizeValue(kind, value) ?: return null
+            val effective = when (kind) {
+                Kind.AUTO, Kind.PLAIN, Kind.PROVIDER -> Transport.derive(kind)
+                else -> transport
+            }
             return DnsRule(
                 id = UUID.randomUUID().toString(),
                 kind = kind,
                 value = normalized,
                 bootstrap = bootstrap.mapNotNull(::normalizeAddress).distinct(),
+                transport = effective,
             )
         }
     }
@@ -273,8 +359,12 @@ object DnsRulesStore {
      * `https://1.1.1.1/cdn-cgi/trace`, из-за чего бейдж на живой сессии Proton
      * показывал российский адрес и «RU». Обновление обязано их убрать, а не
      * оставить как «выбор пользователя», которого он не делал.
+     *
+     * 4 — версия, в которой у правила появился свой транспорт. Файл версии 4
+     * старая сборка прочитает без вреда: незнакомый ключ `fromJson` пропускает,
+     * а `migrate` видит `4 >= 3` и не трогает список.
      */
-    private const val VERSION = 3
+    private const val VERSION = 4
 
     private val writeLock = Any()
 
@@ -302,35 +392,45 @@ object DnsRulesStore {
         // страницами самих операторов 2026-09-05; bootstrap нужен потому, что имя
         // резолвера иначе пришлось бы разрешать через тот самый перехват, который
         // его и спрашивает.
+        //
+        // Транспорт у всех — «любой»: спрашивается то, что отвечает быстрее, а
+        // порядок внутри пары решает замер. Значение остаётся DoH-ссылкой,
+        // потому что это форма адреса, а не выбор транспорта, и DoT-цель служба
+        // собирает из того же имени.
         DnsRule(
             id = "comss",
             kind = DnsRule.Kind.DOH,
             value = "https://dns.comss.one/dns-query",
             bootstrap = listOf("83.220.169.155", "212.109.195.93", "195.133.25.16"),
+            transport = DnsRule.Transport.ANY,
         ),
         DnsRule(
             id = "geohide",
             kind = DnsRule.Kind.DOH,
             value = "https://geohide.ru/dns-query",
             bootstrap = listOf("193.233.112.67", "193.233.112.68", "46.8.158.6"),
+            transport = DnsRule.Transport.ANY,
         ),
         DnsRule(
             id = "xbox",
             kind = DnsRule.Kind.DOH,
             value = "https://xbox-dns.ru/dns-query",
             bootstrap = listOf("111.88.96.50", "111.88.96.51"),
+            transport = DnsRule.Transport.ANY,
         ),
         DnsRule(
             id = "cloudflare",
             kind = DnsRule.Kind.DOH,
             value = "https://cloudflare-dns.com/dns-query",
             bootstrap = listOf("1.1.1.1", "1.0.0.1"),
+            transport = DnsRule.Transport.ANY,
         ),
         DnsRule(
             id = "google",
             kind = DnsRule.Kind.DOH,
             value = "https://dns.google/dns-query",
             bootstrap = listOf("8.8.8.8", "8.8.4.4"),
+            transport = DnsRule.Transport.ANY,
         ),
         // Последняя ступень — резолвер оператора, и он единственный открытый.
         // Выключается отдельно от остальных: это его и делает «запасным», а не
@@ -377,6 +477,21 @@ object DnsRulesStore {
     }
 
     /**
+     * Шаги обновления файла, по одному на версию.
+     *
+     * Именно по шагам, а не одним «если старое — переделать»: файл версии 2
+     * обязан пройти и через третий шаг, и через четвёртый, а версии 3 — только
+     * через четвёртый. Слитый в один, этот код на первом же новом шаге начал бы
+     * применять к старому файлу половину преобразований.
+     */
+    private fun migrate(version: Int, rules: List<DnsRule>): List<DnsRule> {
+        var current = rules
+        if (version < 3) current = migrateToV3(current)
+        if (version < 4) current = migrateToV4(current)
+        return current
+    }
+
+    /**
      * Перевод файла версии 2 на новый список.
      *
      * Что сохраняется: правила, которые добавил сам пользователь, и их порядок, и
@@ -391,8 +506,7 @@ object DnsRulesStore {
      * Оставить их значило бы оставить и вырез маршрута к ним, то есть оставить
      * ровно ту дыру, которую закрываем.
      */
-    private fun migrate(version: Int, rules: List<DnsRule>): List<DnsRule> {
-        if (version >= VERSION) return rules
+    private fun migrateToV3(rules: List<DnsRule>): List<DnsRule> {
         val kept = rules.filter { it.id !in LEGACY_DEFAULT_IDS && it.encrypted }
         val dropped = rules.count { it.id !in LEGACY_DEFAULT_IDS && !it.encrypted }
         if (dropped > 0) {
@@ -404,6 +518,56 @@ object DnsRulesStore {
         val byKey = kept.associateBy { it.value.lowercase() }
         val tail = defaults().filterNot { byKey.containsKey(it.value.lowercase()) }
         return kept + tail
+    }
+
+    /**
+     * Встроенные резолверы переводятся на автовыбор транспорта.
+     *
+     * Условие узкое намеренно (I1): совпасть должны **и** идентификатор, **и**
+     * адрес — то есть строка обязана остаться ровно той, которую положили мы.
+     * Правило, которое человек добавил или поправил сам, пришло из диалога с
+     * явно выбранным DoH или DoT, и переписывать этот выбор молча нельзя.
+     *
+     * Провайдерская и открытая ступени не трогаются: транспорта у них нет, а
+     * «любой» для открытой означал бы шифрование, которого там не будет.
+     */
+    private fun migrateToV4(rules: List<DnsRule>): List<DnsRule> {
+        val migrated = rules.map(::upgradedToAnyTransport)
+        val moved = migrated.indices.count { migrated[it] != rules[it] }
+        // Строка в журнал — один раз на процесс, а не один раз на чтение.
+        //
+        // `load` результат обновления обратно в файл не пишет — и не должен:
+        // читают его оба процесса, а запись из чтения означала бы гонку за файл
+        // между интерфейсом и `:vpn` (I2). Значит, шаг честно повторяется на
+        // каждом чтении, а чтений за одно подключение четыре. Замерено на
+        // Pixel 4a: четыре одинаковые строки подряд в журнале подключения —
+        // ровно тот «врущий журнал», по которому потом ищут несуществующую
+        // повторную миграцию.
+        if (moved > 0 && !v4MigrationLogged) {
+            v4MigrationLogged = true
+            LogManager.log(
+                "DNS-правила: $moved встроенных резолвера переведены на автовыбор транспорта — " +
+                    "DoH или DoT, что быстрее."
+            )
+        }
+        return migrated
+    }
+
+    /** Уже сказали про перевод на автовыбор транспорта в этом процессе. */
+    @Volatile
+    private var v4MigrationLogged = false
+
+    /**
+     * Решение по одной строке — отдельно от подсчёта и записи в журнал.
+     *
+     * Отдельной функцией потому, что предмет проверки здесь именно условие: оно
+     * узкое (I1), и ошибиться в нём значит молча переписать выбор человека.
+     */
+    internal fun upgradedToAnyTransport(rule: DnsRule): DnsRule {
+        if (!rule.encrypted || rule.transport == DnsRule.Transport.ANY) return rule
+        val shipped = defaults().firstOrNull { it.id == rule.id } ?: return rule
+        if (!rule.value.equals(shipped.value, ignoreCase = true)) return rule
+        return rule.copy(transport = DnsRule.Transport.ANY)
     }
 
     /**

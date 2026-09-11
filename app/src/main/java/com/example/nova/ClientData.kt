@@ -1593,8 +1593,16 @@ class ClientData(context: Context) {
      * По умолчанию выключено: каждое переключение стоит переподключения с обрывом
      * соединений, а выигрыш нужен не всем. Хранится файлом по той же причине, что и
      * соседний флаг.
+     *
+     * **Строку из настроек владелец попросил убрать, и вместе с ней ушёл
+     * единственный писатель этого флага.** Живое чтение при мёртвом писателе —
+     * это настройка, запертая навсегда в том положении, в каком её застали:
+     * у того, кто успел включить обход, он теперь не выключается ничем, кроме
+     * переустановки. Поэтому ответ прибит к умолчанию — «не обходим», — а не
+     * читается из файла. Политика, её тесты и ветка в службе остаются на месте:
+     * вернуть переключатель — это вернуть сюда `readOptions().avoidColo`.
      */
-    fun isAvoidedColoSwitchEnabled(): Boolean = WarpGeneratedStore(appContext).readOptions().avoidColo
+    fun isAvoidedColoSwitchEnabled(): Boolean = false
 
     fun setAvoidedColoSwitchEnabled(enabled: Boolean) {
         val store = WarpGeneratedStore(appContext)
@@ -3406,6 +3414,20 @@ class ClientData(context: Context) {
     fun isNotificationDetailsEnabled(): Boolean = prefs.getBoolean("notification_details_enabled", true)
     fun setNotificationDetailsEnabled(value: Boolean) {
         prefs.edit().putBoolean("notification_details_enabled", value).commit()
+    }
+
+    /**
+     * Сворачивать ли уведомление в узкую строку.
+     *
+     * По умолчанию выключено: уведомление рисуется своей строкой, и «Отключить»
+     * видно, не разворачивая карточку. Android не даёт попросить систему открыть
+     * карточку — единственный надёжный способ показать кнопку сразу это нарисовать
+     * её самим. Включённая настройка возвращает обычный системный вид: заголовок,
+     * строка подробностей и кнопка, до которой надо дотянуться жестом.
+     */
+    fun isNotificationCollapsed(): Boolean = prefs.getBoolean("notification_collapsed", false)
+    fun setNotificationCollapsed(value: Boolean) {
+        prefs.edit().putBoolean("notification_collapsed", value).commit()
     }
 
     /**

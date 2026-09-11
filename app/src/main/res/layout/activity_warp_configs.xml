@@ -71,19 +71,74 @@
             android:text="Адаптация к условиям сети"
             android:textColor="?attr/novaTextTitle" />
 
-        <TextView
-            android:id="@+id/btn_imported_only"
+        <!--
+            Источник профилей — выбор из двух, а не тумблер.
+
+            Кнопка «Активно: встроенные/импортированные» показывала текущее
+            состояние, но не показывала, из чего выбирают: второй вариант был
+            виден только после нажатия, и нажатие было единственным способом
+            узнать, что он вообще есть.
+
+            Группа именно FlowRadioGroup: «Конфигурации:» плюс две подписи в
+            строку на телефоне не помещаются, обычный RadioGroup — это
+            LinearLayout, переносить он не умеет, и «Импортированные» обрезалось
+            бы по краю. Обе кнопки остаются прямыми детьми одной группы, иначе
+            взаимное исключение перестаёт работать.
+        -->
+        <LinearLayout
+            android:id="@+id/row_configs_source"
             android:layout_width="match_parent"
-            android:layout_height="48dp"
+            android:layout_height="wrap_content"
             android:layout_marginTop="10dp"
             android:background="@drawable/bg_settings_action_dark"
-            android:clickable="true"
-            android:focusable="true"
-            android:fontFamily="sans-serif-medium"
-            android:gravity="center"
-            android:singleLine="true"
-            android:text="Встроенные конфигурации"
-            android:textColor="?attr/novaTextTitle" />
+            android:gravity="center_vertical"
+            android:minHeight="48dp"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/tv_configs_source_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:fontFamily="sans-serif-medium"
+                android:singleLine="true"
+                android:text="Конфигурации:"
+                android:textColor="?attr/novaTextTitle"
+                android:textSize="15sp" />
+
+            <com.example.nova.FlowRadioGroup
+                android:id="@+id/rg_configs_source"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:orientation="horizontal">
+
+                <RadioButton
+                    android:id="@+id/rb_configs_builtin"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="10dp"
+                    android:buttonTint="?attr/novaAccent"
+                    android:maxLines="1"
+                    android:paddingStart="0dp"
+                    android:paddingEnd="0dp"
+                    android:text="Встроенные"
+                    android:textColor="?attr/novaTextTitle"
+                    android:textSize="14sp" />
+
+                <RadioButton
+                    android:id="@+id/rb_configs_imported"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:buttonTint="?attr/novaAccent"
+                    android:maxLines="1"
+                    android:paddingStart="0dp"
+                    android:paddingEnd="0dp"
+                    android:text="Импортированные"
+                    android:textColor="?attr/novaTextTitle"
+                    android:textSize="14sp" />
+            </com.example.nova.FlowRadioGroup>
+        </LinearLayout>
     </LinearLayout>
 
     <TextView

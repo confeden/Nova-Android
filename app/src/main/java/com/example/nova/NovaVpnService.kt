@@ -983,6 +983,8 @@ class NovaVpnService : OperaNativeVpnService() {
          * который будит телефон раз в две секунды (I19).
          */
         const val EXTRA_NOTIFICATION_DETAILS_ENABLED = "notification_details_enabled"
+        /** Вид уведомления — по той же причине, что и подробности: кэш prefs на процесс (I2, I19). */
+        const val EXTRA_NOTIFICATION_COLLAPSED = "notification_collapsed"
         const val EXTRA_FORCE_HEALTH_RECHECK_REASON = "force_health_recheck_reason"
         const val EXTRA_IGNORE_AUTO_RECONNECT_ON_RESTORE = "ignore_auto_reconnect_on_restore"
         const val EXTRA_FORCE_RESTART_ON_RESTORE = "force_restart_on_restore"
@@ -1641,14 +1643,32 @@ class NovaVpnService : OperaNativeVpnService() {
         // Значение обязано лечь в настройки **до** первой отрисовки уведомления:
         // ниже стоит startForeground(createNotification()), и он читает уже
         // применённое значение.
-        if (intent?.action == ACTION_REFRESH_NOTIFICATION &&
-            intent.hasExtra(EXTRA_NOTIFICATION_DETAILS_ENABLED)
-        ) {
+        //
+        // Действие намеренно не проверяется — только наличие поля. Обе настройки
+        // вида уведомления едут и на `ACTION_REFRESH_NOTIFICATION` из экрана
+        // «Уведомление», и на любом намерении подключения (`SessionReapply
+        // .buildIntent`). Пока здесь стояло `action == ACTION_REFRESH_NOTIFICATION`,
+        // переключатель, нажатый при выключенном VPN, до службы не доезжал
+        // никогда: экран намерение не шлёт (службы нет), а `:vpn` при следующем
+        // старте читает **свою** копию настроек, а она кэшируется попроцессно
+        // (I2) и про чужую запись не знает. Настройка сохранялась, писала в
+        // журнал и не действовала — это G122 (I19).
+        if (intent?.hasExtra(EXTRA_NOTIFICATION_DETAILS_ENABLED) == true) {
             val details = intent.getBooleanExtra(EXTRA_NOTIFICATION_DETAILS_ENABLED, true)
             if (details != clientData.isNotificationDetailsEnabled()) {
                 clientData.setNotificationDetailsEnabled(details)
                 LogManager.log(
                     "Уведомление: подробности ${if (details) "включены" else "выключены"} из настроек."
+                )
+            }
+        }
+
+        if (intent?.hasExtra(EXTRA_NOTIFICATION_COLLAPSED) == true) {
+            val collapsed = intent.getBooleanExtra(EXTRA_NOTIFICATION_COLLAPSED, false)
+            if (collapsed != clientData.isNotificationCollapsed()) {
+                clientData.setNotificationCollapsed(collapsed)
+                LogManager.log(
+                    "Уведомление: вид ${if (collapsed) "свёрнутый" else "развёрнутый"} из настроек."
                 )
             }
         }
@@ -7511,7 +7531,63 @@ class NovaVpnService : OperaNativeVpnService() {
         // отдавать её вперёд по нашей собственной воле — нет.
         val enabledRules = set.rules.filter { it.enabled }
             .sortedBy { if (it.kind == DnsRule.Kind.PROVIDER) 1 else 0 }
-        for (rule in enabledRules) {
+        // Bootstrap считаем до цикла, а не в нём.
+        //
+        // Замер транспорта у правил «любой» идёт одной пачкой с общим пределом, и
+        // для неё нужны адреса всех таких правил сразу. Внутри цикла эти же
+        // адреса берутся отсюда по индексу — второго резолва имени не будет.
+        val bootstraps = enabledRules.map { rule ->
+            if (!rule.encrypted) return@map emptyList<String>()
+            val host = dnsRuleHost(rule)
+            val fresh = when {
+                host.isBlank() -> emptyList()
+                // Правило указывает прямо на адрес — разворачивать нечего.
+                DnsRule.normalizeAddress(host) != null -> listOf(host)
+                // Зашитые адреса есть — свежий резолв не нужен и стоит дорого.
+                //
+                // Цена буквальная: `userDnsPlan` зовётся из `establishTunnelInterface`,
+                // а тот — на каждую попытку подключения, и их в обходе бывает
+                // полсотни. Умолчания дают шесть имён, у каждого предел резолва
+                // полторы секунды, а память о неудаче живёт минуту, — то есть на
+                // сети, где эти имена не разворачиваются, каждая минута обхода
+                // добавляла до девяти секунд чистого ожидания. Своё имя владельца
+                // всё равно разворачивается: у него отдельный кэш с длинным сроком.
+                //
+                // Транспорт «любой» это правило не отменяет: замеру хватает
+                // зашитых адресов — соединение ставится к ним, а не к имени.
+                rule.bootstrap.isNotEmpty() && rule.kind != DnsRule.Kind.AUTO -> emptyList()
+                else -> PriorityDns.addressesForHost(host, networkKey, resolver, LogManager::log)
+            }
+            (fresh + rule.bootstrap).distinct()
+        }
+        // Замер транспорта — одной пачкой на все правила «любой».
+        //
+        // По одному нельзя: подряд шесть правил по два соединения с пределом
+        // полторы секунды — это до восемнадцати секунд на попытку подключения, а
+        // попыток в обходе полсотни. Пачка укладывается в общий предел, и кто в
+        // него не уложился, идёт в цепочку в порядке «сначала DoH»: обе цели в
+        // ней всё равно есть, и ответит та, что жива.
+        val transportTargets = enabledRules.withIndex().mapNotNull { (index, rule) ->
+            if (!rule.encrypted || rule.transport != DnsRule.Transport.ANY) return@mapNotNull null
+            val addresses = bootstraps[index]
+            if (addresses.isEmpty()) return@mapNotNull null
+            PriorityDns.TransportProbeTarget(dnsRuleHost(rule), addresses)
+        }
+        if (transportTargets.isNotEmpty()) {
+            PriorityDns.warmTransportPreferences(
+                targets = transportTargets,
+                networkKey = networkKey,
+                probe = { address, port ->
+                    ProtonLatency.probeTcpRttMs(address, port, DNS_TRANSPORT_PROBE_TIMEOUT_MS) { socket ->
+                        // Замер обязан описывать прямой путь, а не канал уже
+                        // поднятого туннеля: защита ставится до `connect`.
+                        protect(socket)
+                    }
+                },
+                logger = LogManager::log,
+            )
+        }
+        for ((index, rule) in enabledRules.withIndex()) {
             if (rule.kind == DnsRule.Kind.PROVIDER) {
                 val providerServers = providerDnsAddresses(connectivityManager, underlyingNetwork)
                 if (providerServers.isEmpty()) {
@@ -7534,55 +7610,35 @@ class NovaVpnService : OperaNativeVpnService() {
                 continue
             }
             val host = dnsRuleHost(rule)
-            val fresh = when {
-                host.isBlank() -> emptyList()
-                // Правило указывает прямо на адрес — разворачивать нечего.
-                DnsRule.normalizeAddress(host) != null -> listOf(host)
-                // Зашитые адреса есть — свежий резолв не нужен и стоит дорого.
-                //
-                // Цена буквальная: `userDnsPlan` зовётся из `establishTunnelInterface`,
-                // а тот — на каждую попытку подключения, и их в обходе бывает
-                // полсотни. Умолчания дают шесть имён, у каждого предел резолва
-                // полторы секунды, а память о неудаче живёт минуту, — то есть на
-                // сети, где эти имена не разворачиваются, каждая минута обхода
-                // добавляла до девяти секунд чистого ожидания. Своё имя владельца
-                // всё равно разворачивается: у него отдельный кэш с длинным сроком.
-                rule.bootstrap.isNotEmpty() && rule.kind != DnsRule.Kind.AUTO -> emptyList()
-                else -> PriorityDns.addressesForHost(host, networkKey, resolver, LogManager::log)
-            }
-            val bootstrap = (fresh + rule.bootstrap).distinct()
+            val bootstrap = bootstraps[index]
             // Без адресов ядру нечем дозвониться, и подставленный URL стоил бы
             // таймаута на каждом запросе (см. [PriorityDns.interceptUpstream]).
             if (bootstrap.isEmpty()) continue
             val prepared = rule.copy(bootstrap = bootstrap)
-            if (rule.kind == DnsRule.Kind.AUTO) {
-                // Наш резолвер — одной строкой на экране, двумя в ядре: сначала тот
-                // транспорт, который на этой сети отвечает быстрее, следом второй.
-                // Выбросить проигравшего нельзя — 443 и 853 блокируют порознь, и
-                // «медленнее» на замере не значит «мёртв» через минуту.
-                val doh = PriorityDns.preferredTransportIsDoh(
-                    networkKey = networkKey,
-                    addresses = bootstrap,
-                    probe = { host, port ->
-                        ProtonLatency.probeTcpRttMs(host, port, DNS_TRANSPORT_PROBE_TIMEOUT_MS) { socket ->
-                            // Замер обязан описывать прямой путь, а не канал уже
-                            // поднятого туннеля: защита ставится до `connect`.
-                            protect(socket)
-                        }
-                    },
-                    logger = LogManager::log,
-                )
-                val ordered = if (doh) {
-                    listOf(PriorityDns.DOH_URL, PriorityDns.DOT_URL)
-                } else {
-                    listOf(PriorityDns.DOT_URL, PriorityDns.DOH_URL)
+            // Правило «любой» — одной строкой на экране, двумя в ядре: сначала тот
+            // транспорт, который на этой сети отвечает быстрее, следом второй.
+            // Выбросить проигравшего нельзя — 443 и 853 блокируют порознь, и
+            // «медленнее» на замере не значит «мёртв» через минуту.
+            val targets = when (rule.transport) {
+                DnsRule.Transport.DOH -> listOf(dnsRuleDohTarget(rule, host))
+                DnsRule.Transport.DOT -> listOf(dnsRuleDotTarget(rule, host))
+                DnsRule.Transport.ANY -> {
+                    // Замер уже сделан пачкой выше; здесь только читается его
+                    // итог. Не намерено — впереди DoH, и это порядок, а не выбор:
+                    // вторая цель всё равно стоит следующей строкой.
+                    if (PriorityDns.preferredTransportIsDoh(host, networkKey)) {
+                        listOf(dnsRuleDohTarget(rule, host), dnsRuleDotTarget(rule, host))
+                    } else {
+                        listOf(dnsRuleDotTarget(rule, host), dnsRuleDohTarget(rule, host))
+                    }
                 }
-                ordered.forEach { upstreams += prepared.toUpstream(set.routeMode, it) }
+            }
+            targets.forEach { upstreams += prepared.toUpstream(set.routeMode, it) }
+            if (rule.kind == DnsRule.Kind.AUTO) {
                 // Вырез маршрута — только для нашего резолвера (D10).
                 bypass += bootstrap
                 continue
             }
-            upstreams += prepared.toUpstream(set.routeMode)
             // Bootstrap **чужого** шифрованного резолвера в вырез не идёт.
             //
             // Вырез — это `excludeRoute` на весь адрес, а не на порт 53: адрес с
@@ -7614,6 +7670,21 @@ class NovaVpnService : OperaNativeVpnService() {
     }
 
     private fun userDnsUpstreams(): List<String> = userDnsPlan().upstreams
+
+    /**
+     * DoH-цель правила: свою ссылку берём как есть, чужую собираем из имени.
+     *
+     * `/dns-query` — умолчание RFC 8484, а не закон: у NextDNS путь свой. Промах
+     * здесь стоит одной неудачной строки в цепочке, а не резолвинга: вторая цель
+     * того же правила стоит рядом, и ядро берёт следующую, как только эта не
+     * ответила.
+     */
+    private fun dnsRuleDohTarget(rule: DnsRule, host: String): String =
+        if (rule.kind == DnsRule.Kind.DOH) rule.value else "https://$host/dns-query"
+
+    /** DoT-цель правила: у DoT-строки она своя, у остальных — имя со схемой. */
+    private fun dnsRuleDotTarget(rule: DnsRule, host: String): String =
+        if (rule.kind == DnsRule.Kind.DOT) rule.value else "tls://$host"
 
     /** Имя (или адрес) зашифрованного правила — то, что надо развернуть. */
     private fun dnsRuleHost(rule: DnsRule): String = when (rule.kind) {
@@ -14785,15 +14856,22 @@ class NovaVpnService : OperaNativeVpnService() {
         showDisconnect: Boolean = true,
     ): Notification {
         val text = subtitle.ifBlank { buildNotificationDetails() }
-        return AppUpdateManager.buildForegroundVpnNotification(this, CHANNEL_ID, text, showDisconnect)
+        return AppUpdateManager.buildForegroundVpnNotification(
+            this,
+            CHANNEL_ID,
+            text,
+            showDisconnect,
+            collapsed = ClientData(this).isNotificationCollapsed(),
+        )
     }
 
     /**
      * Строка уведомления: транспорт, регион и скорость.
      *
-     * Всё в одну строку и без подписей-слов: уведомление показывается свёрнутым,
-     * и вторая строка в нём просто не видна. Порядок — от неизменного к
-     * изменчивому, чтобы прыгающие цифры стояли справа и не двигали остальное.
+     * Всё в одну строку и без подписей-слов: в узком виде (настройка «Свернуть
+     * уведомление») в карточке видна ровно одна строка, и вторая в ней просто не
+     * помещается. Порядок — от неизменного к изменчивому, чтобы прыгающие цифры
+     * стояли справа и не двигали остальное.
      */
     private fun buildNotificationDetails(): String {
         val clientData = ClientData(this)

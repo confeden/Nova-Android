@@ -35,6 +35,7 @@ class DnsSettingsActivity : AppCompatActivity() {
     private lateinit var swGlobalDns: Switch
     private lateinit var rvDnsRules: RecyclerView
     private lateinit var btnAddDnsRule: TextView
+    private lateinit var btnDnsReorder: TextView
     private lateinit var btnResetDnsRules: TextView
     private lateinit var dnsRuleAdapter: DnsRuleAdapter
     private lateinit var dnsRuleTouchHelper: ItemTouchHelper
@@ -49,6 +50,16 @@ class DnsSettingsActivity : AppCompatActivity() {
     private lateinit var swAppPlainFallback: Switch
     private lateinit var tvSummary: TextView
     private lateinit var dnsAppPickerAdapter: DnsAppPickerAdapter
+
+    /**
+     * Включён ли режим «Изменить порядок».
+     *
+     * Перетаскивание живёт только в нём. Вне режима у строки нет ручки, а
+     * [ItemTouchHelper.Callback.getMovementFlags] отдаёт нули — то есть и прямой
+     * `startDrag` ничего не начнёт, и жест, застигнутый выключением режима, не
+     * доедет до записи порядка.
+     */
+    private var reorderMode = false
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -115,6 +126,9 @@ class DnsSettingsActivity : AppCompatActivity() {
      */
     override fun onPause() {
         super.onPause()
+        // Режим не переживает уход с экрана: вернувшись, человек снова видит
+        // список, который нельзя задеть пальцем случайно.
+        setReorderMode(false)
         if (!dnsChangePending) return
         dnsChangePending = false
         if (!SessionReapply.isSessionLikelyActive(this, clientData)) {
@@ -146,6 +160,7 @@ class DnsSettingsActivity : AppCompatActivity() {
         swGlobalDns = findViewById(R.id.sw_global_dns)
         rvDnsRules = findViewById(R.id.rv_dns_rules)
         btnAddDnsRule = findViewById(R.id.btn_add_dns_rule)
+        btnDnsReorder = findViewById(R.id.btn_dns_reorder)
         btnResetDnsRules = findViewById(R.id.btn_reset_dns_rules)
         rgRouteMode = findViewById(R.id.rg_dns_route_mode)
         swAppOverride = findViewById(R.id.sw_app_override_dns)
@@ -180,11 +195,15 @@ class DnsSettingsActivity : AppCompatActivity() {
         TvFocusHelper.install(
             this,
             swGlobalDns,
+            btnDnsReorder,
             btnAddDnsRule,
             btnResetDnsRules,
             btnPickApp,
             swAppOverride,
         )
+        // Экран открывается в покое: список только читают. Заодно это ставит
+        // подпись кнопки и прячет «Добавить резолвер».
+        setReorderMode(false)
     }
 
     /**
@@ -222,6 +241,22 @@ class DnsSettingsActivity : AppCompatActivity() {
             ItemTouchHelper.UP or ItemTouchHelper.DOWN,
             0,
         ) {
+            // Флаги спрашиваем на каждый жест, а не берём из конструктора: вне
+            // режима изменения порядка их нет вовсе, так что и прямой
+            // `startDrag` по ручке ничего не начнёт, и жест, застигнутый
+            // выключением режима, оборвётся сам.
+            override fun getMovementFlags(
+                recyclerView: RecyclerView,
+                viewHolder: RecyclerView.ViewHolder,
+            ): Int = if (!reorderMode) {
+                ItemTouchHelper.Callback.makeMovementFlags(0, 0)
+            } else {
+                ItemTouchHelper.Callback.makeMovementFlags(
+                    ItemTouchHelper.UP or ItemTouchHelper.DOWN,
+                    0,
+                )
+            }
+
             // Тянут только за ручку: долгое нажатие на строке ничего не двигает,
             // иначе задержка пальца на строке перед правкой выглядела бы как сбой.
             override fun isLongPressDragEnabled(): Boolean = false
@@ -260,6 +295,31 @@ class DnsSettingsActivity : AppCompatActivity() {
         dnsRuleTouchHelper.attachToRecyclerView(rvDnsRules)
     }
 
+    /**
+     * Перетаскивание — отдельный режим, а не постоянное свойство списка.
+     *
+     * Ручка стояла у каждой строки всегда, и палец, опустившийся на левый край
+     * ради прокрутки, менял порядок опроса резолверов молча: список ростом в
+     * семь строк живёт в окне на 240dp, то есть прокручивается всегда. Теперь
+     * тянуть можно только тогда, когда об этом попросили.
+     */
+    private fun setReorderMode(enabled: Boolean) {
+        val changed = reorderMode != enabled
+        reorderMode = enabled
+        dnsRuleAdapter.reorderEnabled = enabled
+        btnDnsReorder.text = if (enabled) "Готово" else "Изменить порядок"
+        // «Добавить резолвер» живёт в том же режиме: экран в покое — только список.
+        btnAddDnsRule.visibility = if (enabled) View.VISIBLE else View.GONE
+        // Журналим только настоящее переключение: этот же метод ставит начальное
+        // состояние при открытии экрана и снимает режим в [onPause], и без
+        // проверки в журнал уходила бы строка на каждое открытие настроек.
+        if (!changed) return
+        LogManager.log(
+            if (enabled) "DNS-правила: включён режим изменения порядка."
+            else "DNS-правила: режим изменения порядка выключен."
+        )
+    }
+
     private fun bindListeners() {
         swGlobalDns.setOnCheckedChangeListener { _, checked ->
             if (suppressUiCallbacks) return@setOnCheckedChangeListener
@@ -272,6 +332,12 @@ class DnsSettingsActivity : AppCompatActivity() {
             persistDnsRules(if (checked) "свой DNS включён" else "свой DNS выключен")
         }
         btnAddDnsRule.setOnClickListener { showDnsRuleDialog(null) }
+        btnDnsReorder.setOnClickListener {
+            // Тот же заслон, что у остальных правок списка: до конца чтения
+            // файла порядок менять не на чем, и нажатие пропало бы молча.
+            if (!dnsRulesReady("режим изменения порядка")) return@setOnClickListener
+            setReorderMode(!reorderMode)
+        }
         btnResetDnsRules.setOnClickListener { showDnsRulesResetDialog() }
         swAppOverride.setOnCheckedChangeListener { _, _ ->
             if (suppressUiCallbacks) return@setOnCheckedChangeListener
@@ -506,7 +572,7 @@ class DnsSettingsActivity : AppCompatActivity() {
         if (rule.enabled == isChecked) return
         dnsRuleAdapter.replaceAt(position, rule.copy(enabled = isChecked))
         persistDnsRules(
-            "${if (isChecked) "включено" else "выключено"} ${DnsRuleAdapter.kindLabel(rule.kind)} ${rule.value}"
+            "${if (isChecked) "включено" else "выключено"} ${DnsRuleAdapter.transportLabel(rule)} ${rule.value}"
         )
         // Выключить можно и все сразу: список от этого не пустеет, но резолвинг
         // уходит на встроенную цепочку, и об этом честнее сказать сразу.
@@ -531,7 +597,7 @@ class DnsSettingsActivity : AppCompatActivity() {
             return
         }
         val removed = dnsRuleAdapter.removeAt(position) ?: return
-        persistDnsRules("удалено ${DnsRuleAdapter.kindLabel(removed.kind)} ${removed.value}")
+        persistDnsRules("удалено ${DnsRuleAdapter.transportLabel(removed)} ${removed.value}")
     }
 
     /**
@@ -561,31 +627,59 @@ class DnsSettingsActivity : AppCompatActivity() {
         // требовать знания, которого у него нет, ради значения, которое приложение
         // и так знает лучше.
 
-        fun selectedKind(): DnsRule.Kind = when (kindGroup.checkedRadioButtonId) {
-            R.id.rb_dns_rule_dot -> DnsRule.Kind.DOT
-            // Открытый резолвер добавить больше нельзя: незашифрованной остаётся
-            // ровно одна ступень — провайдерская, и она в списке уже есть.
-            else -> DnsRule.Kind.DOH
+        // Группа выбирает транспорт, а не вид значения. Открытого варианта в ней
+        // нет и быть не может: адрес открытого правила уезжает в вырез маршрута,
+        // а это утечка имён наружу (I8, D10, G96).
+        fun selectedTransport(): DnsRule.Transport = when (kindGroup.checkedRadioButtonId) {
+            R.id.rb_dns_rule_doh -> DnsRule.Transport.DOH
+            R.id.rb_dns_rule_dot -> DnsRule.Transport.DOT
+            else -> DnsRule.Transport.ANY
         }
 
-        fun renderKind() {
-            valueField.hint = when (selectedKind()) {
-                DnsRule.Kind.DOT -> "tls://dns.example.com"
+        /**
+         * Вид значения — из того, что человек написал, **и только**.
+         *
+         * Кнопка выбирает транспорт, а не форму записи. Пока вид брался у кнопки,
+         * переключение готового DoH-правила на «DoT» отправляло его адрес в
+         * нормализатор DoT, и `https://cloudflare-dns.com/dns-query` превращался
+         * в `tls://https://cloudflare-dns.com/dns-query`: хостом становилось
+         * «https», имя резолвера уезжало в путь, и правило молча выпадало из
+         * цепочки — ни ошибки на экране, ни строки в журнале.
+         *
+         * Обе формы принимаются всегда: `https://имя/путь` и `tls://имя`. Вторую
+         * цель служба соберёт из того же имени сама
+         * (`dnsRuleDohTarget`/`dnsRuleDotTarget`), поэтому спрашивать два адреса
+         * не нужно и записанный вид ничего не запрещает.
+         */
+        fun selectedKind(raw: String?): DnsRule.Kind =
+            if (DnsRule.normalizeValue(DnsRule.Kind.DOH, raw) != null) {
+                DnsRule.Kind.DOH
+            } else {
+                DnsRule.Kind.DOT
+            }
+
+        fun renderTransport() {
+            valueField.hint = when (selectedTransport()) {
+                DnsRule.Transport.DOT -> "tls://dns.example.com"
+                DnsRule.Transport.ANY -> "https://dns.example.com/dns-query или tls://dns.example.com"
                 else -> "https://dns.example.com/dns-query"
             }
         }
 
         kindGroup.check(
-            when (existing?.kind) {
-                DnsRule.Kind.DOT -> R.id.rb_dns_rule_dot
-                else -> R.id.rb_dns_rule_doh
+            when (existing?.transport) {
+                DnsRule.Transport.DOH -> R.id.rb_dns_rule_doh
+                DnsRule.Transport.DOT -> R.id.rb_dns_rule_dot
+                // Новое правило заводится «любым»: владелец просил, чтобы
+                // спрашивалось то, что отвечает быстрее.
+                else -> R.id.rb_dns_rule_any
             }
         )
         valueField.setText(existing?.value.orEmpty())
-        renderKind()
+        renderTransport()
         kindGroup.setOnCheckedChangeListener { _, _ ->
             valueError.visibility = View.GONE
-            renderKind()
+            renderTransport()
         }
 
         val dialog = builder
@@ -602,15 +696,15 @@ class DnsSettingsActivity : AppCompatActivity() {
             // обработчик показа нужен ему самому. Кнопки красим здесь же.
             NovaDialogs.style(dialog)
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val kind = selectedKind()
-                val value = DnsRule.normalizeValue(kind, valueField.text?.toString())
+                val transport = selectedTransport()
+                val raw = valueField.text?.toString()
+                val kind = selectedKind(raw)
+                val value = DnsRule.normalizeValue(kind, raw)
                 if (value == null) {
-                    valueError.text = when (kind) {
-                        DnsRule.Kind.DOT ->
-                            "Для DoT нужен адрес вида tls://dns.example.com"
-                        else ->
-                            "Для DoH нужен адрес вида https://host/dns-query"
-                    }
+                    // Текст один на все три кнопки: вид больше не следует за
+                    // кнопкой, и «Для DoT нужен адрес вида tls://…» требовал бы
+                    // того, чего код уже не требует.
+                    valueError.text = "Нужен адрес вида https://host/dns-query или tls://host"
                     valueError.visibility = View.VISIBLE
                     return@setOnClickListener
                 }
@@ -637,7 +731,7 @@ class DnsSettingsActivity : AppCompatActivity() {
                 }
 
                 if (existing == null) {
-                    val created = DnsRule.create(kind, value, addresses)
+                    val created = DnsRule.create(kind, value, addresses, transport)
                     if (created == null) {
                         valueError.text = "Не удалось разобрать адрес — проверьте написание."
                         valueError.visibility = View.VISIBLE
@@ -645,13 +739,16 @@ class DnsSettingsActivity : AppCompatActivity() {
                     }
                     dnsRuleAdapter.addItem(created)
                     rvDnsRules.post { rvDnsRules.scrollToPosition(dnsRuleAdapter.itemCount - 1) }
-                    persistDnsRules("добавлено ${DnsRuleAdapter.kindLabel(kind)} $value")
+                    persistDnsRules("добавлено ${DnsRuleAdapter.transportLabel(created)} $value")
                 } else {
-                    dnsRuleAdapter.replaceAt(
-                        position,
-                        existing.copy(kind = kind, value = value, bootstrap = addresses),
+                    val updated = existing.copy(
+                        kind = kind,
+                        value = value,
+                        bootstrap = addresses,
+                        transport = transport,
                     )
-                    persistDnsRules("изменено ${DnsRuleAdapter.kindLabel(kind)} $value")
+                    dnsRuleAdapter.replaceAt(position, updated)
+                    persistDnsRules("изменено ${DnsRuleAdapter.transportLabel(updated)} $value")
                 }
                 dialog.dismiss()
             }

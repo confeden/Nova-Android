@@ -212,10 +212,11 @@ object ProtonProfileManager {
             // конкретной сети, и пережить смену сети она не должна.
             ProtonApi.useBypassClient(buildBypassClient(appContext))
             val outcome = try {
-                run(appContext, store, owner, force)
+                run(appContext, store, owner, force, background)
             } catch (e: Exception) {
                 LogManager.log("Proton: прогон упал — ${e.message}")
-                Outcome(emptyList(), "Proton: ошибка — ${shortReason(e)}", false)
+                keepLiveSetAfterFailure(store, shortReason(e))
+                    ?: Outcome(emptyList(), "Proton: ошибка — ${shortReason(e)}", false)
             } finally {
                 ProtonApi.useBypassClient(null)
                 activeLease.set(null)
@@ -277,11 +278,44 @@ object ProtonProfileManager {
     private fun shortReason(e: Exception): String =
         (e.message ?: e.javaClass.simpleName).take(48)
 
+    /**
+     * Прежний живой набор, если обновить его не вышло, а он сам по себе исправен.
+     *
+     * Живой список теперь устаревает ([ProtonProfileStore.LIVE_NODES_REFRESH_MS]), и
+     * фоновая подготовка раз в сутки идёт за свежим. На сети, где API Proton
+     * недоступен, такой заход падает, и прежде у отказа было два исхода, оба хуже
+     * вчерашнего списка: исключение — «Proton: ошибка», пустой `/vpn/logicals` —
+     * встроенный список поверх рабочего живого. То же касается кнопки «обновить» и
+     * явного выбора, когда прогону всё-таки пришлось идти в сеть: экран пишет регион
+     * только при `ready`. О том, что список не обновился, говорится прямо (I4).
+     *
+     * @return null, если держаться не за что: ключ истёк, профилей меньше цели или на
+     *         диске лежит встроенный список — тогда отказ прогона остаётся отказом.
+     */
+    private fun keepLiveSetAfterFailure(store: ProtonProfileStore, reason: String): Outcome? {
+        val account = store.readAccount() ?: return null
+        if (account.certExpiresAt <= System.currentTimeMillis() + CERT_RENEW_MARGIN_MS) return null
+        if (store.readNodesSource() != ProtonProfileStore.NODES_LIVE) return null
+        val existing = store.readProfiles()
+        if (existing.size < TARGET_COUNT) return null
+        LogManager.log(
+            "Proton: список узлов обновить не удалось ($reason) — остаёмся на прежнем живом " +
+                "наборе, ${existing.size} шт. Следующая попытка — через " +
+                "${ProtonProfileStore.LIVE_NODES_REFRESH_MS / 3_600_000} ч."
+        )
+        return Outcome(
+            profiles = existing,
+            message = "Proton: список узлов не обновился — прежний набор, ${existing.size} шт.",
+            ready = true,
+        )
+    }
+
     private fun run(
         context: Context,
         store: ProtonProfileStore,
         owner: String,
         force: Boolean,
+        background: Boolean,
     ): Outcome {
         // Узел, через который прошлый заход достучался до API, подсказывается до
         // первого запроса: поиск через DoH — самое хрупкое звено, и пропустить его
@@ -309,8 +343,21 @@ object ProtonProfileManager {
         val measured = existing.any { it.pingMs > 0 }
         val probeRetryDue =
             System.currentTimeMillis() - store.readProbeCheckedAt() > ProtonProfileStore.PROBE_REFRESH_MS
+        // Устаревший **живой** список явный выбор не задерживает.
+        //
+        // Живой список теперь устаревает за сутки (`LIVE_NODES_REFRESH_MS`), и без этой
+        // оговорки нажатие PROTON раз в сутки снова уходило бы в сеть — сессия, список,
+        // замер до двух минут под «РЕГИСТРАЦИЯ PROTON» — там, где набор полон и
+        // подключаться можно сразу. Обновление достаётся фоновой подготовке: она
+        // спрашивает тот же `needsLiveNodes` (`preparationGap`), идёт через 30 с после
+        // подключения и заходит сюда с `background = true`, где быстрого пути для
+        // устаревшего списка нет, — поэтому и цикла «подготовка считает работу
+        // незаконченной, прогон отдаёт кэш» не возникает. Встроенный список по-прежнему
+        // обновляется и по явному выбору: с него человек и уходит на живой.
+        val liveListMerelyStale = !background &&
+            store.readNodesSource() == ProtonProfileStore.NODES_LIVE
         if (!force &&
-            !needsLiveNodes(store) &&
+            (!needsLiveNodes(store) || liveListMerelyStale) &&
             certAlive &&
             existing.size >= TARGET_COUNT &&
             (measured || !probeRetryDue)
@@ -370,6 +417,14 @@ object ProtonProfileManager {
             store.writeNodesSource(ProtonProfileStore.NODES_LIVE)
             liveServers
         } else {
+            // Живой набор на диске встроенным не подменяется.
+            //
+            // Встроенный список старше и без нагрузки, и пока живой не устаревал,
+            // подмена случалась только по кнопке «обновить». С суточным обновлением
+            // один неудачный заход раз в сутки менял бы рабочий живой набор на
+            // прошивочный. Держимся за него, только пока жив ключ: иначе прогону
+            // дальше всё равно регистрироваться, и эта проверка вернёт null.
+            keepLiveSetAfterFailure(store, "/vpn/logicals не ответил")?.let { return it }
             val bundled = ProtonNodeCatalog.load(context)
             if (bundled.isEmpty()) {
                 store.writeNodesSource(ProtonProfileStore.NODES_BUNDLED)
@@ -556,8 +611,8 @@ object ProtonProfileManager {
     }
 
     /**
-     * Есть ли всё, без чего выбор Proton не поднимется: личность, живой сертификат и
-     * полный список узлов.
+     * Есть ли всё, без чего выбор Proton не поднимется: личность, живой сертификат,
+     * полный набор профилей и не устаревший список узлов.
      *
      * Замер сюда **намеренно не входит**, хотя [run] без него в сеть всё-таки идёт.
      * Разница по назначению: у прогона замер — это ранжирование, и переделать его при
@@ -567,12 +622,34 @@ object ProtonProfileManager {
      * заводила бы полный сорокасекундный прогон каждые пятнадцать минут до конца
      * сеанса, ничего этим не меняя.
      */
-    fun isPreparationComplete(context: Context): Boolean {
+    fun isPreparationComplete(context: Context): Boolean = preparationGap(context) == null
+
+    /** Чего не хватает подготовке, см. [preparationGap]. */
+    enum class PreparationGap {
+        /** Нет личности, сертификат истекает или профилей меньше цели. */
+        NO_PROFILES,
+
+        /** Набор полон, но список узлов пора обновить. */
+        NODE_LIST_STALE,
+    }
+
+    /**
+     * Чего не хватает подготовке; null — хватает всего.
+     *
+     * Причина отдаётся тем же предикатом, что решает [isPreparationComplete], а не
+     * угадывается у вызывающего. С устареванием живого списка фоновый прогон стал
+     * заводиться и при полном наборе профилей, и строка «готовых профилей нет»
+     * говорила бы тогда неправду (I4).
+     */
+    fun preparationGap(context: Context): PreparationGap? {
         val store = ProtonProfileStore(context)
-        val account = store.readAccount() ?: return false
-        if (account.certExpiresAt <= System.currentTimeMillis() + CERT_RENEW_MARGIN_MS) return false
-        if (store.readProfiles().size < TARGET_COUNT) return false
-        return !needsLiveNodes(store)
+        val account = store.readAccount() ?: return PreparationGap.NO_PROFILES
+        if (account.certExpiresAt <= System.currentTimeMillis() + CERT_RENEW_MARGIN_MS) {
+            return PreparationGap.NO_PROFILES
+        }
+        if (store.readProfiles().size < TARGET_COUNT) return PreparationGap.NO_PROFILES
+        if (needsLiveNodes(store)) return PreparationGap.NODE_LIST_STALE
+        return null
     }
 
     /**
@@ -586,11 +663,12 @@ object ProtonProfileManager {
      * сеанс. Именно поэтому отметка времени пишется на **каждую** попытку, а не на
      * удачную: без этого предикат никогда не перестал бы быть истинным.
      */
-    private fun needsLiveNodes(store: ProtonProfileStore): Boolean {
-        if (store.readNodesSource() == ProtonProfileStore.NODES_LIVE) return false
-        val checkedAt = store.readNodesCheckedAt()
-        return System.currentTimeMillis() - checkedAt > ProtonProfileStore.NODES_REFRESH_MS
-    }
+    private fun needsLiveNodes(store: ProtonProfileStore): Boolean =
+        ProtonProfileStore.nodesListStale(
+            source = store.readNodesSource(),
+            checkedAtMs = store.readNodesCheckedAt(),
+            nowMs = System.currentTimeMillis(),
+        )
 
     /** Итог прогона, у которого аренду забрал явный выбор пользователя. */
     private fun preempted(): Outcome {

@@ -13415,6 +13415,25 @@ class NovaVpnService : OperaNativeVpnService() {
                             findMatchingWarpVerifiedConfigForAttempt(currentAttempt, clientData)?.let { stableConfig ->
                                 clientData.promoteWarpVerifiedConfig(stableConfig.id)
                             }
+                            // Успех узла Proton — сразу, а не только в конце попытки:
+                            // попытка кончается вместе с сеансом, и сеанс, который убила
+                            // система или обновление, не оставил бы о рабочем узле ничего.
+                            if (
+                                !fastScanMode &&
+                                currentAttempt.endpointSource.equals(
+                                    ProtonProfileStore.ENDPOINT_SOURCE,
+                                    ignoreCase = true,
+                                )
+                            ) {
+                                runCatching {
+                                    ProtonProfileStore(this@NovaVpnService).noteAttemptOutcome(
+                                        networkClass = strategyNetworkClass,
+                                        host = currentHost,
+                                        port = currentPort,
+                                        success = true,
+                                    )
+                                }
+                            }
                             LogManager.log(
                                 "Конфигурация $modeLabel@$currentPort удержалась 20 секунд. " +
                                     "Поднимаем её как последнюю стабильную."
@@ -14035,6 +14054,32 @@ class NovaVpnService : OperaNativeVpnService() {
             ) {
                 runCatching {
                     WarpGeneratedStore(this).noteAttemptOutcome(currentHost, currentPort, success = false)
+                }
+            }
+            // Итог попытки на узле Proton — по нему следующая волна берёт другие узлы.
+            //
+            // Успех тоже пишется: рабочая пара обязана идти первой при следующем
+            // подключении, иначе её обгонят непроверенные адреса с меньшей задержкой.
+            // Не считаем то, что ничего не говорит об узле: попытку, прерванную
+            // остановкой до подключения, и быстрый скан с урезанным сроком рукопожатия —
+            // для Proton этот файл единственное, что задаёт порядок, и ложный отказ
+            // уводил бы живой узел в хвост на шесть часов.
+            if (
+                !skipStrategyLearning.get() &&
+                !fastScanMode &&
+                externalStopRequested?.invoke() != true &&
+                outcome != AttemptOutcome.DEFERRED &&
+                currentAttempt.endpointSource.equals(ProtonProfileStore.ENDPOINT_SOURCE, ignoreCase = true)
+            ) {
+                runCatching {
+                    ProtonProfileStore(this).noteAttemptOutcome(
+                        networkClass = strategyNetworkClass,
+                        host = currentHost,
+                        port = currentPort,
+                        success = outcome == AttemptOutcome.SUCCESS,
+                    )
+                }.onFailure {
+                    LogManager.log("Proton: итог попытки на $currentPort не записан — ${it.message}")
                 }
             }
             if (transportMode.engine == "masque") {
@@ -18109,17 +18154,47 @@ class NovaVpnService : OperaNativeVpnService() {
             .trim()
             .uppercase(Locale.US)
             .takeIf { protonModeActive && it.length == 2 }
+        // Один снимок списка Proton на сборку: страна и порядок берутся из одного чтения.
+        val protonProfilesSnapshot = if (protonModeActive) {
+            runCatching { ProtonProfileStore(this).readProfiles() }.getOrDefault(emptyList())
+        } else {
+            emptyList()
+        }
         val protonCountryByEndpoint = if (protonWantedCountry == null) {
             emptyMap()
         } else {
-            runCatching {
-                ProtonProfileStore.countryByEndpoint(ProtonProfileStore(this).readProfiles())
-            }.getOrDefault(emptyMap())
+            ProtonProfileStore.countryByEndpoint(protonProfilesSnapshot)
         }
         fun matchesWantedCountry(config: WarpVerifiedConfig): Boolean {
             if (protonWantedCountry == null) return false
             val host = config.host.trim().trim('[', ']')
             return protonCountryByEndpoint["$host:${config.port}"] == protonWantedCountry
+        }
+
+        // Порядок Proton — по итогам прошлых попыток, а не одним порядком списка.
+        //
+        // Сортировка ниже для профилей Proton сводилась к задержке TCP-замера, а она у
+        // каждого узла своя и от попыток не меняется. Первая волна брала восемь
+        // верхних, recovery-цикл — тех же восемь, автопереподключение — снова их, и
+        // сорок два профиля за ними не пробовались никогда. Замер 2026-09-13 (Pixel 4a,
+        // Mi A1, одна Wi-Fi сеть): голова списка молчала на всех портах, а узлы глубже
+        // поднимались с первой попытки — телефон бесконечно перебирал мёртвую
+        // восьмёрку. Теперь молчавшая пара уходит в хвост, и каждая волна берёт
+        // следующие узлы (`ProtonProfileStore.connectOrder`).
+        val protonOutcomes = if (protonModeActive) {
+            runCatching { ProtonProfileStore(this).readAttemptOutcomes(protonOutcomeNetworkClass()) }
+                .getOrDefault(ProtonProfileStore.AttemptOutcomes.EMPTY)
+        } else {
+            ProtonProfileStore.AttemptOutcomes.EMPTY
+        }
+        val protonConnectOrder = if (protonModeActive) {
+            ProtonProfileStore.connectOrder(protonProfilesSnapshot, protonOutcomes, System.currentTimeMillis())
+        } else {
+            null
+        }
+        fun protonConnectRank(config: WarpVerifiedConfig): Int {
+            val ranks = protonConnectOrder?.ranks ?: return 0
+            return ranks[ProtonProfileStore.endpointKey(config.host, config.port)] ?: Int.MAX_VALUE
         }
 
         val importedConfigs = mergedVerifiedWarpConfigs(clientData)
@@ -18141,6 +18216,7 @@ class NovaVpnService : OperaNativeVpnService() {
             }
             .sortedWith(
                 compareByDescending<WarpVerifiedConfig> { matchesWantedCountry(it) }
+                    .thenBy { protonConnectRank(it) }
                     .thenByDescending { it.promotedAt }
                     .thenByDescending { clientData.getWarpVerifiedQualityTier(it) }
                     .thenByDescending { it.qualityPingSuccesses }
@@ -18178,9 +18254,15 @@ class NovaVpnService : OperaNativeVpnService() {
                 }
             }
             .take(limit)
+        // Сколько узлов списка очередь уже знает по опыту — иначе по журналу не
+        // отличить «волна взяла следующие узлы» от «волна снова взяла ту же голову».
+        val protonOrderNote = protonConnectOrder?.let { order ->
+            ", proton: подключались ${order.provenCount} (первыми), " +
+                "недавно молчали ${order.silentCount} (в хвост)"
+        }.orEmpty()
         LogManager.log(
             "USER WARP imported configs available: ${importedConfigs.size} (limit=$limit, " +
-                "protocol=${forcedImportedProtocol ?: "auto"})."
+                "protocol=${forcedImportedProtocol ?: "auto"}$protonOrderNote)."
         )
         if (importedConfigs.isEmpty()) return emptyList()
 
@@ -23039,6 +23121,21 @@ class NovaVpnService : OperaNativeVpnService() {
         return null
     }
 
+    /**
+     * Класс подложной сети для итогов попыток Proton — тем же правилом, каким
+     * `runConnectionAttempts` получает `strategyNetworkClass` при записи.
+     *
+     * Для рейтинга WARP разделение по сети снято (выше), а здесь оно нужно: по итогам
+     * Proton решается, какой узел **не пробовать первым**, и отказ сотовой сети,
+     * перенесённый на Wi-Fi, уводил бы рабочий там узел в хвост очереди.
+     */
+    private fun protonOutcomeNetworkClass(): String? {
+        val connectivityManager = getSystemService(android.net.ConnectivityManager::class.java)
+        val network = selectUnderlyingNetwork(connectivityManager)
+        return stableSuccessNetworkClassFromSignature(buildUnderlyingNetworkSignature(connectivityManager, network))
+            ?: stableSuccessNetworkClassFromSignature(buildUnderlyingNetworkClass(connectivityManager, network))
+    }
+
     private fun resolveMessengerAccelerationProfile(
         clientData: ClientData,
     ): MessengerAccelerationProfile {
@@ -26251,10 +26348,16 @@ class NovaVpnService : OperaNativeVpnService() {
                 // который через секунду пересоберут.
                 Thread.sleep(PROTON_BACKFILL_SETTLE_MS)
                 if (currentState != STATE_CONNECTED || isUserStopped) return@startSafeServiceThread
-                if (ProtonProfileManager.isPreparationComplete(applicationContext)) return@startSafeServiceThread
-                LogManager.log(
-                    "Proton: готовых профилей нет, а туннель поднят — тихо готовим их в фоне ($reason)."
-                )
+                when (ProtonProfileManager.preparationGap(applicationContext)) {
+                    null -> return@startSafeServiceThread
+                    ProtonProfileManager.PreparationGap.NO_PROFILES -> LogManager.log(
+                        "Proton: готовых профилей нет, а туннель поднят — тихо готовим их в фоне ($reason)."
+                    )
+                    ProtonProfileManager.PreparationGap.NODE_LIST_STALE -> LogManager.log(
+                        "Proton: профили есть, но список узлов пора обновить — туннель поднят, " +
+                            "тихо обновляем в фоне ($reason)."
+                    )
+                }
                 val started = ProtonProfileManager.ensureProfiles(
                     context = applicationContext,
                     background = true,

@@ -96,6 +96,17 @@ class ProtonProfileStore(context: Context) {
     private val runLeaseFile = AtomicFile(File(appContext.filesDir, "proton_run.json"))
 
     /**
+     * Итоги попыток подключения к узлам Proton — см. [AttemptOutcomes].
+     *
+     * Отдельным файлом, а не полем профиля. Список профилей переписывают прогон
+     * выпуска и замер, а итог попытки ставит цикл подключения в `:vpn`; отметка,
+     * вписанная в чужой файл через «прочитать — поправить — записать», вернула бы на
+     * место старый список, если его успели переписать между чтением и записью. Этот
+     * файл пишет один только цикл подключения.
+     */
+    private val outcomesFile = AtomicFile(File(appContext.filesDir, "proton_outcomes.json"))
+
+    /**
      * Состояние замера. Живёт в файле, потому что замер идёт в процессе `:vpn`
      * (только у службы есть `protect()`), а показывает его процесс интерфейса.
      */
@@ -404,6 +415,68 @@ class ProtonProfileStore(context: Context) {
         runCatching { candidatesFile.delete() }
     }
 
+    // --- итоги попыток подключения -------------------------------------------
+
+    /**
+     * Что цикл подключения узнал об узлах Proton на деле — на одном классе сети.
+     *
+     * Зачем. Очередь Proton строилась из одного и того же порядка списка, а отказ
+     * узла нигде не оставался: `recordWarpVerifiedRuntimeOutcome` пишет только в
+     * записи `warp_verified_configs`, а профили Proton собираются на чтении и туда
+     * не попадают. Первая волна брала восемь верхних профилей, recovery-цикл — те же
+     * восемь, автопереподключение — снова их же, и остальные сорок два не пробовались
+     * никогда. Замер 2026-09-13 (Pixel 4a и Mi A1, одна Wi-Fi сеть): голова списка
+     * молчала на всех портах, а узлы глубже в том же списке поднимались с первой
+     * попытки — телефон крутил мёртвую восьмёрку бесконечно.
+     *
+     * Ключи — пара `адрес:порт` ([endpointKey]); итог адреса целиком выводится из
+     * отметок его пар ([connectOrder]). Отметки разнесены по классу сети
+     * ([outcomeNetworkClass]): узел, который режет сотовая сеть, не должен уходить в
+     * хвост очереди на домашнем Wi-Fi, где он работает.
+     *
+     * @property failedAtByEndpoint когда пара последний раз не дала подключения.
+     * @property succeededAtByEndpoint когда пара последний раз подключилась.
+     */
+    data class AttemptOutcomes(
+        val failedAtByEndpoint: Map<String, Long>,
+        val succeededAtByEndpoint: Map<String, Long>,
+    ) {
+        companion object {
+            val EMPTY = AttemptOutcomes(emptyMap(), emptyMap())
+        }
+    }
+
+    fun readAttemptOutcomes(networkClass: String?): AttemptOutcomes =
+        decodeAttemptOutcomes(readAtomically(outcomesFile), outcomeNetworkClass(networkClass))
+
+    /**
+     * Отмечает исход попытки на паре `адрес:порт` узла Proton.
+     *
+     * Успех снимает отказ этой пары, отказ ставит отметку времени. Читает и пишет под
+     * общим замком записи: пишет файл один только процесс `:vpn`, но из разных потоков.
+     */
+    fun noteAttemptOutcome(
+        networkClass: String?,
+        host: String,
+        port: Int,
+        success: Boolean,
+        atMs: Long = System.currentTimeMillis(),
+    ) {
+        if (port !in 1..65535 || normalizeHost(host).isEmpty()) return
+        synchronized(writeLock) {
+            writeAtomically(
+                outcomesFile,
+                encodeAttemptOutcome(
+                    raw = readAtomically(outcomesFile),
+                    networkClass = outcomeNetworkClass(networkClass),
+                    key = endpointKey(host, port),
+                    success = success,
+                    atMs = atMs,
+                ),
+            )
+        }
+    }
+
     // --- состояние замера ---------------------------------------------------
 
     fun readProbeState(): ProbeState? {
@@ -536,7 +609,7 @@ class ProtonProfileStore(context: Context) {
      * опроса — это самовосстанавливается, потеря записи — нет.
      */
     /**
-     * Все пять файлов хранилища — JSON, поэтому проверка целостности общая.
+     * Все файлы хранилища — JSON, поэтому проверка целостности общая.
      *
      * Особенно важно для `proton_account.json`: [mutateAccountJson] на неразобранном
      * тексте заводит **пустой** объект и записывает его поверх — то есть обрывок
@@ -615,8 +688,12 @@ class ProtonProfileStore(context: Context) {
          * пустым.
          *
          * Список — тот же, что предлагает сам Proton. Дописывать сюда порты «на
-         * удачу» (123, 500) нельзя: узел на них не слушает, и каждая такая запись
-         * это выброшенная попытка ценой в полный таймаут рукопожатия.
+         * удачу» (123) нельзя: узел на них не слушает, и каждая такая запись это
+         * выброшенная попытка ценой в полный таймаут рукопожатия. Оговорка по замеру
+         * 2026-09-13: `/vpn/v2/clientconfig` даёт для WireGuard UDP 443, 88, 1224,
+         * 51820, 500 и 4500, а 80, 1194, 5060 и 4569 числит за OpenVPN — но живой узел
+         * брал WireGuard и на 80, и на 1194, а мёртвый молчал на всех. Решает узел, а
+         * не порт, поэтому список не трогали.
          */
         val PORTS = listOf(51820, 443, 80, 88, 4500, 1194, 5060, 1224, 4569)
 
@@ -652,10 +729,10 @@ class ProtonProfileStore(context: Context) {
         /**
          * Раздаёт ближайшим узлам каждой страны запасные порты, сохраняя порядок.
          *
-         * Порядок входного списка сохраняется, варианты одного адреса идут подряд:
-         * очередь подключения сортирует по замеренной задержке, которая у вариантов
-         * общая, и рассчитывает на то, что перебор идёт «ближайший узел на трёх
-         * портах, потом следующий».
+         * Порядок входного списка сохраняется, варианты одного адреса идут подряд.
+         * Очередь подключения перебирает их **вширь**, а не подряд — сначала первый
+         * порт каждого адреса, потом запасные ([connectOrder]): замер 2026-09-13
+         * показал, что молчит обычно узел целиком, на всех портах сразу.
          *
          * @param ordered узлы в том порядке, в котором их надо пробовать — по одному
          *        на адрес, с уже назначенным портом.
@@ -722,6 +799,216 @@ class ProtonProfileStore(context: Context) {
             val start = PORTS.indexOf(assigned).takeIf { it >= 0 } ?: 0
             val count = PORTS_PER_FALLBACK_SERVER.coerceAtMost(PORTS.size)
             return (0 until count).map { PORTS[(start + it) % PORTS.size] }
+        }
+
+        /** Ключ пары `адрес:порт` — один и для итогов попыток, и для очереди подключения. */
+        fun endpointKey(host: String, port: Int): String = "${normalizeHost(host)}:$port"
+
+        private fun normalizeHost(host: String): String =
+            host.trim().trim('[', ']').lowercase(Locale.US)
+
+        /**
+         * Класс сети, под которым хранятся итоги попыток: `wifi`, `cell`, `eth`…
+         *
+         * Не известен — общая корзина `any`, а не пропуск: итог без класса лучше, чем
+         * никакой, а смешать его с чужим классом нельзя.
+         */
+        fun outcomeNetworkClass(raw: String?): String =
+            raw?.trim()?.lowercase(Locale.US)?.takeIf { it.isNotEmpty() } ?: "any"
+
+        /** Итоги одного класса сети из текста `proton_outcomes.json`; обрывок — пусто. */
+        fun decodeAttemptOutcomes(raw: String?, networkClass: String): AttemptOutcomes {
+            if (raw.isNullOrBlank()) return AttemptOutcomes.EMPTY
+            return runCatching {
+                val section = JSONObject(raw).optJSONObject(networkClass)
+                    ?: return@runCatching AttemptOutcomes.EMPTY
+                AttemptOutcomes(
+                    failedAtByEndpoint = decodeTimestamps(section.optJSONObject("failed_at")),
+                    succeededAtByEndpoint = decodeTimestamps(section.optJSONObject("succeeded_at")),
+                )
+            }.getOrDefault(AttemptOutcomes.EMPTY)
+        }
+
+        /**
+         * Текст файла после отметки одной попытки. Прочие классы сети переносятся как
+         * есть; в каждом хранится не больше [OUTCOME_MEMORY_LIMIT] самых свежих отметок,
+         * чтобы старые списки узлов не копились вечно.
+         */
+        fun encodeAttemptOutcome(
+            raw: String?,
+            networkClass: String,
+            key: String,
+            success: Boolean,
+            atMs: Long,
+        ): String {
+            val root = raw
+                ?.takeIf { it.isNotBlank() }
+                ?.let { runCatching { JSONObject(it) }.getOrNull() }
+                ?: JSONObject()
+            val current = decodeAttemptOutcomes(raw, networkClass)
+            val failed = current.failedAtByEndpoint.toMutableMap()
+            val succeeded = current.succeededAtByEndpoint.toMutableMap()
+            if (success) {
+                failed.remove(key)
+                succeeded[key] = atMs
+            } else {
+                failed[key] = atMs
+            }
+            root.put(
+                networkClass,
+                JSONObject()
+                    .put("failed_at", encodeTimestamps(failed))
+                    .put("succeeded_at", encodeTimestamps(succeeded)),
+            )
+            return root.toString()
+        }
+
+        private fun decodeTimestamps(json: JSONObject?): Map<String, Long> {
+            if (json == null) return emptyMap()
+            val out = HashMap<String, Long>(json.length())
+            json.keys().forEach { key ->
+                val at = json.optLong(key, 0L)
+                if (at > 0L) out[key] = at
+            }
+            return out
+        }
+
+        private fun encodeTimestamps(values: Map<String, Long>): JSONObject {
+            val json = JSONObject()
+            values.entries
+                .sortedByDescending { it.value }
+                .take(OUTCOME_MEMORY_LIMIT)
+                .forEach { (key, at) -> json.put(key, at) }
+            return json
+        }
+
+        /**
+         * Порядок, в котором цикл подключения пробует профили Proton.
+         *
+         * Итог **адреса** выводится из всех отметок его пар — и тех, чьих портов в
+         * списке уже нет. Молчит, как правило, узел целиком: замер 2026-09-13 (Mi A1) —
+         * десять молчавших узлов молчали на всех испробованных портах, живые отвечали на
+         * 443, 88, 1224, 51820, 500, 4500 и 80. А порт узлу раздаётся по месту в списке
+         * нагрузки, и обновление списка его меняет: память, привязанная только к паре,
+         * терялась бы вместе со старым портом.
+         *
+         * Четыре ступени; внутри каждой сохраняется порядок списка, а он уже по задержке.
+         *
+         * 1. Адреса, подключавшиеся позже своего последнего отказа, — по одной паре на
+         *    адрес (та, что подключалась, а если её порта нет — первый порт адреса без
+         *    своего отказа), самые свежие первыми: рабочий узел не уступает голову
+         *    очереди непроверенным.
+         * 2. Пары без своего отказа у адресов без отказа — **вширь**: сначала первый порт
+         *    каждого адреса, потом второй. Три слота из восьми на один адрес — это три
+         *    слота на один и тот же ответ.
+         * 3. Непробованные порты отказавших адресов — тоже вширь. Запасной порт остаётся
+         *    в очереди, ради чего его и выдавали (S50), но после чужих адресов.
+         * 4. Отказавшие пары — самый давний отказ первым. Так каждая следующая волна
+         *    берёт следующие узлы, и очередь проходит весь список, а не возвращается к
+         *    той же голове.
+         *
+         * Отказ старше [FAILURE_MEMORY_MS] забывается: список со временем возвращается
+         * к порядку задержки, а не держит узел в хвосте до конца дней.
+         *
+         * @return ранг каждой пары [endpointKey] (0 — пробовать первой) и сколько пар
+         *         попало на первую и последнюю ступени — для журнала, чтобы правило
+         *         «подключалась / молчала» не жило второй копией у вызывающего.
+         */
+        fun connectOrder(
+            profiles: List<ProtonProfile>,
+            outcomes: AttemptOutcomes,
+            nowMs: Long,
+        ): ConnectOrder {
+            class Entry(val key: String, val host: String, val index: Int, val variant: Int)
+
+            val variantsSeen = HashMap<String, Int>()
+            val keysSeen = HashSet<String>(profiles.size * 2)
+            val entries = ArrayList<Entry>(profiles.size)
+            profiles.forEachIndexed { index, profile ->
+                val host = normalizeHost(profile.entryIp)
+                if (host.isEmpty()) return@forEachIndexed
+                val key = endpointKey(host, profile.port)
+                if (!keysSeen.add(key)) return@forEachIndexed
+                val variant = variantsSeen.getOrDefault(host, 0)
+                variantsSeen[host] = variant + 1
+                entries += Entry(key, host, index, variant)
+            }
+
+            fun fresh(at: Long?): Long =
+                at?.takeIf { it > 0L && nowMs - it < FAILURE_MEMORY_MS } ?: 0L
+
+            fun hostOf(key: String): String = key.substringBeforeLast(':')
+
+            val hostFailedAt = HashMap<String, Long>()
+            outcomes.failedAtByEndpoint.forEach { (key, at) ->
+                val failedAt = fresh(at)
+                if (failedAt > 0L) hostFailedAt.merge(hostOf(key), failedAt, ::maxOf)
+            }
+            val hostSucceededAt = HashMap<String, Long>()
+            outcomes.succeededAtByEndpoint.forEach { (key, at) ->
+                if (at > 0L) hostSucceededAt.merge(hostOf(key), at, ::maxOf)
+            }
+
+            fun pairFailedAt(key: String): Long = fresh(outcomes.failedAtByEndpoint[key])
+            fun pairSucceededAt(key: String): Long = outcomes.succeededAtByEndpoint[key] ?: 0L
+            fun hostProven(host: String): Boolean =
+                (hostSucceededAt[host] ?: 0L) > (hostFailedAt[host] ?: 0L)
+            fun hostSilent(host: String): Boolean =
+                (hostFailedAt[host] ?: 0L) > 0L && !hostProven(host)
+
+            val proven = entries
+                .filter { hostProven(it.host) && pairFailedAt(it.key) == 0L }
+                .groupBy { it.host }
+                .map { (_, pairs) ->
+                    pairs.sortedWith(
+                        compareByDescending<Entry> { pairSucceededAt(it.key) }
+                            .thenBy { it.variant }
+                            .thenBy { it.index }
+                    ).first()
+                }
+                .sortedWith(compareByDescending<Entry> { hostSucceededAt[it.host] ?: 0L }.thenBy { it.index })
+            val provenKeys = proven.mapTo(HashSet()) { it.key }
+            val rest = entries.filter { it.key !in provenKeys }
+            val breadthFirst = compareBy<Entry> { it.variant }.thenBy { it.index }
+            val failed = rest
+                .filter { pairFailedAt(it.key) > 0L }
+                .sortedWith(compareBy<Entry> { pairFailedAt(it.key) }.thenBy { it.index })
+            val untried = rest.filter { pairFailedAt(it.key) == 0L }
+            val freshPairs = untried.filterNot { hostSilent(it.host) }.sortedWith(breadthFirst)
+            val sparePorts = untried.filter { hostSilent(it.host) }.sortedWith(breadthFirst)
+
+            val ranks = HashMap<String, Int>(entries.size * 2)
+            (proven + freshPairs + sparePorts + failed).forEachIndexed { rank, entry ->
+                ranks[entry.key] = rank
+            }
+            return ConnectOrder(ranks = ranks, provenCount = proven.size, silentCount = failed.size)
+        }
+
+        /** Итог [connectOrder]. */
+        data class ConnectOrder(
+            val ranks: Map<String, Int>,
+            /** Подтверждённых адресов: по паре от каждого идёт первой. */
+            val provenCount: Int,
+            /** Пар с непогашенным отказом: они в хвосте. */
+            val silentCount: Int,
+        )
+
+        /**
+         * Пора ли снова идти за списком узлов.
+         *
+         * Встроенный список повторяется через [NODES_REFRESH_MS]. Живой раньше не
+         * устаревал вовсе, и это стоило подключения: на Pixel 4a 2026-09-13 голова
+         * сохранённого живого списка состояла из узлов, которых в `/vpn/logicals`
+         * Proton не было уже ни в каком виде, — адреса выведены из работы, а телефон
+         * продолжал стучаться в них. Живой список живёт [LIVE_NODES_REFRESH_MS].
+         */
+        fun nodesListStale(source: String, checkedAtMs: Long, nowMs: Long): Boolean {
+            val ageMs = nowMs - checkedAtMs
+            return if (source == NODES_LIVE) {
+                ageMs > LIVE_NODES_REFRESH_MS
+            } else {
+                ageMs > NODES_REFRESH_MS
+            }
         }
 
         fun buildDeviceProfile(random: Random = Random.Default): ProtonDeviceProfile {
@@ -894,6 +1181,22 @@ class ProtonProfileStore(context: Context) {
          * прошивочном списке до переустановки нельзя — ровно на это и жалуются.
          */
         const val NODES_REFRESH_MS = 6L * 60 * 60 * 1000
+
+        /**
+         * Сколько живёт **живой** список узлов, см. [nodesListStale].
+         *
+         * Сутки, а не шесть часов, как у встроенного: живой список уже рабочий, и
+         * обновление здесь — профилактика, а не попытка выбраться со старого
+         * прошивочного набора. Каждый прогон заводит новую сессию Proton, и чаще раза в
+         * сутки тратить её на один и тот же ответ незачем.
+         */
+        const val LIVE_NODES_REFRESH_MS = 24L * 60 * 60 * 1000
+
+        /** Сколько помнится отказ пары `адрес:порт`, см. [connectOrder]. */
+        const val FAILURE_MEMORY_MS = 6L * 60 * 60 * 1000
+
+        /** Сколько отметок итогов хранится: в одном списке до восьмидесяти пар, а списки меняются. */
+        private const val OUTCOME_MEMORY_LIMIT = 256
 
         /**
          * Как часто прогон пробует замерить профили заново, когда прошлый замер

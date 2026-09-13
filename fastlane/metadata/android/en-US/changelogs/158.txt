@@ -1,0 +1,3 @@
+- Proton connects again: when the first nodes of the list did not answer, the app kept cycling through the same eight profiles. A silent node now moves to the back of the queue, every attempt takes other nodes, and a node that already worked is tried first.
+- Distinct nodes are tried before spare ports of the same node.
+- The Proton node list refreshes itself in the background once a day; a failed refresh keeps the previous working list.

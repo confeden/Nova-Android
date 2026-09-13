@@ -371,6 +371,7 @@ class SettingsActivity : AppCompatActivity() {
         setContentView(R.layout.activity_settings)
 
         NovaFontHelper.apply(findViewById(android.R.id.content))
+        appliedAppearanceSignature = appearanceSignature()
 
         
 
@@ -1578,6 +1579,18 @@ class SettingsActivity : AppCompatActivity() {
         // на Opera это stop-then-start туннеля за чужую галочку.
         initialSplitMode = clientData.getSplitMode()
         initialSplitApps = clientData.getSplitApps()
+
+        // MTU правит соседний экран — подпись строки обязана его догнать.
+        renderTunnelMtuRow()
+
+        // Оформление тоже правит соседний экран, и одной перерисовкой подписи тут
+        // не обойтись: тема — это ресурсы, они выданы окну в `onCreate`. Пока
+        // экран не пересоздан, он остаётся в прежней теме, и выбор читается как
+        // «кнопка ничего не сделала».
+        if (appearanceSignature() != appliedAppearanceSignature) {
+            recreate()
+            return
+        }
 
         AppUpdateManager.resumePendingInstallIfAllowed(this)
 
@@ -2937,117 +2950,41 @@ class SettingsActivity : AppCompatActivity() {
      * движения тоже нет — только по отпусканию, поэтому переживать за флеш в
      * `onPause` (I20) здесь нечего.
      */
+    /**
+     * Строка MTU: показывает текущее значение и уводит на свой экран.
+     *
+     * Ползунок жил здесь и был единственным способом задать значение: сорок
+     * четыре положения на ширину строки, точного ввода нет, вернуть заводское
+     * 1280 можно только на глаз. Всё это, вместе со списком транспортов, на
+     * которые настройка действует, живёт теперь в [TunnelMtuActivity]; здесь
+     * осталась строка-переход.
+     */
     private fun setupTunnelMtuRow() {
-
-        val seekBar = findViewById<SeekBar>(R.id.sb_tunnel_mtu) ?: return
-
-        val value = findViewById<TextView>(R.id.tv_tunnel_mtu_value) ?: return
-
-        val summary = findViewById<TextView>(R.id.tv_tunnel_mtu_summary) ?: return
-
-        val steps = (NovaVpnService.TUNNEL_MTU_MAX - NovaVpnService.TUNNEL_MTU_MIN) /
-            NovaVpnService.TUNNEL_MTU_STEP
-
-        fun mtuOf(progress: Int): Int =
-            NovaVpnService.TUNNEL_MTU_MIN + progress * NovaVpnService.TUNNEL_MTU_STEP
-
-        fun render(mtu: Int) {
-
-            value.text = mtu.toString()
-
-            // Значение по умолчанию названо прямо в подписи, а не только в
-            // положении ползунка: человек, сдвинувший его наугад, иначе не может
-            // вернуться к заводскому — на глаз середина шкалы это 1220, а не 1280.
-            val default = if (mtu == NovaVpnService.TUNNEL_MTU_DEFAULT) {
-                "по умолчанию ${NovaVpnService.TUNNEL_MTU_DEFAULT} — оно и стоит"
-            } else {
-                "по умолчанию ${NovaVpnService.TUNNEL_MTU_DEFAULT}"
-            }
-
-            summary.text = "На проводе ${mtu + NovaVpnService.WARP_WIRE_OVERHEAD_IPV4} Б, " +
-                "$default. Действует на WARP и AWG: у MASQUE размер считается из " +
-                "пакета QUIC, а у Opera и VLESS его решает не туннель."
-
-        }
-
-        seekBar.max = steps
-
-        val current = clientData.getTunnelMtu()
-
-        seekBar.progress =
-            ((current - NovaVpnService.TUNNEL_MTU_MIN) / NovaVpnService.TUNNEL_MTU_STEP)
-                .coerceIn(0, steps)
-
-        render(current)
-
-        seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-
-            override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) {
-
-                render(mtuOf(progress))
-
-            }
-
-            override fun onStartTrackingTouch(bar: SeekBar) = Unit
-
-            override fun onStopTrackingTouch(bar: SeekBar) {
-
-                val chosen = mtuOf(bar.progress)
-
-                if (chosen == clientData.getTunnelMtu()) return
-
-                clientData.setTunnelMtu(chosen)
-
-                LogManager.log(
-                    "MTU туннеля выбран вручную: $chosen " +
-                        "(на проводе ${chosen + NovaVpnService.WARP_WIRE_OVERHEAD_IPV4} Б)."
-                )
-
-                maybeApplyTunnelMtuImmediately(chosen)
-
-            }
-
-        })
-
+        val row = findViewById<LinearLayout>(R.id.row_tunnel_mtu) ?: return
+        row.setOnClickListener { startActivity(Intent(this, TunnelMtuActivity::class.java)) }
+        renderTunnelMtuRow()
     }
 
-
-
+    /** Подпись строки MTU. Зовётся и из `onResume`: значение меняют на соседнем экране. */
     /**
-     * Применить новый MTU к идущему сеансу.
+     * Снимок оформления: тема, фактура и температура одной строкой.
      *
-     * Туннель приходится пересобирать: MTU задаётся в `VpnService.Builder`, то
-     * есть в момент подъёма интерфейса, и живому `tun` его не переставить.
-     * Порядок берём общий (`SessionReapply`), включая осторожный путь для Opera:
-     * второй копией порядка случается G49, а обычный реаплай поверх живой Opera
-     * роняет процесс `:vpn` (G3).
+     * Сравнивать по нему, а не по одной теме: фактуру и температуру выдаёт тот же
+     * экран, и после их правки окно тоже надо пересобрать — фон окна собирается
+     * в `NovaTheme.apply`.
      */
-    private fun maybeApplyTunnelMtuImmediately(mtu: Int) {
+    private fun appearanceSignature(): String =
+        NovaTheme.current(this) + "|" +
+            NovaAppearance.storedTexture(this).key + "|" +
+            NovaAppearance.storedTemperature(this)
 
-        if (!isNovaSessionLikelyActive()) return
+    private var appliedAppearanceSignature: String = ""
 
-        runCatching {
-
-            LogManager.log("MTU туннеля изменён в Настройках на $mtu. Запускаем немедленный мягкий реконнект.")
-
-            val toastMessage = "Пересобираем туннель с MTU $mtu..."
-
-            if (shouldUseControlledOperaRestartReapply()) {
-
-                launchControlledOperaReapply(toastMessage)
-
-            } else {
-
-                launchDirectReapply(toastMessage)
-
-            }
-
-        }.onFailure { error ->
-
-            LogManager.log("Не удалось сразу применить MTU туннеля: ${error.message}")
-
-        }
-
+    private fun renderTunnelMtuRow() {
+        val value = findViewById<TextView>(R.id.tv_tunnel_mtu_value) ?: return
+        val mtu = clientData.getTunnelMtu()
+        val tail = if (mtu == NovaVpnService.TUNNEL_MTU_DEFAULT) " (по умолчанию)" else ""
+        value.text = "$mtu Б, на проводе ${mtu + NovaVpnService.WARP_WIRE_OVERHEAD_IPV4} Б$tail"
     }
 
     /**
@@ -3093,58 +3030,30 @@ class SettingsActivity : AppCompatActivity() {
 
             val option = NovaTheme.optionFor(NovaTheme.current(this))
 
-            note.text = "${option.title} — ${option.note}"
+            val texture = NovaAppearance.storedTexture(this)
+
+            val temperature = NovaAppearance.storedTemperature(this)
+
+            // Строка называет всё, что экран умеет менять: иначе выбранная фактура
+            // видна только внутри него, и снаружи непонятно, включена ли она.
+            val extras = buildList {
+                if (texture != NovaAppearance.Texture.NONE) add(texture.title)
+                if (temperature != NovaAppearance.TEMPERATURE_NEUTRAL) {
+                    add(if (temperature < 0) "теплее" else "холоднее")
+                }
+            }
+
+            note.text = if (extras.isEmpty()) {
+                "${option.title} — ${option.note}"
+            } else {
+                "${option.title} · ${extras.joinToString(" · ")}"
+            }
 
         }
 
         render()
 
-        row.setOnClickListener { showAppThemePicker(::render) }
-
-    }
-
-    private fun showAppThemePicker(onChanged: () -> Unit) {
-
-        val options = NovaTheme.ORDER
-
-        val current = NovaTheme.current(this)
-
-        var picked = options.indexOfFirst { it.key == current }.coerceAtLeast(0)
-
-        android.app.AlertDialog.Builder(this)
-
-            .setTitle("Тема оформления")
-
-            .setSingleChoiceItems(options.map { it.title }.toTypedArray(), picked) { _, which ->
-
-                picked = which
-
-            }
-
-            .setPositiveButton("Применить") { _, _ ->
-
-                val chosen = options[picked]
-
-                if (chosen.key != current) {
-
-                    NovaTheme.store(this, chosen.key)
-
-                    LogManager.log("Тема оформления: ${chosen.title}.")
-
-                    onChanged()
-
-                    // Тема ставится в onCreate, поэтому экран надо пересоздать —
-                    // иначе выбор виден только при следующем открытии настроек, и
-                    // это читается как «кнопка ничего не сделала».
-                    recreate()
-
-                }
-
-            }
-
-            .setNegativeButton("Отмена", null)
-
-            .showNova()
+        row.setOnClickListener { startActivity(Intent(this, ThemeSettingsActivity::class.java)) }
 
     }
 
@@ -3433,6 +3342,24 @@ class SettingsActivity : AppCompatActivity() {
 
         detachProtonStatusListener()
 
+        // Живой ли сеанс — решается **здесь**, до выпуска, и ответ хранится целую минуту.
+        //
+        // Спрашивать это по итогу выпуска нельзя, и именно так получался дефект «выбрал
+        // Proton при выключенном VPN — телефон подключился сам». Выпуск занимает до
+        // минуты и сам поднимает процесс `:vpn` ради замера профилей
+        // (`ACTION_PROBE_PROTON_PROFILES`). К концу прогона `isSessionLikelyActive`
+        // видит живую службу, а вторым признаком — запомненный сеанс из
+        // `SharedPreferences`, который UI-процесс после чужой записи не перечитывает
+        // никогда (I2, G188). Оба признака врут в сторону «сеанс есть», и оба врут
+        // ровно тогда, когда его нет. Это G189 в пятой копии: главный экран свой
+        // предикат уже усилил вторым слоем (`hasLiveSessionToReapply`), а экран
+        // настроек остался с одним — и путь Proton единственный, кто сам себе портит
+        // ответ, поэтому и баг был только у него.
+        //
+        // Снимок делается до `markPreparationRequested()`: после него начинается
+        // работа, которая этот ответ и загрязняет.
+        val sessionWasLive = isNovaSessionLikelyActive()
+
         protonPreparationActive = true
 
         // Признак дублируется в синглтон: он переживает поворот экрана и служит
@@ -3473,7 +3400,7 @@ class SettingsActivity : AppCompatActivity() {
         clientData.setProtonPreparationRequested(true)
         initialExitRegionPreference = "proton"
 
-        runProtonGeneration(summaryView, radioGroup, buttons, previousRegion)
+        runProtonGeneration(summaryView, radioGroup, buttons, previousRegion, sessionWasLive)
 
     }
 
@@ -3534,6 +3461,7 @@ class SettingsActivity : AppCompatActivity() {
         radioGroup: RadioGroup,
         buttons: List<RadioButton>,
         previousRegion: String,
+        sessionWasLive: Boolean,
     ) {
 
         val started = ProtonProfileManager.ensureProfiles(this) { outcome ->
@@ -3592,7 +3520,7 @@ class SettingsActivity : AppCompatActivity() {
 
                 clientData.setProtonPreparationRequested(false)
 
-                connectToFastestProtonProfile()
+                applyProtonSelectionAfterIssue(sessionWasLive)
 
                 summaryView.post {
 
@@ -3710,39 +3638,41 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     /**
-     * Подключение сразу после проверки.
+     * Применяет выбор Proton по итогу выпуска профилей.
      *
-     * Живой сеанс переключается мягко, иначе поднимается новый. Согласие на VPN
-     * здесь не запрашивается: диалог принадлежит главному экрану, а из настроек
-     * `startActivityForResult` за ним вернулся бы в чужой поток запуска.
-     */
-    /**
+     * Подключением это больше не заканчивается. Выбор в настройках — это
+     * **предпочтение**, а не команда подключиться: включает туннель кнопка на
+     * главном экране, и остальные пять регионов ровно так себя и ведут
+     * (`maybeApplyRegionChangeImmediately` выходит, когда сеанса нет). Proton был
+     * единственным, кто при выключенном VPN слал службе `ACTION_CONNECT_SMART`
+     * сам, — снаружи это «зашёл в Настройки, выбрал регион, телефон подключился».
+     * Это тот же I23/G188, что уже закрыт для выбора входа в Tor.
+     *
+     * Живой сеанс по-прежнему переключается мягко: человек, у которого туннель
+     * поднят, сменой региона просит именно смену региона.
+     *
+     * @param sessionWasLive был ли сеанс жив **в момент выбора**, а не сейчас: снимок
+     *        сделан в [startProtonProfilePreparation] до выпуска, потому что выпуск сам
+     *        поднимает `:vpn` для замера и тем делает ответ «жив» истинным на пустом
+     *        месте.
+     *
      * Зовётся из рабочего потока по итогу выпуска, поэтому всё, что требует главного
-     * потока или живого экрана, идёт через `runOnUiThread`, а служба стартует от
-     * контекста приложения: к этому моменту настройки могут быть уже закрыты.
+     * потока или живого экрана, идёт через `runOnUiThread`: к этому моменту настройки
+     * могут быть уже закрыты.
      */
-    private fun connectToFastestProtonProfile() {
+    private fun applyProtonSelectionAfterIssue(sessionWasLive: Boolean) {
 
-        val appContext = applicationContext
+        if (!sessionWasLive) {
 
-        if (isNovaSessionLikelyActive()) {
-
-            runOnUiThread { maybeApplyRegionChangeImmediately("proton") }
-
-            return
-
-        }
-
-        if (android.net.VpnService.prepare(appContext) != null) {
-
-            // Согласие на VPN спрашивает главный экран: диалог принадлежит ему.
-            LogManager.log("Proton: профили готовы, но согласие на VPN не выдано — ждём кнопку на главном экране.")
+            // Молчать нельзя (I4): «профили выпустились, и ничего не произошло»
+            // читается как поломка. Поэтому вслух и в журнал, и на экран.
+            LogManager.log("Proton: профили готовы, но VPN был выключен при выборе — подключение не начинаем, регион записан.")
 
             runOnUiThread {
 
                 runCatching {
 
-                    Toast.makeText(this, "Профили готовы. Нажмите подключение на главном экране.", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, "Профили Proton готовы. Нажмите подключение на главном экране.", Toast.LENGTH_LONG).show()
 
                 }
 
@@ -3752,65 +3682,9 @@ class SettingsActivity : AppCompatActivity() {
 
         }
 
-        runCatching {
-
-            ContextCompat.startForegroundService(
-
-                appContext,
-
-                Intent(appContext, NovaVpnService::class.java).apply {
-
-                    action = NovaVpnService.ACTION_CONNECT_SMART
-
-                    putExtra(NovaVpnService.EXTRA_EXIT_REGION, "proton")
-
-                }
-
-            )
-
-            // «Самый быстрый» — только когда замер действительно был.
-            //
-            // При `alive == 0` профили лежат в порядке нагрузки узла, а не задержки
-            // (`probeProtonProfilesFromServiceProcess`), и на устройстве это как раз
-            // обычный случай: 0 из 50 ответивших. Строка про скорость там описывала
-            // намерение, а не то, что произошло, — счётчик без замера лжёт (G11).
-
-            val measured = runCatching {
-
-                (ProtonProfileStore(appContext).readProbeState()?.alive ?: 0) > 0
-
-            }.getOrDefault(false)
-
-            LogManager.log(
-                "Proton: профили готовы, запускаем подключение к " +
-                    if (measured) "самому быстрому." else "наименее загруженному — замер не прошёл."
-            )
-
-            runOnUiThread {
-
-                runCatching {
-
-                    val text = if (measured) {
-
-                        "Подключаемся к самому быстрому профилю Proton..."
-
-                    } else {
-
-                        "Подключаемся к наименее загруженному профилю Proton..."
-
-                    }
-
-                    Toast.makeText(this, text, Toast.LENGTH_SHORT).show()
-
-                }
-
-            }
-
-        }.onFailure { error ->
-
-            LogManager.log("Proton: не удалось начать подключение — ${error.message}")
-
-        }
+        // Сеанс мог закончиться, пока шёл выпуск, — тогда `maybeApplyRegionChangeImmediately`
+        // выйдет сам, и это правильный ответ: переподключать нечего.
+        runOnUiThread { maybeApplyRegionChangeImmediately("proton") }
 
     }
 
@@ -4942,7 +4816,10 @@ class SettingsActivity : AppCompatActivity() {
 
                 UpdateDownloadProgress.State.READY -> NovaTheme.color(this, R.attr.novaAccent)
 
-                else -> android.graphics.Color.WHITE
+                // Заголовок строки, а не белый литерал: у всех соседей он
+                // `?attr/novaTextTitle`, и на светлых темах белый по светлому
+                // исчезает совсем (I21).
+                else -> NovaTheme.color(this, R.attr.novaTextTitle)
 
             }
 

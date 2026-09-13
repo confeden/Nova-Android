@@ -40,9 +40,149 @@ object NovaDialogs {
         apply(dialog.findViewById(android.R.id.button1), primary = true)
         apply(dialog.findViewById(android.R.id.button2), primary = false)
         apply(dialog.findViewById(android.R.id.button3), primary = false)
+        growToFitRow(dialog)
     }
 
-    private fun apply(button: Button?, primary: Boolean) {
+    /**
+     * Та же покраска для обычной кнопки в разметке экрана.
+     *
+     * Капкан у них общий с диалогами: на Pixel платформенный стиль кнопки красит
+     * фон динамическим акцентом системы — цветом обоев, — и на экране «MTU
+     * туннеля» кнопки приезжали сиреневыми поверх синей темы. Перебить это темой
+     * нельзя (см. шапку), поэтому цвет ставится кодом, и код обязан быть один.
+     *
+     * Поля layout здесь не трогаются: отбивка `marginStart` нужна только внутри
+     * `ButtonBarLayout`, а у кнопки на экране своя разметка.
+     */
+    fun styleButton(button: Button?, primary: Boolean) {
+        val view = button ?: return
+        val context = view.context
+        val accent = NovaTheme.color(context, R.attr.novaAccent)
+        val accentOn = NovaTheme.color(context, R.attr.novaAccentOn)
+        if (accent == 0) return
+        val density = context.resources.displayMetrics.density
+        val shape = android.graphics.drawable.GradientDrawable().apply {
+            this.shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+            cornerRadius = 10f * density
+            if (primary) {
+                setColor(accent)
+            } else {
+                setColor(
+                    android.graphics.Color.argb(
+                        0x2E,
+                        android.graphics.Color.red(accent),
+                        android.graphics.Color.green(accent),
+                        android.graphics.Color.blue(accent),
+                    )
+                )
+                setStroke((1f * density + 0.5f).toInt(), accent)
+            }
+        }
+        view.background = shape
+        // Оттенок снимается после подложки: платформенный стиль кнопки на Pixel
+        // красит фон динамическим акцентом системы, и без этой строки он ляжет
+        // поверх нашей фигуры (та же история, что в шапке файла).
+        view.backgroundTintList = null
+        view.setTextColor(if (primary) accentOn else accent)
+        val padH = (18f * density + 0.5f).toInt()
+        val padV = (10f * density + 0.5f).toInt()
+        view.setPadding(padH, padV, padH, padV)
+        view.minHeight = (44f * density + 0.5f).toInt()
+        view.isAllCaps = false
+        view.setTypeface(view.typeface, android.graphics.Typeface.BOLD)
+    }
+
+    /** Поле по горизонтали, с которого кнопка стартует: заведомо узко, чтобы полоса не сложилась. */
+    private const val PAD_MIN_DP = 10f
+
+    /** Поле, до которого кнопку расширяют, если на полосе есть место. */
+    private const val PAD_MAX_DP = 18f
+
+    /** Пол ширины: меньше пальца кнопка быть не должна, даже если надпись — «ОК». */
+    private const val MIN_WIDTH_DP = 48f
+
+    /**
+     * Раздаёт кнопкам свободное место полосы — после того, как её ширина стала известна.
+     *
+     * Зачем вообще два шага. Ширина кнопки обязана считаться по её надписи: при
+     * фиксированных 96dp три кнопки просили 312dp, столько полосе на телефоне 360dp
+     * не достаётся, и `ButtonBarLayout` складывал их в столбик — «Сохранить / Отмена /
+     * Убрать» у лицензии WARP+ ехали лесенкой (замерено на Mi A1 и Pixel 4a).
+     *
+     * Почему нельзя просто распрямить сложившуюся полосу. `ButtonBarLayout`
+     * возвращается в строку **только при увеличении ширины**: в `onMeasure` условие
+     * распрямления — `widthSize > mLastWidthSize`, а ширина диалога не меняется. Что
+     * сложилось один раз, то сложилось навсегда, и сузить кнопки задним числом уже
+     * бесполезно. Поэтому первый замер обязан пройти по узкому варианту, и только
+     * потом место раздаётся обратно.
+     *
+     * Раздача идёт в `onPreDraw`, то есть после раскладки, но **до** первой отрисовки:
+     * возврат `false` отменяет этот кадр, и человек узкого варианта не видит.
+     */
+    private fun growToFitRow(dialog: Dialog) {
+
+        val buttons = listOfNotNull(
+            dialog.findViewById<Button>(android.R.id.button1),
+            dialog.findViewById<Button>(android.R.id.button2),
+            dialog.findViewById<Button>(android.R.id.button3),
+        ).filter { it.visibility == android.view.View.VISIBLE }
+
+        if (buttons.isEmpty()) return
+
+        val bar = buttons.first().parent as? ViewGroup ?: return
+
+        bar.viewTreeObserver.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
+
+            override fun onPreDraw(): Boolean {
+
+                val available = bar.width - bar.paddingStart - bar.paddingEnd
+
+                // Полосу ещё не измерили: уйти сейчас — значит не раздать место вовсе.
+                if (available <= 0) return true
+
+                bar.viewTreeObserver.removeOnPreDrawListener(this)
+
+                // Уже столбик — расширять нечего, шире полоса не станет (см. выше).
+                if ((bar as? android.widget.LinearLayout)?.orientation == android.widget.LinearLayout.VERTICAL) {
+                    return true
+                }
+
+                val context = bar.context
+
+                val padMin = dp(context, PAD_MIN_DP)
+
+                val padMax = dp(context, PAD_MAX_DP)
+
+                // Считается по **измеренной** ширине, а не по тексту: так в счёт входят
+                // и начертание, и уже приложенные поля, и пол `minWidth`.
+                val used = buttons.sumOf { button ->
+                    val params = button.layoutParams as? ViewGroup.MarginLayoutParams
+                    button.measuredWidth + (params?.marginStart ?: 0) + (params?.marginEnd ?: 0)
+                }
+
+                val slack = available - used
+
+                if (slack <= 0) return true
+
+                // Место делится поровну на все поля: у каждой кнопки их два.
+                val pad = (padMin + slack / (2 * buttons.size)).coerceAtMost(padMax)
+
+                if (pad <= padMin) return true
+
+                buttons.forEach { button ->
+                    button.setPadding(pad, button.paddingTop, pad, button.paddingBottom)
+                }
+
+                // Кадр пропускаем: ширины только что изменились, и рисовать надо уже новые.
+                return false
+
+            }
+
+        })
+
+    }
+
+    private fun apply(button: Button?, primary: Boolean, adjustMargins: Boolean = true) {
 
         val view = button ?: return
 
@@ -74,11 +214,18 @@ object NovaDialogs {
 
         // `setBackgroundResource` сбрасывает отступы на те, что у нового фона, а
         // у фигуры их нет вовсе — без этой строки текст упирается в обводку.
-        val padH = dp(context, 18f)
+        //
+        // Поле по горизонтали здесь **минимальное**, а не окончательное: полоса не
+        // должна сложиться в столбик на первом же замере, потому что обратно она уже
+        // не распрямится. Настоящее поле раздаёт [growToFitRow], когда ширина полосы
+        // известна.
+        val padH = dp(context, PAD_MIN_DP)
         val padV = dp(context, 10f)
         view.setPadding(padH, padV, padH, padV)
 
-        view.minWidth = dp(context, 96f)
+        // Ширина — по надписи. Фиксированные 96dp на три кнопки не помещались в полосу
+        // ни на одном телефоне ýже планшета; остаётся только пол в размер пальца.
+        view.minWidth = dp(context, MIN_WIDTH_DP)
         view.minHeight = dp(context, 44f)
         view.isAllCaps = false
         view.setTypeface(view.typeface, android.graphics.Typeface.BOLD)
@@ -98,10 +245,12 @@ object NovaDialogs {
         // padding-бокса. `clipToPadding` там по умолчанию включён, и верхние
         // 4dp подложки — обводка и верх скруглений — просто не рисуются.
         // Отбивку снизу даёт `paddingBottom="4dp"` самой полосы.
-        (view.layoutParams as? ViewGroup.MarginLayoutParams)?.let { params ->
-            params.marginStart = dp(context, 8f)
-            params.bottomMargin = 0
-            view.layoutParams = params
+        if (adjustMargins) {
+            (view.layoutParams as? ViewGroup.MarginLayoutParams)?.let { params ->
+                params.marginStart = dp(context, 8f)
+                params.bottomMargin = 0
+                view.layoutParams = params
+            }
         }
     }
 

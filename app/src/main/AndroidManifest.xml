@@ -144,6 +144,18 @@
             android:theme="@style/Theme.Nova.Settings" />
 
         <activity
+            android:name=".ThemeSettingsActivity"
+            android:label="Оформление"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.Nova.Settings" />
+
+        <activity
+            android:name=".TunnelMtuActivity"
+            android:label="MTU туннеля"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.Nova.Settings" />
+
+        <activity
             android:name=".BackgroundSettingsActivity"
             android:label="Фон главного экрана"
             android:launchMode="singleTop"

@@ -385,29 +385,40 @@
                     android:layout_height="wrap_content"/>
             </LinearLayout>
 
+            <!--
+                MTU туннеля — переход на свой экран.
+
+                Ползунок жил прямо здесь и давал только его: попасть пальцем в
+                конкретное число на сорока четырёх положениях нельзя, вернуть
+                заводское 1280 — тем более. Точное поле, кнопка «По умолчанию» и
+                список транспортов, на которые настройка действует, живут в
+                `TunnelMtuActivity`.
+            -->
             <LinearLayout
                 android:id="@+id/row_tunnel_mtu"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="vertical"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
                 android:background="?attr/novaCardBackground"
                 android:minHeight="64dp"
                 android:paddingLeft="16dp"
                 android:paddingTop="8dp"
                 android:paddingRight="16dp"
                 android:paddingBottom="8dp"
-                android:layout_marginBottom="6dp">
+                android:layout_marginBottom="6dp"
+                android:clickable="true"
+                android:focusable="true">
 
                 <LinearLayout
-                    android:layout_width="match_parent"
+                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical">
+                    android:layout_weight="1"
+                    android:orientation="vertical">
 
                     <TextView
-                        android:layout_width="0dp"
+                        android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
                         android:text="MTU туннеля"
                         android:textColor="?attr/novaTextTitle"
                         android:textSize="16sp"
@@ -418,31 +429,22 @@
 
                     <TextView
                         android:id="@+id/tv_tunnel_mtu_value"
-                        android:layout_width="wrap_content"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginStart="12dp"
+                        android:layout_marginTop="3dp"
                         android:text="1280"
-                        android:textColor="?attr/novaTextTitle"
-                        android:textSize="16sp"
-                        android:textStyle="bold" />
+                        android:textColor="?attr/novaTextHint"
+                        android:textSize="12sp" />
                 </LinearLayout>
 
-                <SeekBar
-                    android:id="@+id/sb_tunnel_mtu"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
-                    android:progressTint="?attr/novaIconTint"
-                    android:thumbTint="?attr/novaIconTint" />
-
                 <TextView
-                    android:id="@+id/tv_tunnel_mtu_summary"
-                    android:layout_width="match_parent"
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="3dp"
-                    android:text="Размер пакета внутри туннеля"
-                    android:textColor="?attr/novaTextHint"
-                    android:textSize="12sp" />
+                    android:layout_marginStart="12dp"
+                    android:text="›"
+                    android:textColor="?attr/novaTextTitle"
+                    android:textSize="24sp"
+                    android:textStyle="bold" />
             </LinearLayout>
 
             <LinearLayout
@@ -1055,7 +1057,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="3dp"
-                        android:text="Изображение, анимация или чистый фон"
+                        android:text="Фактура оформления, анимация или чистый фон"
                         android:textColor="?attr/novaTextHint"
                         android:textSize="12sp" />
                 </LinearLayout>
@@ -1230,14 +1232,25 @@
                 android:orientation="vertical"
                 android:layout_marginBottom="6dp">
 
+                <!--
+                    Значок слева и по теме, как у всех остальных строк.
+
+                    Здесь стоял `drawableEnd="@drawable/ic_update_manual"` без
+                    `drawableTint`, а сам файл — единственный значок в настройках с
+                    зашитыми цветами (`#13A10E` и `#7EEA87`). Получалось два отличия
+                    разом: зелёная стрелка, не менявшаяся ни с одной из десяти тем, и
+                    значок справа там, где у соседей он слева. Строка читалась как
+                    чужая кнопка, а не как пункт списка (I21).
+                -->
                 <TextView
                     android:id="@+id/row_manual_update_check"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:background="?attr/novaCardBackground"
                     android:clickable="true"
-                    android:drawableEnd="@drawable/ic_update_manual"
-                    android:drawablePadding="12dp"
+                    android:drawableStart="@drawable/ic_nova_reconnect"
+                    android:drawablePadding="14dp"
+                    android:drawableTint="?attr/novaIconTint"
                     android:focusable="true"
                     android:gravity="center_vertical"
                     android:minHeight="64dp"
@@ -1515,21 +1528,43 @@
         </LinearLayout>
     </androidx.core.widget.NestedScrollView>
 
-    <TextView
+    <!--
+        Подвал: одна строка всегда, размер подгоняется под ширину.
+
+        Он переносился на две строки ровно там, где шрифт шире Roboto, — на темах
+        Diablo II и Path of Exile (засечки) и на Matrix (моноширинный). Двухстрочный
+        подвал съедал полосу снизу и ломал отбивку у последней карточки.
+
+        `autoSizeTextType` уменьшает кегль, пока строка не влезет: от 10sp до 14sp
+        шагом в 1sp. Вместе с `maxLines=1` это и значит «никогда не переносить»:
+        сузиться есть куда, а переноситься уже нечему.
+
+        Подпись сидит ниже середины подложки, а сама подложка — ниже по экрану.
+        Поле снизу было 20dp, и подвал висел заметно выше края; теперь 8dp, а
+        отбивка внутри несимметрична (сверху 11dp, снизу 4dp), поэтому за
+        подписью опускается и нижняя граница подложки. Ниже 8dp опускать нельзя:
+        `NovaTheme.applyEdgeToEdge` уже добавляет отступ системной полосы, но
+        совсем прижатая к нему подложка читается как обрезанная.
+    -->
+    <androidx.appcompat.widget.AppCompatTextView
         android:id="@+id/tv_footer"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:minHeight="30dp"
         android:background="@drawable/bg_liquid_glass_header"
         android:textColor="?attr/novaTextTitle"
-        android:textSize="14sp"
+        android:maxLines="1"
+        app:autoSizeTextType="uniform"
+        app:autoSizeMinTextSize="10sp"
+        app:autoSizeMaxTextSize="14sp"
+        app:autoSizeStepGranularity="1sp"
         android:gravity="center"
         android:includeFontPadding="false"
         android:paddingLeft="16dp"
-        android:paddingTop="6dp"
+        android:paddingTop="11dp"
         android:paddingRight="16dp"
-        android:paddingBottom="6dp"
-        android:layout_marginTop="6dp"
-        android:layout_marginBottom="12dp"/>
+        android:paddingBottom="4dp"
+        android:layout_marginTop="10dp"
+        android:layout_marginBottom="8dp"/>
 
 </LinearLayout>

@@ -150,6 +150,26 @@
         список стран для Proton. Высота та же, что у основной кнопки — владелец
         попросил одинаковые; отличается только шириной, потому что подписи короче.
     -->
+    <!--
+        Чип на экране «Оформление».
+
+        Тот же вид, что у выбора региона, но крупнее: там чипов шесть и они стоят
+        под большой кнопкой, а здесь их двадцать семь подряд, и в размере главного
+        экрана они читались как мелкая сыпь. Высота 44dp — тот же размер пальца,
+        что у строки настроек; радиус снова равен половине высоты, иначе форма
+        перестаёт быть овальной.
+    -->
+    <style name="NovaAppearanceChip" parent="NovaMainRegionChip">
+        <item name="android:layout_height">104dp</item>
+        <item name="android:layout_marginEnd">10dp</item>
+        <item name="android:layout_marginBottom">10dp</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:paddingStart">26dp</item>
+        <item name="android:paddingEnd">26dp</item>
+        <item name="android:textSize">18sp</item>
+        <item name="android:background">@drawable/bg_appearance_chip</item>
+    </style>
+
     <style name="NovaSubRegionChip" parent="NovaMainRegionChip">
         <item name="android:layout_marginEnd">6dp</item>
         <item name="android:minWidth">52dp</item>

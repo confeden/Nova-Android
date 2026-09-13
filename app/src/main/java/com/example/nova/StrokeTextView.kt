@@ -83,7 +83,47 @@ class StrokeTextView @JvmOverloads constructor(
         invalidate()
     }
 
+    /**
+     * Идёт ли прямо сейчас отрисовка этого вида.
+     *
+     * Дефект, который это чинит, стоил главному экрану 74 % главного потока на
+     * **неподвижном** экране. Проход обводки переключает цвет через
+     * `super.setTextColor`, потому что `TextView.onDraw` всё равно берёт цвет из
+     * `mCurTextColor` и перетирает краску. Но `setTextColor` в конце зовёт
+     * `invalidate()` — прямо из `onDraw`. Кадр просил следующий кадр, тот снова
+     * себя, и так без остановки: замерено `dumpsys gfxinfo` — 606 кадров за 25 с
+     * (ровно 24 к/с), 99 % с задержкой, медиана 38 мс, «Slow UI thread» на каждом.
+     * Дорого это потому, что вид живёт в программном слое (`BlurMaskFilter` на
+     * аппаратном холсте не работает), и каждый круг — это заново отрисованный
+     * растр во весь экран с двумя теневыми слоями.
+     *
+     * На экране настроек `StrokeTextView` нет вовсе, и там 0 кадров за 20 с при
+     * 0 % CPU — это и подтвердило, что причина в самом виде, а не в приложении.
+     */
+    private var drawing = false
+
+    /**
+     * Гасит перерисовку, которую вызвал наш же `setTextColor` внутри `onDraw`.
+     *
+     * Снаружи всё работает как прежде: любой `invalidate` из установщиков
+     * ([setStroke], [setGlow] и соседи) проходит, потому что рисование в этот
+     * момент не идёт.
+     */
+    override fun invalidate() {
+        if (drawing) return
+        super.invalidate()
+    }
+
     override fun onDraw(canvas: Canvas) {
+        drawing = true
+        try {
+            drawLayers(canvas)
+        } finally {
+            drawing = false
+        }
+    }
+
+    private fun drawLayers(canvas: Canvas) {
         if (pillEnabled) {
             if (pillOvalGlow) {
                 drawLineHalo(canvas)

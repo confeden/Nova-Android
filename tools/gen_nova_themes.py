@@ -19,6 +19,7 @@ XML-ресурсов, отличающийся только цветами: фо
 Файлы, написанные руками (`attrs_nova_theme.xml`, `themes.xml`), не трогает.
 """
 import io
+import math
 import os
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -27,17 +28,30 @@ RES = os.path.join(ROOT, "app", "src", "main", "res")
 # Порядок здесь — порядок в списке выбора на экране. Он же порядок в
 # NovaTheme.ORDER: два списка сверяются тестом, а не глазами.
 THEMES = [
+    # Aurora mint — тема по умолчанию, и палитра у неё взята с дотемного экрана
+    # 1.32.0, а не придумана заново.
+    #
+    # Первая её версия светила мятой `#2FD98E` поверх фиолетово-чёрного фона и
+    # уходила в почти белый `#B8F0D8` в заголовках групп: на глаз это неон, а не
+    # то спокойное оформление, которым приложение выглядело до тем. Прежние
+    # значения никуда не делись — они лежат в `values/colors.xml` как «liquid»
+    # палитра и до сих пор стоят литералами на главном экране:
+    # фон `#090817/#120D27/#1B1238`, изумруд `#50C878` у IP и версии,
+    # сиреневая обводка карточки `#40A88DFF`. Сюда возвращены именно они.
+    #
+    # Изумруд и мята — это насыщенность, а не оттенок: `#2FD98E` — S 78 %,
+    # `#50C878` — S 60 % при той же светлоте. Отсюда и «менее неоново».
     dict(
         key="aurora", title="Aurora mint",
-        bg=("#06051A", "#0E0B2E", "#160F3F"),
-        accent="#2FD98E", accent_dim="#2E2FD98E", accent_on="#06051A",
-        card_fill="#0BFFFFFF", card_stroke="#17FFFFFF", card_radius="14dp", card_stroke_w="1dp",
+        bg=("#090817", "#120D27", "#1B1238"),
+        accent="#50C878", accent_dim="#2E50C878", accent_on="#090817",
+        card_fill="#0BFFFFFF", card_stroke="#1FA88DFF", card_radius="14dp", card_stroke_w="1dp",
         sep="#12FFFFFF",
-        group_from="#2FD98E", group_to="#B8F0D8",
+        group_from="#50C878", group_to="#9FD9BC",
         t_title="#EEF0F8", t_value="#A8ADD4", t_hint="#7A7FA8",
-        switch_on="#2FD98E", switch_off="#2EFFFFFF", thumb_on="#FFFFFF", thumb_off="#B8BED0",
-        icon="#B32FD98E",
-        field_fill="#0BFFFFFF", field_stroke="#14FFFFFF",
+        switch_on="#50C878", switch_off="#2EFFFFFF", thumb_on="#FFFFFF", thumb_off="#B8BED0",
+        icon="#B350C878",
+        field_fill="#0BFFFFFF", field_stroke="#18A88DFF",
     ),
     dict(
         key="dnsai", title="DNS-AI",
@@ -158,6 +172,56 @@ THEMES = [
         icon="#9FB4C4",
         field_fill="#0FD9F3FE", field_stroke="#1FD9F3FE",
     ),
+    # Matrix — единственная тема, которая изображает не палитру, а устройство:
+    # люминофорный терминал.
+    #
+    # Отсюда три отличия от всех остальных. Фон — настоящий чёрный с зеленоватым
+    # подсветом снизу, а не тёмно-серый: у ЭЛТ невыведенный пиксель не светится
+    # вовсе. Углы прямые (`card_radius` 2dp): скруглений у текстового терминала
+    # нет. Акцент — `#00FF41`, тот самый люминофор P1; он ярче, чем допустимо в
+    # любой другой теме, и здесь это цель, а не недосмотр.
+    #
+    # Шрифт у этой темы моноширинный, но задаётся он не здесь: тема — это цвета и
+    # фигуры, а начертание ставит `NovaFontHelper` по признаку `monospace` в
+    # `NovaTheme.ORDER`.
+    dict(
+        key="matrix", title="Matrix",
+        bg=("#000000", "#010703", "#031008"),
+        accent="#00FF41", accent_dim="#2E00FF41", accent_on="#001204",
+        card_fill="#0A1A0E",
+        card_stroke="#2600FF41", card_radius="0dp", card_stroke_w="1dp",
+        field_radius="0dp", btn_radius="0dp", dialog_radius="0dp",
+        sep="#1A00FF41",
+        group_from="#00FF41", group_to="#9DFFB8",
+        t_title="#8FFFA8", t_value="#41C267", t_hint="#2E8A49",
+        switch_on="#00FF41", switch_off="#16301E", thumb_on="#001204", thumb_off="#4E7A5B",
+        icon="#B300FF41",
+        field_fill="#07120A", field_stroke="#2200FF41",
+    ),
+    # Diablo II — единственная тема, у которой кнопка не «прямоугольник с
+    # обводкой», а нарисованная вещь: каменная плита в золотой филиграни с
+    # самоцветом на каждом торце. Поэтому у неё стоит `button_style`, и
+    # `dialog_button` для неё идёт другой веткой.
+    #
+    # Растра по-прежнему ноль: плита — это `layer-list` из четырёх слоёв
+    # (тёмная рамка, золотая филигрань, градиент камня, два самоцвета-овала),
+    # то есть полторы сотни байт XML вместо девяти PNG на плотность.
+    dict(
+        key="diablo2", title="Diablo II",
+        bg=("#0B0907", "#100D0A", "#15110C"),
+        accent="#B79A5B", accent_dim="#2EB79A5B", accent_on="#EDE4CC",
+        card_fill=("#302C26", "#1E1B17"),
+        card_stroke="#8B7343", card_radius="2dp", card_stroke_w="1dp",
+        sep="#2E8B7343",
+        group_from="#E4D3A0", group_to="#8B7343",
+        t_title="#D8D2C0", t_value="#9A9384", t_hint="#6E6A5E",
+        # Красный на включённом переключателе — тот же приём, что у Path of Exile 1:
+        # в обеих играх «активно» показывают кровью, а не золотом.
+        switch_on="#8E1B1B", switch_off="#2A2620", thumb_on="#E8DCC0", thumb_off="#9A9384",
+        icon="#BFB79A5B",
+        field_fill="#1A1712", field_stroke="#6E5A33",
+        button_style="diablo2", card_style="diablo2",
+    ),
 ]
 
 HEAD = '<?xml version="1.0" encoding="utf-8"?>\n'
@@ -216,6 +280,124 @@ def fill(t):
     )
 
 
+def diablo_card(t):
+    """Подложка строки Diablo II: панель игрового окна, а не прямоугольник.
+
+    В самой игре любая панель — это тёмное поле в кованой раме: снаружи чёрный
+    кант, за ним золотая полоса с бликом сверху и тенью снизу, за ней тонкая
+    тёмная линия, и только потом поле. Углы отмечены гвоздями-накладками.
+
+    Почему рама собрана из колец и полос, а не из вложенных прямоугольников.
+    Раньше каждый слой заливался целиком, и верхний просто закрывал нижний. Для
+    глаза разницы нет — видна только рамка, — но каждый такой слой непрозрачен по
+    всей площади карточки, и фактура поверхности (она лежит в фоне окна) не
+    доходила до поля вообще. Теперь кант и внутренняя линия — это `<stroke>` без
+    заливки, а филигрань — четыре полосы по краям: середину карточки не трогает
+    никто, и сквозь полупрозрачное поле видно фактуру.
+
+    Полосы обходятся `android:gravity` у `<item>`: у `<shape>` нет собственного
+    размера, поэтому LayerDrawable сам дотягивает полосу по второй оси
+    (`resolveGravity` дописывает `FILL_*`, когда размер не задан). Светлая полоса
+    сверху и тёмная снизу — это и есть кованый скос; боковые несут переход между
+    ними. Порядок важен: боковые идут первыми, верхняя и нижняя кладутся поверх,
+    поэтому углы достаются им.
+
+    Всё это по-прежнему без растра: девять `<shape>` на строку.
+
+    Состояния фокуса и нажатия идут первыми в `<selector>`, как у обычной
+    подложки: без явной рамки на телевизоре непонятно, на чём стоишь.
+    """
+    stops = card_fill_stops(t)
+    field_top = stops[0]
+    field_bottom = stops[-1]
+
+    stud = """                    <item android:width="7dp" android:height="7dp"
+                        android:gravity="%s" android:left="2dp" android:top="2dp"
+                        android:right="2dp" android:bottom="2dp">
+                        <shape android:shape="rectangle">
+                            <solid android:color="#D8BC72" />
+                            <stroke android:width="1dp" android:color="#4A3C1E" />
+                        </shape>
+                    </item>
+"""
+    studs = "".join(
+        stud % g
+        for g in ("top|left", "top|right", "bottom|left", "bottom|right")
+    )
+
+    # Боковая полоса филиграни: по ней идёт весь переход от блика к тени.
+    side = """                    <item android:width="3dp" android:gravity="%s"
+                        android:left="1dp" android:top="1dp"
+                        android:right="1dp" android:bottom="1dp">
+                        <shape android:shape="rectangle">
+                            <gradient android:angle="270"
+                                android:startColor="#D3B570" android:centerColor="#8B7343"
+                                android:endColor="#53421F" />
+                        </shape>
+                    </item>
+"""
+    # Верхняя и нижняя — сплошные: на трёх точках высоты градиент не читается,
+    # а блик сверху и тень снизу читаются сразу.
+    cap = """                    <item android:height="3dp" android:gravity="%s"
+                        android:left="1dp" android:top="1dp"
+                        android:right="1dp" android:bottom="1dp">
+                        <shape android:shape="rectangle">
+                            <solid android:color="%s" />
+                        </shape>
+                    </item>
+"""
+
+    return HEAD + WARN + ("""<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="?attr/novaFocusFill">
+    <item>
+        <selector>
+            <item android:state_focused="true">
+                <shape android:shape="rectangle">
+                    <solid android:color="?attr/novaFocusFill" />
+                    <stroke android:width="3dp" android:color="?attr/novaFocusStroke" />
+                </shape>
+            </item>
+            <item android:state_pressed="true">
+                <shape android:shape="rectangle">
+                    <solid android:color="?attr/novaFocusFill" />
+                    <stroke android:width="3dp" android:color="?attr/novaFocusStroke" />
+                </shape>
+            </item>
+            <item>
+                <layer-list>
+                    <item android:left="5dp" android:top="5dp"
+                        android:right="5dp" android:bottom="5dp">
+                        <shape android:shape="rectangle">
+                            <gradient android:angle="270"
+                                android:startColor="%s" android:endColor="%s" />
+                        </shape>
+                    </item>
+                    <item>
+                        <shape android:shape="rectangle">
+                            <solid android:color="@android:color/transparent" />
+                            <stroke android:width="1dp" android:color="#0A0806" />
+                        </shape>
+                    </item>
+%s%s%s%s                    <item android:left="4dp" android:top="4dp"
+                        android:right="4dp" android:bottom="4dp">
+                        <shape android:shape="rectangle">
+                            <solid android:color="@android:color/transparent" />
+                            <stroke android:width="1dp" android:color="#241D12" />
+                        </shape>
+                    </item>
+%s                </layer-list>
+            </item>
+        </selector>
+    </item>
+</ripple>
+""" % (
+        field_top, field_bottom,
+        side % "left", side % "right",
+        cap % ("top", "#D3B570"), cap % ("bottom", "#53421F"),
+        studs,
+    ))
+
+
 def card(t):
     """Подложка строки настроек.
 
@@ -224,18 +406,20 @@ def card(t):
     нельзя (дальтонизм, плохая матрица). Поэтому рамка вдвое толще обычной и
     подложка светлеет — как в исходном bg_settings_item.
     """
+    if t.get("card_style") == "diablo2":
+        return diablo_card(t)
     focus = (
         '            <item android:state_%s="true">\n'
         '                <shape android:shape="rectangle">\n'
-        '                    <solid android:color="@color/tv_focus_fill" />\n'
+        '                    <solid android:color="?attr/novaFocusFill" />\n'
         '                    <corners android:radius="%s" />\n'
-        '                    <stroke android:width="3dp" android:color="@color/tv_focus_stroke" />\n'
+        '                    <stroke android:width="3dp" android:color="?attr/novaFocusStroke" />\n'
         '                </shape>\n'
         '            </item>\n'
     )
     return HEAD + WARN + (
         '<ripple xmlns:android="http://schemas.android.com/apk/res/android"\n'
-        '    android:color="#20FFFFFF">\n'
+        '    android:color="?attr/novaFocusFill">\n'
         '    <item>\n'
         '        <selector>\n'
         + focus % ("focused", t["card_radius"])
@@ -254,23 +438,33 @@ def card(t):
 
 
 def field(t):
+    # Радиус поля, кнопки и диалога темы задают редко — 10dp и 16dp подходят
+    # девяти темам из двенадцати. Значение по умолчанию здесь, чтобы тема
+    # объявляла только то, чем отличается: Matrix — нулём, у терминала
+    # скруглений нет вовсе.
+    r = t.get("field_radius", "10dp")
+    # Радиус поля, кнопки и диалога темы задают редко: 10dp и 16dp подходят
+    # одиннадцати темам из двенадцати. Значение по умолчанию здесь, чтобы тема
+    # объявляла только то, чем отличается, — Matrix объявляет ноль: у терминала
+    # скруглений нет вовсе.
+    r = t.get("field_radius", "10dp")
     return HEAD + WARN + (
         '<selector xmlns:android="http://schemas.android.com/apk/res/android">\n'
         '    <item android:state_focused="true">\n'
         '        <shape android:shape="rectangle">\n'
-        '            <solid android:color="@color/tv_focus_fill" />\n'
-        '            <corners android:radius="10dp" />\n'
-        '            <stroke android:width="3dp" android:color="@color/tv_focus_stroke" />\n'
+        '            <solid android:color="?attr/novaFocusFill" />\n'
+        '            <corners android:radius="%s" />\n'
+        '            <stroke android:width="3dp" android:color="?attr/novaFocusStroke" />\n'
         '        </shape>\n'
         '    </item>\n'
         '    <item>\n'
         '        <shape android:shape="rectangle">\n'
         '            <solid android:color="%s" />\n'
-        '            <corners android:radius="10dp" />\n'
+        '            <corners android:radius="%s" />\n'
         '            <stroke android:width="1dp" android:color="%s" />\n'
         '        </shape>\n'
         '    </item>\n'
-        '</selector>\n' % (t["field_fill"], t["field_stroke"])
+        '</selector>\n' % (r, t["field_fill"], r, t["field_stroke"])
     )
 
 
@@ -281,18 +475,98 @@ def dialog(t):
     полупрозрачный (`#0BFFFFFF` и подобные), и диалог на таком фоне читался бы
     насквозь. Здесь нужен плотный цвет — берём средний стоп фона экрана.
     """
+    r = t.get("dialog_radius", "16dp")
     return HEAD + WARN + (
         '<shape xmlns:android="http://schemas.android.com/apk/res/android"\n'
         '    android:shape="rectangle">\n'
         '    <solid android:color="%s" />\n'
-        '    <corners android:radius="16dp" />\n'
+        '    <corners android:radius="%s" />\n'
         '    <stroke android:width="1dp" android:color="%s" />\n'
-        '</shape>\n' % (t["bg"][1], t["card_stroke"])
+        '</shape>\n' % (t["bg"][1], r, t["card_stroke"])
     )
+
+
+def diablo_button(t, primary):
+    """Кнопка Diablo II: каменная плита в золотой филиграни с самоцветами.
+
+    Слои снизу вверх: тёмный кант, золотая филигрань, сама плита градиентом
+    (сверху светлее — так падает свет в оригинальном меню) и два самоцвета по
+    торцам. `android:width`/`android:height`/`android:gravity` у `<item>` есть с
+    API 23, у нас minSdk 24.
+
+    Основная кнопка отличается не цветом надписи, а камнем: он теплее и светлее,
+    как подсвеченный пункт меню.
+
+    Шаблон здесь тройными кавычками, а не склейкой строк с `\\n`, как у соседей:
+    слоёв девять, и в склейке из них не видно ни формы, ни вложенности.
+    """
+    if primary:
+        top, mid, bot = "#7A7365", "#565046", "#3B372F"
+    else:
+        top, mid, bot = "#6E695E", "#4A463F", "#33302A"
+
+    gem = """            <item android:width="12dp" android:height="12dp"
+                android:gravity="center_vertical|%s" android:%s="3dp">
+                <shape android:shape="oval">
+                    <gradient android:type="radial" android:gradientRadius="7dp"
+                        android:startColor="#6C8CE8" android:endColor="#15237A" />
+                    <stroke android:width="1dp" android:color="#8B7343" />
+                </shape>
+            </item>
+"""
+
+    body = """<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="?attr/novaFocusFill">
+    <item>
+        <selector>
+            <item android:state_focused="true">
+                <shape android:shape="rectangle">
+                    <solid android:color="?attr/novaFocusFill" />
+                    <corners android:radius="2dp" />
+                    <stroke android:width="3dp" android:color="?attr/novaFocusStroke" />
+                </shape>
+            </item>
+            <item>
+                <layer-list>
+                    <item>
+                        <shape android:shape="rectangle">
+                            <solid android:color="#15110C" />
+                            <corners android:radius="2dp" />
+                        </shape>
+                    </item>
+                    <item android:left="1dp" android:top="1dp"
+                        android:right="1dp" android:bottom="1dp">
+                        <shape android:shape="rectangle">
+                            <gradient android:angle="270"
+                                android:startColor="#C2A461" android:endColor="#6B5528" />
+                            <corners android:radius="2dp" />
+                        </shape>
+                    </item>
+                    <item android:left="4dp" android:top="4dp"
+                        android:right="4dp" android:bottom="4dp">
+                        <shape android:shape="rectangle">
+                            <gradient android:angle="270"
+                                android:startColor="%s" android:centerColor="%s"
+                                android:endColor="%s" />
+                            <stroke android:width="1dp" android:color="#2A251C" />
+                        </shape>
+                    </item>
+%s%s                </layer-list>
+            </item>
+        </selector>
+    </item>
+</ripple>
+""" % (top, mid, bot, gem % ("left", "left"), gem % ("right", "right"))
+
+    return HEAD + WARN + body
 
 
 def dialog_button(t, primary):
     """Подложка кнопки диалога.
+
+    Тема может заменить её целиком: `button_style="diablo2"` отдаёт каменную
+    плиту из [diablo_button]. Ветка одна и здесь, чтобы места вызова
+    (`bg_nova_dialog_button_*`) не знали про исключения.
 
     Зачем она вообще. У платформенного `Theme.Material.Dialog.Alert` кнопки
     безрамочные, и весь их вид — это надпись цветом `colorAccent`. На тёмной
@@ -303,29 +577,33 @@ def dialog_button(t, primary):
     Состояние фокуса пульта повторяется здесь по той же причине, что и у
     подложки строки: без явной рамки на телевизоре непонятно, на чём стоишь.
     """
+    if t.get("button_style") == "diablo2":
+        return diablo_button(t, primary)
     fill = t["accent"] if primary else t["accent_dim"]
+    r = t.get("btn_radius", "10dp")
+    r = t.get("btn_radius", "10dp")
     return HEAD + WARN + (
         '<ripple xmlns:android="http://schemas.android.com/apk/res/android"\n'
-        '    android:color="#33FFFFFF">\n'
+        '    android:color="?attr/novaFocusFill">\n'
         '    <item>\n'
         '        <selector>\n'
         '            <item android:state_focused="true">\n'
         '                <shape android:shape="rectangle">\n'
-        '                    <solid android:color="@color/tv_focus_fill" />\n'
-        '                    <corners android:radius="10dp" />\n'
-        '                    <stroke android:width="3dp" android:color="@color/tv_focus_stroke" />\n'
+        '                    <solid android:color="?attr/novaFocusFill" />\n'
+        '                    <corners android:radius="%s" />\n'
+        '                    <stroke android:width="3dp" android:color="?attr/novaFocusStroke" />\n'
         '                </shape>\n'
         '            </item>\n'
         '            <item>\n'
         '                <shape android:shape="rectangle">\n'
         '                    <solid android:color="%s" />\n'
-        '                    <corners android:radius="10dp" />\n'
+        '                    <corners android:radius="%s" />\n'
         '                    <stroke android:width="1dp" android:color="%s" />\n'
         '                </shape>\n'
         '            </item>\n'
         '        </selector>\n'
         '    </item>\n'
-        '</ripple>\n' % (fill, t["accent"])
+        '</ripple>\n' % (r, fill, r, t["accent"])
     )
 
 
@@ -337,7 +615,85 @@ COLOR_KEYS = [
     ("switch_on", "switch_on"), ("switch_off", "switch_off"),
     ("thumb_on", "thumb_on"), ("thumb_off", "thumb_off"),
     ("icon", "icon_tint"), ("field_fill", "field_fill"), ("field_stroke", "field_stroke"),
+    # Выделение — фокус пульта, нажатие и свечение под пальцем. Раньше это был
+    # один общий `@color/tv_focus_*` на все темы, то есть зелёный `#32D74B`
+    # независимо от выбранного оформления: на золотой теме длинное нажатие
+    # подсвечивало строку зелёным. Значения считаются из акцента — см.
+    # `derive_focus`.
+    ("focus_fill", "focus_fill"), ("focus_stroke", "focus_stroke"),
 ]
+
+
+def veil(target, base, headroom=1.3, floor=0x0B):
+    """Переводит непрозрачную заливку панели в полупрозрачную вуаль того же вида.
+
+    Зачем. Фактуру поверхности (`NovaAppearanceDrawable`) кладёт на себя **фон
+    окна** — и только он. Всё, что нарисовано поверх непрозрачным, её закрывает.
+    Поэтому у «Charcoal birch» фактура видна везде (её панель — вуаль `#0BFFFFFF`),
+    а у тем со сплошной заливкой панели она пропадала ровно там, куда смотрит
+    человек: на карточках, полях и подвале.
+
+    Что делает. Ищет цвет `O` и альфу `a`, при которых `a*O + (1-a)*base` даёт
+    ровно прежний непрозрачный цвет. Тогда тема не меняется ни на один пиксель
+    там, где фактура выключена, и проступает сквозь панель там, где включена.
+    Опора `base` — средний стоп фона экрана: панели лежат в середине экрана.
+
+    Почему альфа минимальная. Чем она меньше, тем больше фактуры доходит до глаза
+    (её вклад умножается на `1-a`). Минимум задан гаммой: при слишком малой альфе
+    `O` вылезает за 255. `headroom` отодвигает от этой стенки, `floor` не даёт
+    опуститься ниже вуали Charcoal — ниже уже не панель, а её отсутствие.
+
+    Тема, которая объявила заливку полупрозрачной сама, сюда не попадает: её
+    значение — решение автора темы, а не недосмотр.
+    """
+    if len(target.lstrip("#")) != 6:
+        return target
+    tc = [int(target.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4)]
+    bc = [int(base.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4)]
+    need = 0.0
+    for t, b in zip(tc, bc):
+        if t > b:
+            need = max(need, (t - b) / float(255 - b) if b < 255 else 1.0)
+        elif t < b:
+            need = max(need, (b - t) / float(b) if b > 0 else 1.0)
+    alpha = max(floor, int(math.ceil(min(1.0, need * headroom) * 255)))
+    a = alpha / 255.0
+    out = []
+    for t, b in zip(tc, bc):
+        out.append(int(round(min(255.0, max(0.0, (t - (1 - a) * b) / a)))))
+    return "#%02X%02X%02X%02X" % (alpha, out[0], out[1], out[2])
+
+
+def derive_veils(t):
+    """Делает полупрозрачными все заливки панелей темы.
+
+    Обводки, разделители и переключатели не трогаются: это не панели, а линии и
+    органы управления, и сквозь них смотреть нечего. Фон диалога — тоже: он лежит
+    в своём окне, и прозрачность показала бы не фактуру, а список под диалогом
+    (см. [dialog]).
+    """
+    base = t["bg"][1]
+    fill = t["card_fill"]
+    if isinstance(fill, str):
+        t["card_fill"] = veil(fill, base)
+    else:
+        t["card_fill"] = tuple(veil(stop, base) for stop in fill)
+    t["field_fill"] = veil(t["field_fill"], base)
+    return t
+
+
+def derive_focus(t):
+    """Дописывает теме цвета выделения, если она их не задала явно.
+
+    Заливка — акцент на 20 %, обводка — сам акцент. Отдельными ключами, а не
+    формулой в шаблоне: тема, которой этот расчёт не идёт, сможет задать своё.
+    """
+    t.setdefault("focus_fill", "#33" + t["accent"].lstrip("#"))
+    t.setdefault("focus_stroke", t["accent"])
+    return t
+
+
+THEMES = [derive_veils(derive_focus(t)) for t in THEMES]
 
 
 def colors():
@@ -357,6 +713,7 @@ def colors():
 
 
 ATTR_MAP = [
+    ("novaFocusFill", "focus_fill"), ("novaFocusStroke", "focus_stroke"),
     ("novaAccent", "accent"), ("novaAccentDim", "accent_dim"), ("novaAccentOn", "accent_on"),
     ("novaSeparator", "separator"),
     ("novaTextGroupFrom", "group_from"), ("novaTextGroupTo", "group_to"),
@@ -445,16 +802,39 @@ def themes():
         # унаследованный. Поэтому оттенок перебивается своим цветом; `src_in`
         # сохраняет прозрачность фигуры, так что обводка и полупрозрачная
         # заливка остаются на месте. Проверено на Pixel 4a, Android 14.
-        out.append('        <item name="android:backgroundTint">@color/nova_%s_accent</item>\n' % key)
-        out.append('        <item name="android:backgroundTintMode">src_in</item>\n')
+        # Тема с собственной кнопкой (Diablo II) — исключение: `src_in` заливает
+        # весь `layer-list` одним цветом, и от каменной плиты с самоцветами
+        # остаётся золотой прямоугольник. Снять оттенок нельзя по той же причине,
+        # что и задать его через `@null`, — вернётся системный. Поэтому оттенок
+        # остаётся, но нейтральный: белый в режиме `multiply` — это тождество
+        # (белый × цвет = цвет), а атрибут задан, и системный оверлей перебит.
+        if t.get("button_style"):
+            out.append('        <item name="android:backgroundTint">@android:color/white</item>\n')
+            out.append('        <item name="android:backgroundTintMode">multiply</item>\n')
+        else:
+            out.append('        <item name="android:backgroundTint">@color/nova_%s_accent</item>\n' % key)
+            out.append('        <item name="android:backgroundTintMode">src_in</item>\n')
         out.append('        <item name="android:textColor">@color/nova_%s_accent</item>\n' % key)
         out.append('        <item name="android:textAllCaps">false</item>\n')
         out.append('        <item name="android:textSize">15sp</item>\n')
         out.append('        <item name="android:textStyle">bold</item>\n')
-        out.append('        <item name="android:minWidth">96dp</item>\n')
+        # Ширина кнопки — по её надписи, и начинается она с минимума.
+        #
+        # Здесь стояло `minWidth` 96dp и поля по 18dp, то есть три кнопки просили
+        # 3*96 + 2*8 = 312dp независимо от текста. На телефоне шириной 360dp полосе
+        # столько не достаётся, и `ButtonBarLayout` складывал кнопки в столбик:
+        # «Сохранить/Отмена/Убрать» у лицензии WARP+ ехали лесенкой.
+        #
+        # Разложить их обратно после первой раскладки нельзя: `ButtonBarLayout`
+        # распрямляется только тогда, когда ему **увеличили** ширину
+        # (`widthSize > mLastWidthSize`), а она не меняется. Значит, не сложиться
+        # надо с первого замера — отсюда узкий старт: поля по минимуму, а `minWidth`
+        # ровно в размер пальца (48dp), не больше. Свободное место возвращается уже
+        # в `NovaDialogs.growToFitRow`, которое знает настоящую ширину полосы.
+        out.append('        <item name="android:minWidth">48dp</item>\n')
         out.append('        <item name="android:minHeight">44dp</item>\n')
-        out.append('        <item name="android:paddingLeft">18dp</item>\n')
-        out.append('        <item name="android:paddingRight">18dp</item>\n')
+        out.append('        <item name="android:paddingLeft">10dp</item>\n')
+        out.append('        <item name="android:paddingRight">10dp</item>\n')
         # Вертикального поля у кнопки диалога быть не должно: `ButtonBarLayout`
         # с `gravity="bottom"` вычитает его дважды и срезает верх подложки на
         # столько же (см. NovaDialogs.apply). Отбивку снизу даёт padding полосы.

@@ -10,7 +10,6 @@ import android.view.MotionEvent
 import android.view.View
 import kotlin.math.sin
 import kotlin.math.sqrt
-import kotlin.random.Random
 
 class NovaNetworkBackgroundView @JvmOverloads constructor(
     context: Context,
@@ -28,7 +27,6 @@ class NovaNetworkBackgroundView @JvmOverloads constructor(
     )
 
     private val supported = MainBackgroundPolicy.isAnimationSupported(context)
-    private val random = Random(0x4E4F5641)
     private val nodes = ArrayList<Node>(36)
     private val nodePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
@@ -40,12 +38,75 @@ class NovaNetworkBackgroundView @JvmOverloads constructor(
     }
     private val trianglePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
+        // Цвет обязан стоять уже здесь: в отрисовке меняется только альфа, а
+        // `applyAccent` может не прийти вовсе (тема без словаря). Без этой строки
+        // треугольники рисовались бы чёрным по умолчанию `Paint`.
+        color = Color.rgb(110, 72, 196)
     }
     private val trianglePath = Path()
     private var frameScheduled = false
     private var lastFrameMs = 0L
     private var phaseSeconds = 0f
     private val targetFrameDelayMs = 42L
+
+    /** Заливка градиентом поверх фона. Шейдер пересобирается на размер и на смену темы. */
+    private val washPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+
+    /** Акцент темы. Пока не задан — прежний сиреневый, чтобы вид работал и без темы. */
+    private var accentR = 163
+    private var accentG = 113
+    private var accentB = 247
+
+    /**
+     * Красит анимацию и её градиент акцентом темы.
+     *
+     * Оттенок принадлежит **этому** виду, а не экрану, и в этом весь смысл: вид
+     * показан ровно тогда, когда фоновая анимация включена, поэтому градиент
+     * появляется и исчезает вместе с ней и не требует отдельного признака.
+     *
+     * Красным/жёлтым здесь ничего не значится, поэтому из темы берётся один цвет:
+     * линии идут самим акцентом, треугольники — им же, притушенным до двух третей
+     * (иначе заливка спорит с линиями), узлы — почти белые с его примесью.
+     */
+    fun applyAccent(accent: Int) {
+        val r = Color.red(accent)
+        val g = Color.green(accent)
+        val b = Color.blue(accent)
+        if (r == accentR && g == accentG && b == accentB) return
+        accentR = r
+        accentG = g
+        accentB = b
+        trianglePaint.color = Color.rgb((r * 0.66f).toInt(), (g * 0.66f).toInt(), (b * 0.66f).toInt())
+        nodePaint.color = Color.rgb(
+            (230 * 0.78f + r * 0.22f).toInt(),
+            (237 * 0.78f + g * 0.22f).toInt(),
+            (243 * 0.78f + b * 0.22f).toInt(),
+        )
+        rebuildWash(width, height)
+        invalidate()
+    }
+
+    /**
+     * Вертикальный градиент акцента: заметный вверху, пустой к середине, намёк внизу.
+     *
+     * Прозрачности выбраны так, чтобы под ним читался белый текст: 0x30 — это 19 %,
+     * на тёмной подложке экрана это оттенок, а не пелена.
+     */
+    private fun rebuildWash(w: Int, h: Int) {
+        if (w <= 0 || h <= 0) {
+            washPaint.shader = null
+            return
+        }
+        val strong = Color.argb(0x30, accentR, accentG, accentB)
+        val faint = Color.argb(0x12, accentR, accentG, accentB)
+        val clear = Color.argb(0x00, accentR, accentG, accentB)
+        washPaint.shader = android.graphics.LinearGradient(
+            0f, 0f, 0f, h.toFloat(),
+            intArrayOf(strong, clear, faint),
+            floatArrayOf(0f, 0.52f, 1f),
+            android.graphics.Shader.TileMode.CLAMP,
+        )
+    }
 
     private val frameRunnable = object : Runnable {
         override fun run() {
@@ -66,9 +127,10 @@ class NovaNetworkBackgroundView @JvmOverloads constructor(
         isFocusable = false
         importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
         setWillNotDraw(false)
-        if (supported) {
-            setLayerType(LAYER_TYPE_HARDWARE, null)
-        }
+        // Аппаратного слоя здесь нет намеренно. Слой окупается на виде, который
+        // перерисовывают редко, а двигают часто; этот — наоборот, он меняется
+        // каждый кадр, и слой пришлось бы собирать заново во весь экран на каждом.
+        setLayerType(LAYER_TYPE_NONE, null)
     }
 
     fun startAnimation() {
@@ -107,10 +169,17 @@ class NovaNetworkBackgroundView @JvmOverloads constructor(
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         rebuildNodes(w, h)
+        rebuildWash(w, h)
     }
 
     override fun onDraw(canvas: Canvas) {
-        if (!supported || width <= 0 || height <= 0 || nodes.isEmpty()) return
+        if (!supported || width <= 0 || height <= 0) return
+        // Градиент рисуется первым и не зависит от узлов: он обязан быть на экране
+        // и в тот кадр, когда узлы ещё не построены.
+        if (washPaint.shader != null) {
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), washPaint)
+        }
+        if (nodes.isEmpty()) return
         drawTriangles(canvas)
         drawLinks(canvas)
         for (node in nodes) {
@@ -120,21 +189,24 @@ class NovaNetworkBackgroundView @JvmOverloads constructor(
         }
     }
 
+    /**
+     * Раскладка берётся из [NovaConstellation] — общая с волнами подключения.
+     *
+     * До этого у каждого вида было своё зерно и своё число точек, и человек видел
+     * это прямо: волны зажигали одно созвездие, а подключившись, он оказывался
+     * перед другим. Теперь оба вида показывают одни и те же точки.
+     */
     private fun rebuildNodes(w: Int, h: Int) {
         nodes.clear()
         if (!supported || w <= 0 || h <= 0) return
-        val density = resources.displayMetrics.density
-        val count = if (w < h) 30 else 38
-        repeat(count) {
-            val speed = (0.09f + random.nextFloat() * 0.18f) * density
-            val angle = random.nextFloat() * (Math.PI.toFloat() * 2f)
+        NovaConstellation.build(w, h, resources.displayMetrics.density).forEach { point ->
             nodes += Node(
-                x = random.nextFloat() * w,
-                y = random.nextFloat() * h,
-                vx = kotlin.math.cos(angle) * speed,
-                vy = kotlin.math.sin(angle) * speed,
-                radius = (0.85f + random.nextFloat() * 1.55f) * density,
-                phase = random.nextFloat() * Math.PI.toFloat() * 2f,
+                x = point.x,
+                y = point.y,
+                vx = point.vx,
+                vy = point.vy,
+                radius = point.radius,
+                phase = point.phase,
             )
         }
     }
@@ -177,7 +249,7 @@ class NovaNetworkBackgroundView @JvmOverloads constructor(
                 val dist = sqrt(distSq)
                 val pulse = (sin(phaseSeconds * 1.25f + a.phase + b.phase) + 1f) * 0.5f
                 val alpha = ((1f - dist / maxDist) * (48f + pulse * 90f)).toInt().coerceIn(0, 138)
-                linePaint.color = Color.argb(alpha, 163, 113, 247)
+                linePaint.color = Color.argb(alpha, accentR, accentG, accentB)
                 canvas.drawLine(a.x, a.y, b.x, b.y, linePaint)
             }
         }
@@ -219,7 +291,7 @@ class NovaNetworkBackgroundView @JvmOverloads constructor(
             val pulse = (sin(phaseSeconds * 0.72f + a.phase * 0.9f) + 1f) * 0.5f
             val alpha = (proximity * (10f + pulse * 34f)).toInt().coerceIn(0, 44)
             if (alpha <= 2) continue
-            trianglePaint.color = Color.argb(alpha, 110, 72, 196)
+            trianglePaint.alpha = alpha
             trianglePath.reset()
             trianglePath.moveTo(a.x, a.y)
             trianglePath.lineTo(b.x, b.y)

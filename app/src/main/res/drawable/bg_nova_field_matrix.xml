@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Сгенерировано tools/gen_nova_themes.py. Руками не править:
+     правка переживёт ровно до следующего запуска генератора. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true">
+        <shape android:shape="rectangle">
+            <solid android:color="?attr/novaFocusFill" />
+            <corners android:radius="0dp" />
+            <stroke android:width="3dp" android:color="?attr/novaFocusStroke" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#0F67C27A" />
+            <corners android:radius="0dp" />
+            <stroke android:width="1dp" android:color="#2200FF41" />
+        </shape>
+    </item>
+</selector>

@@ -10,10 +10,38 @@ import android.graphics.Shader
 import android.os.Build
 import android.util.AttributeSet
 import android.view.View
+import kotlin.math.abs
 import kotlin.math.hypot
-import kotlin.math.pow
-import kotlin.random.Random
+import kotlin.math.max
+import kotlin.math.min
 
+/**
+ * Волны подключения: круги, расходящиеся из кнопки, и созвездие, которое они зажигают.
+ *
+ * ## Три решения владельца, и что каждое значит в коде
+ *
+ * **Круги, но из центра кнопки.** Форму владелец оставил круглой; что изменилось —
+ * это точка отсчёта: она приходит снаружи ([setPulseOrigin]) от самой кнопки
+ * «ПОДКЛЮЧИТЬ», а не считается долей высоты экрана. Прежние `высота * 0.43`
+ * совпадали с кнопкой ровно на одном размере экрана.
+ *
+ * **Свечение — след, а не повторённый контур.** Волна рисуется **одним** штрихом,
+ * поперёк которого лежит радиальный градиент: снаружи обрыв в прозрачность, на
+ * фронте максимум, внутрь уходит длинный затухающий хвост. Первая версия
+ * изображала след тремя контурами подряд — и читалась ровно так, как была сделана:
+ * три отдельные линии. Градиент по краске не стоит ни размытия, ни слоя.
+ *
+ * **Созвездие — то же самое, что останется после подключения.** Точки берутся из
+ * [NovaConstellation], откуда их берёт и фоновая анимация: раньше у каждого вида
+ * была своя раскладка, и созвездие, зажжённое волнами, не совпадало с тем, которое
+ * человек видел, подключившись.
+ *
+ * ## Чем это платится
+ *
+ * Кадр — это три `drawCircle` и обход созвездия (30-38 точек, до 76 связей). Ни
+ * одного размытия, ни одного программного слоя; выделяется только шейдер волны.
+ * Кадры идут только в [Mode.CONNECTING] и только пока вид прикреплён.
+ */
 class TronRingsView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
@@ -41,54 +69,52 @@ class TronRingsView @JvmOverloads constructor(
     private var animatedPhase = 0f
     private var canvasWidth = 0f
     private var canvasHeight = 0f
-    private var centerX = 0f
-    private var centerY = 0f
-    private var maxRadius = 0f
     private var frameCallbackArmed = false
-    private var useYogurtIndigo = false
+
+    /** Показывать ли созвездие. Оно принадлежит режиму «анимация» у фона экрана. */
+    private var constellationEnabled = false
 
     private val lowEndDevice = run {
-        val am = context.getSystemService(ActivityManager::class.java)
-        val lowRam = am?.isLowRamDevice ?: false
-        lowRam || Build.VERSION.SDK_INT <= Build.VERSION_CODES.P || Runtime.getRuntime().availableProcessors() <= 4
+        val activityManager = context.getSystemService(ActivityManager::class.java)
+        val lowRam = activityManager?.isLowRamDevice == true
+        lowRam || Build.VERSION.SDK_INT <= Build.VERSION_CODES.P
     }
+
     private val density = context.resources.displayMetrics.density
 
-    private val ringRed = intArrayOf(112, 198, 112)
-    private val ringGreen = intArrayOf(228, 176, 228)
-    private val ringBlue = intArrayOf(255, 255, 255)
-    private val ringOffsets = if (lowEndDevice) {
-        floatArrayOf(0f, 0.50f)
-    } else {
-        floatArrayOf(0f, 0.25f, 0.50f, 0.75f)
-    }
-    private val cycleDurationMs = if (lowEndDevice) 8600f else 7200f
-    private val lowEndFrameDelayMs = 32L
-    private val baseWidthMax = 2.15f * density
-    private val baseWidthMin = 1.3f * density
-    private val glowWidthScale = 2.4f
+    /**
+     * Центр кнопки, из которой расходятся волны, и её половинные размеры.
+     *
+     * Размеры волна больше не повторяет — она круглая, — но признак «кнопку уже
+     * разложили» нужен по-прежнему, и хранится он здесь же. Пока центр не задали,
+     * берётся середина экрана: вид обязан что-то рисовать и до раскладки.
+     */
+    private var originX = 0f
+    private var originY = 0f
+    private var baseHalfW = 96f * density
+    private var baseHalfH = 26f * density
 
-    private val yogurtColors = intArrayOf(
-        Color.rgb(191, 177, 216),
-    )
-    private val yogurtRingOffsets = if (lowEndDevice) {
-        floatArrayOf(0f, 0.50f)
+    private var accentR = 112
+    private var accentG = 228
+    private var accentB = 255
+
+    /** Сколько волн в кадре и как они разнесены по фазе. */
+    private val ringOffsets = if (lowEndDevice) {
+        floatArrayOf(0f, 0.5f)
     } else {
-        floatArrayOf(0f, 0.25f, 0.50f, 0.75f)
+        floatArrayOf(0f, 0.34f, 0.67f)
     }
-    private val yogurtCycleDurationMs = if (lowEndDevice) 12740f else 11180f
-    private val yogurtEdgePower = 2.65f
-    private val yogurtRingAlpha = if (lowEndDevice) 0.15f else 0.19f
-    private val yogurtRingWidth = 5.5f * density
-    private val yogurtConstellationAlpha = if (lowEndDevice) 0.50f else 0.72f
+
+    /** Длина следа за фронтом волны. Он рисуется градиентом, а не повтором контура. */
+    private val trailWidth = (if (lowEndDevice) 34f else 48f) * density
+
+    private val cycleDurationMs = if (lowEndDevice) 9800f else 8200f
+    private val lowEndFrameDelayMs = 32L
 
     private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
-    }
-    private val yogurtRingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
     }
     private val constellationLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -97,6 +123,7 @@ class TronRingsView @JvmOverloads constructor(
     private val constellationStarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
     }
+
     private val stars = ArrayList<Star>(64)
     private val edges = ArrayList<Edge>(128)
 
@@ -109,17 +136,47 @@ class TronRingsView @JvmOverloads constructor(
                 animationStartNanos = now
             }
             val elapsedMs = (now - animationStartNanos) / 1_000_000f
-            val duration = if (useYogurtIndigo) yogurtCycleDurationMs else cycleDurationMs
-            animatedPhase = (elapsedMs / duration) % 1f
+            animatedPhase = (elapsedMs / cycleDurationMs) % 1f
             invalidate()
             scheduleFrame()
         }
     }
 
+    /**
+     * Откуда расходятся волны.
+     *
+     * Зовётся главным экраном по фактическим границам кнопки: считать их здесь
+     * значило бы завести вторую копию её размеров и разметки.
+     */
+    fun setPulseOrigin(centerX: Float, centerY: Float, halfWidth: Float, halfHeight: Float) {
+        if (halfWidth <= 0f || halfHeight <= 0f) return
+        if (originX == centerX && originY == centerY &&
+            baseHalfW == halfWidth && baseHalfH == halfHeight
+        ) {
+            return
+        }
+        originX = centerX
+        originY = centerY
+        baseHalfW = halfWidth
+        baseHalfH = halfHeight
+        if (mode == Mode.CONNECTING) invalidate()
+    }
+
+    /** Цвет волн и созвездия — акцент текущей темы. */
+    fun applyAccent(color: Int) {
+        val r = Color.red(color)
+        val g = Color.green(color)
+        val b = Color.blue(color)
+        if (r == accentR && g == accentG && b == accentB) return
+        accentR = r
+        accentG = g
+        accentB = b
+        if (mode == Mode.CONNECTING) invalidate()
+    }
+
     fun setYogurtIndigoEnabled(enabled: Boolean) {
-        if (useYogurtIndigo == enabled) return
-        useYogurtIndigo = enabled
-        updateGeometry(width, height)
+        if (constellationEnabled == enabled) return
+        constellationEnabled = enabled
         if (mode == Mode.CONNECTING) {
             animationStartNanos = 0L
             animatedPhase = 0f
@@ -132,11 +189,14 @@ class TronRingsView @JvmOverloads constructor(
         mode = value
         when (value) {
             Mode.CONNECTING -> {
-                setLayerType(if (lowEndDevice) LAYER_TYPE_NONE else LAYER_TYPE_HARDWARE, null)
+                // Аппаратный слой здесь вреден: вид перерисовывается каждый кадр,
+                // и слой пришлось бы каждый раз собирать заново во весь экран.
+                setLayerType(LAYER_TYPE_NONE, null)
                 animationStartNanos = 0L
                 animatedPhase = 0f
                 scheduleFrame()
             }
+
             Mode.STOPPED -> {
                 setLayerType(LAYER_TYPE_NONE, null)
                 animationStartNanos = 0L
@@ -170,171 +230,91 @@ class TronRingsView @JvmOverloads constructor(
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        updateGeometry(w, h)
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        if (mode != Mode.CONNECTING) return
-        if (canvasWidth <= 0f || canvasHeight <= 0f || maxRadius <= 0f) return
-
-        if (useYogurtIndigo) {
-            drawYogurtIndigo(canvas)
-            return
-        }
-
-        for (index in ringOffsets.indices) {
-            val offset = ringOffsets[index]
-            val progress = ((animatedPhase - offset) % 1f + 1f) % 1f
-            drawLegacyRing(canvas, progress, index)
-        }
-    }
-
-    private fun updateGeometry(w: Int, h: Int) {
         canvasWidth = w.toFloat()
         canvasHeight = h.toFloat()
-        centerX = canvasWidth / 2f
-        centerY = if (useYogurtIndigo) canvasHeight * 0.52f else canvasHeight * 0.43f
-        maxRadius = hypot(canvasWidth.toDouble(), canvasHeight.toDouble()).toFloat() * 1.1f
+        if (originX == 0f && originY == 0f) {
+            originX = canvasWidth / 2f
+            originY = canvasHeight * 0.5f
+        }
         rebuildConstellation(w, h)
     }
 
-    private fun drawLegacyRing(
-        canvas: Canvas,
-        progress: Float,
-        index: Int,
-    ) {
-        val radius = maxRadius * progress
-        val eased = 1f - progress
-        val alphaBase = ((eased * eased) * 128f + 16f).toInt().coerceIn(0, 255)
-        val red = ringRed[index % ringRed.size]
-        val green = ringGreen[index % ringGreen.size]
-        val blue = ringBlue[index % ringBlue.size]
-        val strokeFraction = progress * 0.2f
-        val baseWidth = (baseWidthMax - baseWidthMax * strokeFraction).coerceAtLeast(baseWidthMin)
-
-        if (!lowEndDevice) {
-            ringPaint.color = Color.argb((alphaBase * 0.28f).toInt().coerceIn(0, 255), red, green, blue)
-            ringPaint.strokeWidth = baseWidth * glowWidthScale
-            canvas.drawCircle(centerX, centerY, radius, ringPaint)
-        }
-
-        ringPaint.color = Color.argb(alphaBase, red, green, blue)
-        ringPaint.strokeWidth = baseWidth
-        canvas.drawCircle(centerX, centerY, radius, ringPaint)
+    override fun onDraw(canvas: Canvas) {
+        if (mode != Mode.CONNECTING || canvasWidth <= 0f || canvasHeight <= 0f) return
+        if (constellationEnabled) drawConstellation(canvas)
+        drawWaves(canvas)
     }
 
-    private fun drawYogurtIndigo(canvas: Canvas) {
-        drawYogurtRings(canvas)
-        drawConstellation(canvas)
+    /**
+     * Насколько далеко волне идти, чтобы уйти за любой угол экрана.
+     *
+     * Считается от контура кнопки, а не от точки: волна — это отодвинутый контур,
+     * и до угла ей остаётся меньше на половину кнопки.
+     */
+    private fun maxReach(): Float {
+        val dx = max(originX, canvasWidth - originX)
+        val dy = max(originY, canvasHeight - originY)
+        return hypot(dx.toDouble(), dy.toDouble()).toFloat()
     }
 
-    private fun drawYogurtRings(canvas: Canvas) {
-        val ringMaxRadius = yogurtMaxRadius()
-        for (index in yogurtRingOffsets.indices) {
-            val progress = ((animatedPhase - yogurtRingOffsets[index]) % 1f + 1f) % 1f
-            val radius = ringMaxRadius * progress
-            val fade = yogurtEdgeFade(radius, ringMaxRadius)
-            if (fade <= 0.001f) continue
-            val color = yogurtColors[index % yogurtColors.size]
-            val alpha = (255f * yogurtRingAlpha * fade).toInt().coerceIn(0, 255)
-            val outerRadius = (radius + yogurtRingWidth).coerceAtLeast(1f)
-            val gradient = RadialGradient(
-                centerX,
-                centerY,
-                outerRadius,
+    private fun drawWaves(canvas: Canvas) {
+        val reach = maxReach()
+        for (index in ringOffsets.indices) {
+            val progress = ((animatedPhase - ringOffsets[index]) % 1f + 1f) % 1f
+            if (progress <= 0.001f || progress >= 1f) continue
+            val radius = reach * progress
+            if (radius <= 1f) continue
+
+            // Яркость гаснет к краю экрана квадратично: у самой кнопки волна
+            // плотная, к углам от неё остаётся намёк.
+            val fade = (1f - progress) * (1f - progress)
+            val peak = (fade * 190f).toInt().coerceIn(0, 255)
+            if (peak <= 2) continue
+
+            // Свечение — один штрих с радиальным градиентом поперёк, а не
+            // несколько контуров подряд. Повторённые контуры и читались как
+            // повторённые контуры: три отдельные линии, а не след. Здесь фронт
+            // яркий, снаружи обрыв в прозрачность, а внутрь уходит длинный
+            // хвост — это и есть след от круга.
+            val tail = trailWidth
+            val ahead = tail * 0.22f
+            val outer = radius + ahead
+            val inner = (radius - tail).coerceAtLeast(0f)
+            val width = outer - inner
+            if (width <= 1f) continue
+
+            ringPaint.shader = RadialGradient(
+                originX,
+                originY,
+                outer,
                 intArrayOf(
-                    Color.TRANSPARENT,
-                    Color.argb((alpha * 0.14f).toInt().coerceIn(0, 255), Color.red(color), Color.green(color), Color.blue(color)),
-                    Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color)),
-                    Color.argb((alpha * 0.10f).toInt().coerceIn(0, 255), Color.red(color), Color.green(color), Color.blue(color)),
-                    Color.TRANSPARENT,
+                    Color.argb(0, accentR, accentG, accentB),
+                    Color.argb((peak * 0.18f).toInt().coerceIn(0, 255), accentR, accentG, accentB),
+                    Color.argb(peak, accentR, accentG, accentB),
+                    Color.argb(0, accentR, accentG, accentB),
                 ),
                 floatArrayOf(
-                    ((radius - yogurtRingWidth) / outerRadius).coerceIn(0f, 1f),
-                    ((radius - yogurtRingWidth * 0.26f) / outerRadius).coerceIn(0f, 1f),
-                    (radius / outerRadius).coerceIn(0f, 1f),
-                    ((radius + yogurtRingWidth * 0.26f) / outerRadius).coerceIn(0f, 1f),
+                    (inner / outer).coerceIn(0f, 1f),
+                    ((radius - tail * 0.45f) / outer).coerceIn(0f, 1f),
+                    (radius / outer).coerceIn(0f, 1f),
                     1f,
                 ),
                 Shader.TileMode.CLAMP,
             )
-            yogurtRingPaint.shader = gradient
-            yogurtRingPaint.strokeWidth = yogurtRingWidth
-            canvas.drawCircle(centerX, centerY, radius, yogurtRingPaint)
-            yogurtRingPaint.shader = null
+            // Штрих шириной во весь след: сама краска уже несёт и фронт, и хвост.
+            ringPaint.strokeWidth = width
+            canvas.drawCircle(originX, originY, (inner + outer) * 0.5f, ringPaint)
+            ringPaint.shader = null
         }
-    }
-
-    private fun drawConstellation(canvas: Canvas) {
-        for (edge in edges) {
-            val a = stars.getOrNull(edge.a) ?: continue
-            val b = stars.getOrNull(edge.b) ?: continue
-            val energy = yogurtWaveEnergy((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f)
-            val idleAlpha = 0f
-            val alpha = ((idleAlpha + energy * yogurtConstellationAlpha * 0.30f) * 255f)
-                .toInt()
-                .coerceIn(0, 92)
-            if (alpha <= 3) continue
-            constellationLinePaint.color = Color.argb(alpha, 191, 177, 216)
-            constellationLinePaint.strokeWidth = 0.75f * density + energy * 0.45f * density
-            canvas.drawLine(a.x, a.y, b.x, b.y, constellationLinePaint)
-        }
-
-        for (star in stars) {
-            val energy = yogurtWaveEnergy(star.x, star.y)
-            val idleAlpha = 0f
-            val alpha = ((idleAlpha + energy * yogurtConstellationAlpha * 0.50f) * 255f)
-                .toInt()
-                .coerceIn(0, 184)
-            constellationStarPaint.color = Color.argb(alpha, 191, 177, 216)
-            canvas.drawCircle(star.x, star.y, star.radius * (1f + energy * 1.5f), constellationStarPaint)
-        }
-    }
-
-    private fun yogurtWaveEnergy(x: Float, y: Float): Float {
-        val ringMaxRadius = yogurtMaxRadius()
-        var energy = 0f
-        val dy = (y - centerY) * 1.025f
-        val distance = hypot((x - centerX).toDouble(), dy.toDouble()).toFloat()
-        val waveWidth = yogurtRingWidth * 3.2f
-        for (offset in yogurtRingOffsets) {
-            val progress = ((animatedPhase - offset) % 1f + 1f) % 1f
-            val radius = ringMaxRadius * progress
-            val delta = kotlin.math.abs(distance - radius)
-            if (delta > waveWidth) continue
-            val local = (1f - delta / waveWidth).coerceIn(0f, 1f)
-            energy = maxOf(energy, local * local * (3f - 2f * local) * yogurtEdgeFade(radius, ringMaxRadius))
-        }
-        return energy
-    }
-
-    private fun yogurtEdgeFade(radius: Float, ringMaxRadius: Float): Float {
-        if (ringMaxRadius <= 0f) return 0f
-        val normalized = (radius / ringMaxRadius).coerceIn(0f, 1f)
-        val edgeStart = 0.44f
-        val edge = ((normalized - edgeStart) / (1f - edgeStart)).coerceIn(0f, 1f)
-        return (1f - edge).pow(yogurtEdgePower)
-    }
-
-    private fun yogurtMaxRadius(): Float {
-        return hypot(
-            maxOf(centerX, canvasWidth - centerX).toDouble(),
-            maxOf(centerY, canvasHeight - centerY).toDouble(),
-        ).toFloat() + 72f * density
     }
 
     private fun rebuildConstellation(w: Int, h: Int) {
         stars.clear()
         edges.clear()
         if (w <= 0 || h <= 0) return
-        val random = Random(0x594F4755)
-        val count = if (lowEndDevice) 36 else if (w < h) 44 else 62
-        repeat(count) {
-            stars += Star(
-                x = random.nextFloat() * w,
-                y = random.nextFloat() * h,
-                radius = (0.65f + random.nextFloat() * 1.35f) * density,
-            )
+        // Раскладка общая с фоновой анимацией — см. [NovaConstellation].
+        NovaConstellation.build(w, h, density).forEach { point ->
+            stars += Star(point.x, point.y, point.radius)
         }
         val maxDistance = minOf(170f * density, maxOf(118f * density, minOf(w, h) * 0.17f))
         for (i in stars.indices) {
@@ -354,6 +334,53 @@ class TronRingsView @JvmOverloads constructor(
         }
     }
 
+    private fun drawConstellation(canvas: Canvas) {
+        for (edge in edges) {
+            val a = stars.getOrNull(edge.a) ?: continue
+            val b = stars.getOrNull(edge.b) ?: continue
+            val energy = waveEnergy((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f)
+            val alpha = (energy * 92f).toInt().coerceIn(0, 92)
+            if (alpha <= 3) continue
+            constellationLinePaint.color = Color.argb(alpha, accentR, accentG, accentB)
+            constellationLinePaint.strokeWidth = 0.75f * density + energy * 0.45f * density
+            canvas.drawLine(a.x, a.y, b.x, b.y, constellationLinePaint)
+        }
+
+        for (star in stars) {
+            val energy = waveEnergy(star.x, star.y)
+            val alpha = (energy * 184f).toInt().coerceIn(0, 184)
+            if (alpha <= 3) continue
+            constellationStarPaint.color = Color.argb(alpha, accentR, accentG, accentB)
+            canvas.drawCircle(star.x, star.y, star.radius * (1f + energy * 1.5f), constellationStarPaint)
+        }
+    }
+
+    /**
+     * Расстояние от точки до центра волн.
+     *
+     * Волны снова круговые — так попросил владелец, — поэтому и подсветка
+     * созвездия считается по кругу: разойдись они формой, вспышки шли бы не по
+     * фронту, а рядом с ним.
+     */
+    private fun contourDistance(x: Float, y: Float): Float =
+        hypot((x - originX).toDouble(), (y - originY).toDouble()).toFloat()
+
+    private fun waveEnergy(x: Float, y: Float): Float {
+        val reach = maxReach()
+        val distance = contourDistance(x, y)
+        val waveWidth = 26f * density
+        var energy = 0f
+        for (offset in ringOffsets) {
+            val progress = ((animatedPhase - offset) % 1f + 1f) % 1f
+            if (progress <= 0f) continue
+            val delta = abs(distance - reach * progress)
+            if (delta > waveWidth) continue
+            val near = 1f - delta / waveWidth
+            energy = max(energy, near * near * (1f - progress))
+        }
+        return energy.coerceIn(0f, 1f)
+    }
+
     private fun scheduleFrame() {
         if (frameCallbackArmed || mode != Mode.CONNECTING || !isAttachedToWindow) return
         frameCallbackArmed = true
@@ -365,7 +392,6 @@ class TronRingsView @JvmOverloads constructor(
     }
 
     private fun unscheduleFrame() {
-        if (!frameCallbackArmed) return
         frameCallbackArmed = false
         removeCallbacks(frameRunnable)
     }

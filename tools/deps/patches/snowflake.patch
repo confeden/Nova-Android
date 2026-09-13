@@ -1,0 +1,66 @@
+--- a/client/lib/webrtc.go	2026-09-06 19:48:17.824965400 +0300
++++ b/client/lib/webrtc.go	2026-09-12 13:27:03.302350900 +0300
+@@ -262,6 +262,10 @@
+ 	return nil
+ }
+ 
++// NetWrapper, если задан, оборачивает сеть, которую получает pion через
++// SettingEngine.SetNet. Ставится один раз при инициализации встраивающего.
++var NetWrapper func(transport.Net) transport.Net
++
+ // preparePeerConnection creates a new WebRTC PeerConnection and returns it
+ // after non-trickle ICE candidate gathering is complete.
+ func (c *WebRTCPeer) preparePeerConnection(
+@@ -290,6 +294,16 @@
+ 	var vnet transport.Net
+ 	vnet, _ = stdnet.NewNet()
+ 
++	// NetWrapper даёт встраивающему подменить сеть, которую получит pion.
++	//
++	// Нужно тем, кто работает внутри собственного VPN: сокеты ICE и DTLS pion
++	// создаёт сам, и без пометки они уходят в тот самый туннель, к которому
++	// snowflake и пробивается. Подменить их снаружи больше негде — SettingEngine
++	// собирается здесь и наружу не выдаётся.
++	if NetWrapper != nil {
++		vnet = NetWrapper(vnet)
++	}
++
+ 	if c.proxy != nil {
+ 		if err := proxy.CheckProxyProtocolSupport(c.proxy); err != nil {
+ 			return err
+--- a/client/lib/rendezvous.go	2026-09-06 19:48:17.822385300 +0300
++++ b/client/lib/rendezvous.go	2026-09-12 13:27:11.754347000 +0300
+@@ -4,10 +4,12 @@
+ package snowflake_client
+ 
+ import (
++	"context"
+ 	"crypto/tls"
+ 	"errors"
+ 	"fmt"
+ 	"log"
++	"net"
+ 	"net/http"
+ 	"net/url"
+ 	"sync"
+@@ -56,11 +58,20 @@
+ // We make a copy of DefaultTransport because we want the default Dial
+ // and TLSHandshakeTimeout settings. But we want to disable the default
+ // ProxyFromEnvironment setting.
++// BrokerDialContext, если задан, заменяет дозвон в транспорте рандеву.
++var BrokerDialContext func(ctx context.Context, network, addr string) (net.Conn, error)
++
+ func createBrokerTransport(proxy *url.URL) http.RoundTripper {
+ 	tlsConfig := &tls.Config{
+ 		RootCAs: certs.GetRootCAs(),
+ 	}
+ 	transport := &http.Transport{TLSClientConfig: tlsConfig}
++	// Тот же случай, что и у NetWrapper: рандеву с брокером идёт обычным
++	// сокетом, и внутри собственного VPN он уходит в туннель, который ещё не
++	// работает.
++	if BrokerDialContext != nil {
++		transport.DialContext = BrokerDialContext
++	}
+ 	transport.Proxy = nil
+ 	if proxy != nil {
+ 		transport.Proxy = http.ProxyURL(proxy)

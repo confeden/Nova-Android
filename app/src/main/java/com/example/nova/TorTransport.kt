@@ -54,8 +54,6 @@ object TorTransport {
      */
     const val NEEDS_FRESH_PROCESS = -1
 
-    /** Сколько ждать, пока прежний tor действительно уйдёт. */
-    private const val SHUTDOWN_WAIT_MS = 8_000L
 
     /** Порт SOCKS у tor по умолчанию — по нему и видно, жив ли он. */
     private const val DEFAULT_SOCKS_PORT = 9050
@@ -116,6 +114,17 @@ object TorTransport {
         private set
 
     fun isRunning(): Boolean = boundService != null
+
+    /**
+     * Запускали ли уже `tor_run_main` в этом процессе.
+     *
+     * Спрашивают об этом снаружи затем, чтобы не начинать работу, исход которой
+     * известен заранее. Восстановление после смены сети иначе пошло бы собирать
+     * мосты и поднимать фазу — до двух минут, — и только в самом конце узнало
+     * бы от [start] то, что можно было узнать сразу: в этом процессе второго
+     * tor не будет (G185), нужен свежий.
+     */
+    fun hasRunInThisProcess(): Boolean = torRanInThisProcess
 
     /**
      * Имя сервера строгого «Частного DNS», если он включён в системе, иначе пусто.
@@ -240,19 +249,29 @@ object TorTransport {
         // адрес, новый torrc никто не перечитывал, а `awaitBootstrap` получал от
         // **старого** tor'а сразу «100 %» — в журнале «вход webtunnel», а трафик
         // продолжал идти через прежние мосты.
+        // Один процесс — один `tor_run_main`, без исключений.
+        //
+        // Здесь стояла проверка «подождём, пока прежний tor уйдёт, и если ушёл —
+        // запустим второй». Она давала ложное «ушёл»: закрытый SOCKS-порт не
+        // значит, что библиотека закончила разбор, — и второй запуск обрывал
+        // процесс. Воспроизведено на Pixel 4a 2026-09-12 переключением мобильной
+        // сети на Wi-Fi при живом TOR: в журнале «TOR: torrc записан, запускаем
+        // tor», следом `Fatal signal 6 (SIGABRT) in tid ... (tor)`, и сеанс не
+        // возвращался — ровно то, на что жаловался владелец.
+        //
+        // Надёжного признака «tor полностью завершился» у библиотеки нет вовсе:
+        // её API не рассчитан на повторный запуск (G185). Поэтому признак берётся
+        // тот, который известен точно, — запускали ли мы её в этом процессе, — и
+        // ответ на него один: нужен свежий процесс. Он стоит нескольких секунд,
+        // а сеанс после него поднимается сам (будильник в
+        // `NovaVpnService.scheduleSessionRestoreAfterProcessExit`).
         if (boundService != null || socksPort != 0 || torRanInThisProcess) {
-            val previousSocksPort = socksPort
-            LogManager.log("TOR: разбираем прежний сеанс перед новым.")
+            LogManager.log(
+                "TOR: в этом процессе tor уже запускали. Второй запуск оборвал бы процесс " +
+                    "сигналом, поэтому разбираем сеанс и просим свежий процесс :vpn."
+            )
             stop(context)
-            if (!awaitTorGone(previousSocksPort)) {
-                // Второй `tor_run_main` поверх живого первого — это не отказ
-                // подключения, а обрыв процесса по `abort()`. Отступаем.
-                LogManager.log(
-                    "TOR: прежний tor за ${SHUTDOWN_WAIT_MS} мс не закрылся. Второй запуск в этом " +
-                        "процессе оборвал бы его сигналом, поэтому просим свежий процесс :vpn."
-                )
-                return NEEDS_FRESH_PROCESS
-            }
+            return NEEDS_FRESH_PROCESS
         }
         stopRequested = false
         torRanInThisProcess = true
@@ -275,10 +294,11 @@ object TorTransport {
             bridges.filter { bridge ->
                 bridge.transport == wantedTransport &&
                     bridge.line.none { c -> c.isISOControl() } &&
-                    // У webtunnel адрес в строке — заглушка из RFC 3849, ходить
-                    // надо по `url=`, и tor это делает сам. Требовать разбираемый
-                    // адрес здесь значило бы выбросить все такие мосты.
-                    (wantedTransport == "webtunnel" || bridge.dialTarget() != null)
+                    // У webtunnel и snowflake адрес в строке — заглушка (RFC 3849
+                    // и RFC 5737), ходить надо по `url=` или к брокеру, и это
+                    // делает сам транспорт. Требовать разбираемый адрес здесь
+                    // значило бы выбросить все такие мосты.
+                    TorBridge.isUsable(bridge)
             }
         }
         if (wantedTransport.isNotEmpty() &&
@@ -400,22 +420,6 @@ object TorTransport {
      * старте и закрывает при выходе, поэтому «в подключении отказано» — это ровно
      * «процесса tor больше нет».
      */
-    private fun awaitTorGone(previousSocksPort: Int): Boolean {
-        val port = previousSocksPort.takeIf { it > 0 } ?: DEFAULT_SOCKS_PORT
-        val deadline = SystemClock.elapsedRealtime() + SHUTDOWN_WAIT_MS
-        while (SystemClock.elapsedRealtime() < deadline) {
-            if (!socksPortAccepts(port)) return true
-            Thread.sleep(200L)
-        }
-        return !socksPortAccepts(port)
-    }
-
-    private fun socksPortAccepts(port: Int): Boolean = runCatching {
-        java.net.Socket().use { socket ->
-            socket.connect(java.net.InetSocketAddress("127.0.0.1", port), 300)
-            true
-        }
-    }.getOrDefault(false)
 
     /**
      * Куда прокси этой сессии разрешено звонить: адреса мостов и хосты из `url=`.

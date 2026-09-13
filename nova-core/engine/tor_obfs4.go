@@ -100,6 +100,10 @@ var ptTransports = map[string]base.Transport{
 	"obfs4":     new(obfs4.Transport),
 	"webtunnel": webtunnel.Transport,
 	"meek_lite": new(meeklite.Transport),
+	// Snowflake приходит не из lyrebird, а из своего проекта, и приведён к этому
+	// же интерфейсу обёрткой — см. tor_snowflake.go. Там же записано, почему у
+	// него нет адреса моста и чем это грозит.
+	"snowflake": new(snowflakeTransport),
 }
 
 // StartTorPtProxy поднимает локальный SOCKS5 с названным транспортом.

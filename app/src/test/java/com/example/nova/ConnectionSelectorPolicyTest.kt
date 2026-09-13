@@ -97,8 +97,10 @@ class ConnectionSelectorPolicyTest {
         // России», и переставить его молча нельзя.
         assertEquals(
             listOf(
+                "auto" to "AUTO",
                 "webtunnel" to "WEBTUNNEL",
                 "obfs4" to "OBFS4",
+                "snowflake" to "SNOWFLAKE",
                 "vanilla" to "VANILLA",
                 "direct" to "БЕЗ МОСТОВ",
             ),
@@ -113,9 +115,13 @@ class ConnectionSelectorPolicyTest {
         // Прокси в ядре нужен только транспортам; мосты — всем, кроме прямого входа.
         assertTrue(ConnectionSelectorPolicy.torEntryUsesPluggableTransport("webtunnel"))
         assertTrue(ConnectionSelectorPolicy.torEntryUsesPluggableTransport("obfs4"))
+        // snowflake тоже ходит через прокси в ядре: сокеты pion помечены
+        // `protect()` ловушками внутри самого snowflake, а не снаружи.
+        assertTrue(ConnectionSelectorPolicy.torEntryUsesPluggableTransport("snowflake"))
         assertFalse(ConnectionSelectorPolicy.torEntryUsesPluggableTransport("vanilla"))
         assertFalse(ConnectionSelectorPolicy.torEntryUsesPluggableTransport("direct"))
         assertEquals("webtunnel", ConnectionSelectorPolicy.torBridgeTransportFor("webtunnel"))
+        assertEquals("snowflake", ConnectionSelectorPolicy.torBridgeTransportFor("snowflake"))
         assertEquals("vanilla", ConnectionSelectorPolicy.torBridgeTransportFor("vanilla"))
         assertEquals("", ConnectionSelectorPolicy.torBridgeTransportFor("direct"))
         for (chip in listOf("auto", "ru", "masque")) {
@@ -133,15 +139,59 @@ class ConnectionSelectorPolicyTest {
 
     /** Незнакомый способ входа — это откат версии или правка файла руками. */
     @Test
-    fun `unknown tor entry falls back to obfs4`() {
-        assertEquals("webtunnel", ConnectionSelectorPolicy.normalizeTorEntry(null))
-        assertEquals("webtunnel", ConnectionSelectorPolicy.normalizeTorEntry(""))
-        // snowflake в ядро не собран (pion/webrtc и `anet` ломают компоновку) —
-        // значение из чужой версии обязано откатываться на умолчание, а не уходить
-        // в фазу как есть.
-        assertEquals("webtunnel", ConnectionSelectorPolicy.normalizeTorEntry("snowflake"))
+    fun `unknown tor entry falls back to auto`() {
+        assertEquals("auto", ConnectionSelectorPolicy.normalizeTorEntry(null))
+        assertEquals("auto", ConnectionSelectorPolicy.normalizeTorEntry(""))
+        // meek_lite в ядро собран, но способа входа у него нет: источника живых
+        // строк моста нет, и режим был бы кнопкой, которая молча не подключается.
+        // Значение из чужой версии обязано откатываться на умолчание.
+        assertEquals("auto", ConnectionSelectorPolicy.normalizeTorEntry("meek_lite"))
+        // А snowflake, наоборот, с 1.32.2 настоящий способ входа и обязан
+        // доезжать до фазы как есть.
+        assertEquals("snowflake", ConnectionSelectorPolicy.normalizeTorEntry("SNOWFLAKE"))
         assertEquals("vanilla", ConnectionSelectorPolicy.normalizeTorEntry(" VANILLA "))
         assertEquals("direct", ConnectionSelectorPolicy.normalizeTorEntry("direct"))
+    }
+
+    /**
+     * «Авто» разворачивается в перебор, явный выбор — в себя одного (I1).
+     *
+     * Прямого входа в переборе нет намеренно: из России он встаёт на 10 %
+     * (замер 2026-09-10), то есть стоил бы полного таймаута на каждом
+     * подключении. Закреплено тестом, чтобы его не добавили «для полноты».
+     */
+    @Test
+    fun `auto expands to an ordered attempt list`() {
+        assertEquals(
+            listOf("webtunnel", "obfs4", "snowflake", "vanilla"),
+            ConnectionSelectorPolicy.torEntryAttempts("auto"),
+        )
+        assertEquals(listOf("obfs4"), ConnectionSelectorPolicy.torEntryAttempts("obfs4"))
+        assertEquals(listOf("snowflake"), ConnectionSelectorPolicy.torEntryAttempts("snowflake"))
+        assertEquals(listOf("direct"), ConnectionSelectorPolicy.torEntryAttempts("direct"))
+        // Незнакомое нормализуется в «авто», а значит и разворачивается в перебор.
+        assertEquals(
+            ConnectionSelectorPolicy.torEntryAttempts("auto"),
+            ConnectionSelectorPolicy.torEntryAttempts("meek_lite"),
+        )
+    }
+
+    /**
+     * Кнопка «след. выход» ведёт по кругу и не заходит в «Авто»: она меняет
+     * выход, а не отменяет перебор.
+     */
+    @Test
+    fun `next tor exit walks the cycle without auto`() {
+        assertEquals("obfs4", ConnectionSelectorPolicy.nextTorEntry("webtunnel"))
+        assertEquals("snowflake", ConnectionSelectorPolicy.nextTorEntry("obfs4"))
+        assertEquals("vanilla", ConnectionSelectorPolicy.nextTorEntry("snowflake"))
+        assertEquals("direct", ConnectionSelectorPolicy.nextTorEntry("vanilla"))
+        assertEquals("webtunnel", ConnectionSelectorPolicy.nextTorEntry("direct"))
+        // Из «Авто» первое нажатие уводит в начало круга, а не в само «Авто».
+        assertEquals("webtunnel", ConnectionSelectorPolicy.nextTorEntry("auto"))
+        repeat(8) {
+            assertTrue(ConnectionSelectorPolicy.nextTorEntry("auto") != "auto")
+        }
     }
 
     @Test

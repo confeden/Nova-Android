@@ -71,6 +71,13 @@ object ConnectionSelectorPolicy {
     const val CHIP_TOR: String = "tor"
 
     /**
+     * Перебор способов входа: приложение пробует их само, по порядку.
+     *
+     * Не транспорт, а правило — см. [torEntryAttempts].
+     */
+    const val TOR_ENTRY_AUTO: String = "auto"
+
+    /**
      * Мост WebTunnel: соединение выглядит обычным HTTPS к настоящему сайту с
      * настоящим сертификатом, а секрет — путь внутри TLS.
      */
@@ -78,6 +85,17 @@ object ConnectionSelectorPolicy {
 
     /** Мост obfs4 — «похоже ни на что»: поток равномерно случайный с первого байта. */
     const val TOR_ENTRY_OBFS4: String = "obfs4"
+
+    /**
+     * Snowflake: вход через чужой браузер по WebRTC.
+     *
+     * Адреса моста у него нет вовсе. Клиент договаривается с брокером
+     * (фронтингом через CDN, чтобы сам запрос не был виден), брокер сводит его
+     * со случайной «снежинкой» — браузером добровольца с расширением, — и трафик
+     * идёт видеозвонком. Блокировать нечего: адрес у каждого сеанса свой и
+     * принадлежит обычному пользователю, а снаружи это WebRTC.
+     */
+    const val TOR_ENTRY_SNOWFLAKE: String = "snowflake"
 
     /** Обычный (vanilla) мост: сам протокол Tor, но адрес не в публичных списках. */
     const val TOR_ENTRY_VANILLA: String = "vanilla"
@@ -100,6 +118,14 @@ object ConnectionSelectorPolicy {
      *    случайность с первого байта сама по себе признак. У нас 14 из 14
      *    настоящих рукопожатий с мостами из РФ (S49), то есть работает, но
      *    считается детектируемым.
+     *  * `snowflake` — адреса моста нет вовсе: рандеву с брокером идёт фронтингом
+     *    через CDN, а трафик — WebRTC к случайному добровольцу, то есть к
+     *    обычному жилому адресу, своему на каждый сеанс. Блокировать по списку
+     *    адресов нечего, и по этой мерке он устойчивее первых двух. Стоит он
+     *    третьим не поэтому, а потому что дороже: рандеву плюс ICE плюс канал
+     *    через чужой браузер — это десятки секунд и заметно меньшая скорость.
+     *    Замер с российской сети 2026-09-12: фронты CDN77 отвечают, брокер
+     *    доступен и напрямую, из восьми серверов `ice=` отвечают шесть.
      *  * `vanilla` — обфускации нет вовсе, спасает только то, что адрес моста не
      *    в публичных списках; DPI, узнающий рукопожатие Tor, его видит.
      *  * `direct` — публичные входные узлы, их адреса известны всем.
@@ -107,15 +133,20 @@ object ConnectionSelectorPolicy {
      * Названия — общепринятые имена самих транспортов Tor, а не наши выдумки:
      * так они называются в torrc, в Tor Browser и в списках мостов.
      *
-     * Почему выбор вообще возможен. `webtunnel` и `obfs4` ходят через наш SOCKS
-     * в ядре Go, и его сокеты помечаются `protect()`. У `vanilla` и прямого
+     * Почему выбор вообще возможен. `webtunnel`, `obfs4` и `snowflake` ходят
+     * через наш SOCKS в ядре Go, и его сокеты помечаются `protect()`. У
+     * snowflake пометка устроена иначе — сокеты заводит pion, а не наш дозвон,
+     * поэтому она живёт ловушками внутри самого snowflake (`tor_snowflake.go`), —
+     * но результат тот же: мимо собственного туннеля. У `vanilla` и прямого
      * входа соединение открывает сам tor своим сокетом — и это безопасно ровно
      * потому, что собственный пакет Nova исключён из своего же VPN во **всех**
      * трёх режимах раздельного туннелирования (`applyOperaSplitTunnelPolicy`).
      */
     val TOR_ENTRY_MODES: List<Pair<String, String>> = listOf(
+        TOR_ENTRY_AUTO to "AUTO",
         TOR_ENTRY_WEBTUNNEL to "WEBTUNNEL",
         TOR_ENTRY_OBFS4 to "OBFS4",
+        TOR_ENTRY_SNOWFLAKE to "SNOWFLAKE",
         TOR_ENTRY_VANILLA to "VANILLA",
         TOR_ENTRY_DIRECT to "БЕЗ МОСТОВ",
     )
@@ -127,12 +158,50 @@ object ConnectionSelectorPolicy {
      * незачем — а лишний слушатель на петле это лишняя поверхность.
      */
     fun torEntryUsesPluggableTransport(mode: String): Boolean =
-        normalizeTorEntry(mode).let { it == TOR_ENTRY_WEBTUNNEL || it == TOR_ENTRY_OBFS4 }
+        normalizeTorEntry(mode).let {
+            it == TOR_ENTRY_WEBTUNNEL || it == TOR_ENTRY_OBFS4 || it == TOR_ENTRY_SNOWFLAKE
+        }
+
+    /**
+     * Во что разворачивается выбранный способ входа.
+     *
+     * «Авто» — это список, который служба перебирает сверху вниз, останавливаясь
+     * на первом поднявшемся (`NovaVpnService.runTorPhaseLocked`). Порядок тот же,
+     * что и у кнопок: по убыванию вероятности пройти из России.
+     *
+     * Прямого входа в переборе **нет** намеренно. Замер на Pixel 4a 2026-09-10:
+     * из России он застревает на `Bootstrapped 10% (conn_done)` — сеть режет сам
+     * протокол Tor, но не мосты. В переборе он означал бы полный таймаут впустую
+     * на каждом подключении. Выбрать его руками по-прежнему можно: сеть, где
+     * Tor не режут, существует.
+     *
+     * Любой другой способ — список из себя одного: явный выбор человека не
+     * подменяется перебором (I1).
+     */
+    fun torEntryAttempts(mode: String): List<String> =
+        if (normalizeTorEntry(mode) == TOR_ENTRY_AUTO) {
+            listOf(TOR_ENTRY_WEBTUNNEL, TOR_ENTRY_OBFS4, TOR_ENTRY_SNOWFLAKE, TOR_ENTRY_VANILLA)
+        } else {
+            listOf(normalizeTorEntry(mode))
+        }
+
+    /**
+     * Следующий способ входа по кругу — для кнопки «след. выход».
+     *
+     * «Авто» в круг не входит: кнопка меняет выход, а не отменяет перебор.
+     */
+    fun nextTorEntry(mode: String): String {
+        val cycle = TOR_ENTRY_MODES.map { it.first }.filter { it != TOR_ENTRY_AUTO }
+        val current = normalizeTorEntry(mode)
+        val index = cycle.indexOf(current)
+        return if (index < 0) cycle.first() else cycle[(index + 1) % cycle.size]
+    }
 
     /** Какие мосты нужны этому способу входа; пусто — мосты не нужны вовсе. */
     fun torBridgeTransportFor(mode: String): String = when (normalizeTorEntry(mode)) {
         TOR_ENTRY_WEBTUNNEL -> "webtunnel"
         TOR_ENTRY_OBFS4 -> "obfs4"
+        TOR_ENTRY_SNOWFLAKE -> "snowflake"
         TOR_ENTRY_VANILLA -> "vanilla"
         else -> ""
     }
@@ -140,12 +209,13 @@ object ConnectionSelectorPolicy {
     /**
      * Что подставить, если способ входа ещё не выбирали.
      *
-     * Первый в списке, то есть самый вероятный для России. Проверено на Pixel 4a
-     * 2026-09-10: `webtunnel` доходит до 100 % за четыре секунды и все пять
-     * мостов приняты без единого отказа. Ошибиться здесь дёшево — способ меняется
-     * одним нажатием.
+     * «Авто»: перебор сверху вниз по тому же порядку, что и кнопки. Раньше здесь
+     * стоял `webtunnel` — он и остаётся первым, кого перебор пробует (на Pixel 4a
+     * 2026-09-10 доходил до 100 % за четыре секунды, все пять мостов приняты), —
+     * но сеть, где придушен именно он, теперь не требует от человека догадаться
+     * нажать вторую кнопку.
      */
-    const val DEFAULT_TOR_ENTRY: String = TOR_ENTRY_WEBTUNNEL
+    const val DEFAULT_TOR_ENTRY: String = TOR_ENTRY_AUTO
 
     /** Приводит способ входа к известному; всё незнакомое — к [DEFAULT_TOR_ENTRY]. */
     fun normalizeTorEntry(value: String?): String {

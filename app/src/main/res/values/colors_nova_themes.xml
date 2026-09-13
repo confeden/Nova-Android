@@ -4,27 +4,29 @@
 <resources>
 
     <!-- Aurora mint -->
-    <color name="nova_aurora_bg_top">#06051A</color>
-    <color name="nova_aurora_bg_mid">#0E0B2E</color>
-    <color name="nova_aurora_bg_bot">#160F3F</color>
-    <color name="nova_aurora_accent">#2FD98E</color>
-    <color name="nova_aurora_accent_dim">#2E2FD98E</color>
-    <color name="nova_aurora_accent_on">#06051A</color>
+    <color name="nova_aurora_bg_top">#090817</color>
+    <color name="nova_aurora_bg_mid">#120D27</color>
+    <color name="nova_aurora_bg_bot">#1B1238</color>
+    <color name="nova_aurora_accent">#50C878</color>
+    <color name="nova_aurora_accent_dim">#2E50C878</color>
+    <color name="nova_aurora_accent_on">#090817</color>
     <color name="nova_aurora_card_fill">#0BFFFFFF</color>
-    <color name="nova_aurora_card_stroke">#17FFFFFF</color>
+    <color name="nova_aurora_card_stroke">#1FA88DFF</color>
     <color name="nova_aurora_separator">#12FFFFFF</color>
-    <color name="nova_aurora_group_from">#2FD98E</color>
-    <color name="nova_aurora_group_to">#B8F0D8</color>
+    <color name="nova_aurora_group_from">#50C878</color>
+    <color name="nova_aurora_group_to">#9FD9BC</color>
     <color name="nova_aurora_text_title">#EEF0F8</color>
     <color name="nova_aurora_text_value">#A8ADD4</color>
     <color name="nova_aurora_text_hint">#7A7FA8</color>
-    <color name="nova_aurora_switch_on">#2FD98E</color>
+    <color name="nova_aurora_switch_on">#50C878</color>
     <color name="nova_aurora_switch_off">#2EFFFFFF</color>
     <color name="nova_aurora_thumb_on">#FFFFFF</color>
     <color name="nova_aurora_thumb_off">#B8BED0</color>
-    <color name="nova_aurora_icon_tint">#B32FD98E</color>
+    <color name="nova_aurora_icon_tint">#B350C878</color>
     <color name="nova_aurora_field_fill">#0BFFFFFF</color>
-    <color name="nova_aurora_field_stroke">#14FFFFFF</color>
+    <color name="nova_aurora_field_stroke">#18A88DFF</color>
+    <color name="nova_aurora_focus_fill">#3350C878</color>
+    <color name="nova_aurora_focus_stroke">#50C878</color>
 
     <!-- DNS-AI -->
     <color name="nova_dnsai_bg_top">#0D1117</color>
@@ -33,7 +35,7 @@
     <color name="nova_dnsai_accent">#5B8CFF</color>
     <color name="nova_dnsai_accent_dim">#2E5B8CFF</color>
     <color name="nova_dnsai_accent_on">#0D1117</color>
-    <color name="nova_dnsai_card_fill">#161B22</color>
+    <color name="nova_dnsai_card_fill">#0BB1B6A7</color>
     <color name="nova_dnsai_card_stroke">#12FFFFFF</color>
     <color name="nova_dnsai_separator">#12FFFFFF</color>
     <color name="nova_dnsai_group_from">#EEF4FF</color>
@@ -48,6 +50,8 @@
     <color name="nova_dnsai_icon_tint">#B35B8CFF</color>
     <color name="nova_dnsai_field_fill">#0BFFFFFF</color>
     <color name="nova_dnsai_field_stroke">#21FFFFFF</color>
+    <color name="nova_dnsai_focus_fill">#335B8CFF</color>
+    <color name="nova_dnsai_focus_stroke">#5B8CFF</color>
 
     <!-- Proton -->
     <color name="nova_proton_bg_top">#16141C</color>
@@ -56,7 +60,7 @@
     <color name="nova_proton_accent">#6D4AFF</color>
     <color name="nova_proton_accent_dim">#386D4AFF</color>
     <color name="nova_proton_accent_on">#FFFFFF</color>
-    <color name="nova_proton_card_fill">#242230</color>
+    <color name="nova_proton_card_fill">#13A09EC5</color>
     <color name="nova_proton_card_stroke">#2E2B3C</color>
     <color name="nova_proton_separator">#12FFFFFF</color>
     <color name="nova_proton_group_from">#8A6EFF</color>
@@ -69,8 +73,10 @@
     <color name="nova_proton_thumb_on">#FFFFFF</color>
     <color name="nova_proton_thumb_off">#B0ABCC</color>
     <color name="nova_proton_icon_tint">#8A6EFF</color>
-    <color name="nova_proton_field_fill">#1C1A26</color>
+    <color name="nova_proton_field_fill">#0B484652</color>
     <color name="nova_proton_field_stroke">#2E2B3C</color>
+    <color name="nova_proton_focus_fill">#336D4AFF</color>
+    <color name="nova_proton_focus_stroke">#6D4AFF</color>
 
     <!-- Charcoal birch -->
     <color name="nova_charcoal_bg_top">#08090C</color>
@@ -94,6 +100,8 @@
     <color name="nova_charcoal_icon_tint">#8CFFFFFF</color>
     <color name="nova_charcoal_field_fill">#0BFFFFFF</color>
     <color name="nova_charcoal_field_stroke">#13FFFFFF</color>
+    <color name="nova_charcoal_focus_fill">#334FD8C4</color>
+    <color name="nova_charcoal_focus_stroke">#4FD8C4</color>
 
     <!-- Graphene golden -->
     <color name="nova_graphene_bg_top">#101215</color>
@@ -102,7 +110,7 @@
     <color name="nova_graphene_accent">#F0B429</color>
     <color name="nova_graphene_accent_dim">#26F0B429</color>
     <color name="nova_graphene_accent_on">#101215</color>
-    <color name="nova_graphene_card_fill">#1B1F25</color>
+    <color name="nova_graphene_card_fill">#1092A5C9</color>
     <color name="nova_graphene_card_stroke">#12FFFFFF</color>
     <color name="nova_graphene_separator">#12FFFFFF</color>
     <color name="nova_graphene_group_from">#F0B429</color>
@@ -115,8 +123,10 @@
     <color name="nova_graphene_thumb_on">#FFFFFF</color>
     <color name="nova_graphene_thumb_off">#9098A8</color>
     <color name="nova_graphene_icon_tint">#9098A8</color>
-    <color name="nova_graphene_field_fill">#22262D</color>
+    <color name="nova_graphene_field_fill">#1C9CA8C7</color>
     <color name="nova_graphene_field_stroke">#14FFFFFF</color>
+    <color name="nova_graphene_focus_fill">#33F0B429</color>
+    <color name="nova_graphene_focus_stroke">#F0B429</color>
 
     <!-- Cyber neon -->
     <color name="nova_neon_bg_top">#0A0A12</color>
@@ -140,6 +150,8 @@
     <color name="nova_neon_icon_tint">#39E6D6</color>
     <color name="nova_neon_field_fill">#0DFFFFFF</color>
     <color name="nova_neon_field_stroke">#2839E6D6</color>
+    <color name="nova_neon_focus_fill">#3339E6D6</color>
+    <color name="nova_neon_focus_stroke">#39E6D6</color>
 
     <!-- Path of Exile 1 -->
     <color name="nova_poe1_bg_top">#0A0705</color>
@@ -148,7 +160,7 @@
     <color name="nova_poe1_accent">#C8AA6E</color>
     <color name="nova_poe1_accent_dim">#2EC8AA6E</color>
     <color name="nova_poe1_accent_on">#0A0705</color>
-    <color name="nova_poe1_card_fill">#1E1810</color>
+    <color name="nova_poe1_card_fill">#0FBE9860</color>
     <color name="nova_poe1_card_stroke">#8B7343</color>
     <color name="nova_poe1_separator">#2EC8AA6E</color>
     <color name="nova_poe1_group_from">#E8DCC0</color>
@@ -161,8 +173,10 @@
     <color name="nova_poe1_thumb_on">#E8DCC0</color>
     <color name="nova_poe1_thumb_off">#8A8073</color>
     <color name="nova_poe1_icon_tint">#BFC8AA6E</color>
-    <color name="nova_poe1_field_fill">#17110A</color>
+    <color name="nova_poe1_field_fill">#1F2D1803</color>
     <color name="nova_poe1_field_stroke">#6E5A33</color>
+    <color name="nova_poe1_focus_fill">#33C8AA6E</color>
+    <color name="nova_poe1_focus_stroke">#C8AA6E</color>
 
     <!-- Path of Exile 2 -->
     <color name="nova_poe2_bg_top">#0E1012</color>
@@ -186,6 +200,8 @@
     <color name="nova_poe2_icon_tint">#8E979F</color>
     <color name="nova_poe2_field_fill">#0DFFFFFF</color>
     <color name="nova_poe2_field_stroke">#21BEC8D0</color>
+    <color name="nova_poe2_focus_fill">#33C86A32</color>
+    <color name="nova_poe2_focus_stroke">#C86A32</color>
 
     <!-- GTA VI Vice Sunset -->
     <color name="nova_gta6sunset_bg_top">#1F1F38</color>
@@ -194,7 +210,7 @@
     <color name="nova_gta6sunset_accent">#E9639B</color>
     <color name="nova_gta6sunset_accent_dim">#2EE9639B</color>
     <color name="nova_gta6sunset_accent_on">#2A0F1C</color>
-    <color name="nova_gta6sunset_card_fill">#38365D</color>
+    <color name="nova_gta6sunset_card_fill">#4C837DCE</color>
     <color name="nova_gta6sunset_card_stroke">#1FCCC2F5</color>
     <color name="nova_gta6sunset_separator">#14CCC2F5</color>
     <color name="nova_gta6sunset_group_from">#FEC497</color>
@@ -209,6 +225,8 @@
     <color name="nova_gta6sunset_icon_tint">#CCC2F5</color>
     <color name="nova_gta6sunset_field_fill">#14CCC2F5</color>
     <color name="nova_gta6sunset_field_stroke">#1FCCC2F5</color>
+    <color name="nova_gta6sunset_focus_fill">#33E9639B</color>
+    <color name="nova_gta6sunset_focus_stroke">#E9639B</color>
 
     <!-- GTA VI Vice Night -->
     <color name="nova_gta6night_bg_top">#07080F</color>
@@ -232,4 +250,56 @@
     <color name="nova_gta6night_icon_tint">#9FB4C4</color>
     <color name="nova_gta6night_field_fill">#0FD9F3FE</color>
     <color name="nova_gta6night_field_stroke">#1FD9F3FE</color>
+    <color name="nova_gta6night_focus_fill">#33E9639B</color>
+    <color name="nova_gta6night_focus_stroke">#E9639B</color>
+
+    <!-- Matrix -->
+    <color name="nova_matrix_bg_top">#000000</color>
+    <color name="nova_matrix_bg_mid">#010703</color>
+    <color name="nova_matrix_bg_bot">#031008</color>
+    <color name="nova_matrix_accent">#00FF41</color>
+    <color name="nova_matrix_accent_dim">#2E00FF41</color>
+    <color name="nova_matrix_accent_on">#001204</color>
+    <color name="nova_matrix_card_fill">#1A59C16F</color>
+    <color name="nova_matrix_card_stroke">#2600FF41</color>
+    <color name="nova_matrix_separator">#1A00FF41</color>
+    <color name="nova_matrix_group_from">#00FF41</color>
+    <color name="nova_matrix_group_to">#9DFFB8</color>
+    <color name="nova_matrix_text_title">#8FFFA8</color>
+    <color name="nova_matrix_text_value">#41C267</color>
+    <color name="nova_matrix_text_hint">#2E8A49</color>
+    <color name="nova_matrix_switch_on">#00FF41</color>
+    <color name="nova_matrix_switch_off">#16301E</color>
+    <color name="nova_matrix_thumb_on">#001204</color>
+    <color name="nova_matrix_thumb_off">#4E7A5B</color>
+    <color name="nova_matrix_icon_tint">#B300FF41</color>
+    <color name="nova_matrix_field_fill">#0F67C27A</color>
+    <color name="nova_matrix_field_stroke">#2200FF41</color>
+    <color name="nova_matrix_focus_fill">#3300FF41</color>
+    <color name="nova_matrix_focus_stroke">#00FF41</color>
+
+    <!-- Diablo II -->
+    <color name="nova_diablo2_bg_top">#0B0907</color>
+    <color name="nova_diablo2_bg_mid">#100D0A</color>
+    <color name="nova_diablo2_bg_bot">#15110C</color>
+    <color name="nova_diablo2_accent">#B79A5B</color>
+    <color name="nova_diablo2_accent_dim">#2EB79A5B</color>
+    <color name="nova_diablo2_accent_on">#EDE4CC</color>
+    <color name="nova_diablo2_card_fill">#2DC5BDA9</color>
+    <color name="nova_diablo2_card_stroke">#8B7343</color>
+    <color name="nova_diablo2_separator">#2E8B7343</color>
+    <color name="nova_diablo2_group_from">#E4D3A0</color>
+    <color name="nova_diablo2_group_to">#8B7343</color>
+    <color name="nova_diablo2_text_title">#D8D2C0</color>
+    <color name="nova_diablo2_text_value">#9A9384</color>
+    <color name="nova_diablo2_text_hint">#6E6A5E</color>
+    <color name="nova_diablo2_switch_on">#8E1B1B</color>
+    <color name="nova_diablo2_switch_off">#2A2620</color>
+    <color name="nova_diablo2_thumb_on">#E8DCC0</color>
+    <color name="nova_diablo2_thumb_off">#9A9384</color>
+    <color name="nova_diablo2_icon_tint">#BFB79A5B</color>
+    <color name="nova_diablo2_field_fill">#0EC6C39C</color>
+    <color name="nova_diablo2_field_stroke">#6E5A33</color>
+    <color name="nova_diablo2_focus_fill">#33B79A5B</color>
+    <color name="nova_diablo2_focus_stroke">#B79A5B</color>
 </resources>

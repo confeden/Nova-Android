@@ -34,16 +34,42 @@ object NovaTunnelControl {
      */
     fun stop(context: Context, reason: String) {
         val appContext = context.applicationContext
+        // Сначала команда службе, потом признаки — и только если команду приняли.
+        //
+        // Раньше порядок был обратный: признаки снимались, а `startService` шёл
+        // следом и без присмотра. Стоит ему не дойти — фоновый запуск отклонён
+        // прошивкой, службы уже нет, что угодно, — и получается худшее из
+        // возможных расхождений: экран говорит «НЕ ПОДКЛЮЧЕНО», а туннель
+        // работает, и ключик в строке состояния висит. Признаки при этом уже
+        // сняты, так что даже перезаход на экран правды не покажет.
+        //
+        // `startService` к уже поднятой foreground-службе разрешён и из фона —
+        // именно так это работает у виджета с самого начала, — но «разрешён» и
+        // «дошёл» это разные вещи (I4: молчащего возврата в пути подключения не
+        // бывает).
+        val intent = Intent(appContext, NovaVpnService::class.java).apply { action = ACTION_STOP_VPN }
+        val component = try {
+            appContext.startService(intent)
+        } catch (error: Throwable) {
+            // Признаки не трогаем: пусть экран показывает живой туннель, потому
+            // что он и правда живой.
+            LogManager.log(
+                "$reason: команда останова не дошла до службы — " +
+                    "${error.javaClass.simpleName}: ${error.message}. " +
+                    "Туннель остался поднятым, признаки не снимаем."
+            )
+            return
+        }
+        if (component == null) {
+            // Службы нет — останавливать нечего, но признаки снять надо: иначе
+            // они переживут смерть службы и оживят сеанс.
+            LogManager.log("$reason: службы уже нет, снимаем только признаки.")
+        }
         val clientData = ClientData(appContext)
         clientData.clearTransientConnectingPending()
         clientData.clearSoftReapplyPending()
         clientData.clearRestartSession()
         clientData.saveServiceState(NovaVpnService.STATE_STOPPED)
-        // `startService` к уже поднятой foreground-службе разрешён и из фона —
-        // именно так это работает у виджета с самого начала.
-        appContext.startService(
-            Intent(appContext, NovaVpnService::class.java).apply { action = ACTION_STOP_VPN }
-        )
         LogManager.log("$reason: остановка туннеля.")
     }
 

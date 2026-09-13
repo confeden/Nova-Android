@@ -48,7 +48,7 @@ data class TorBridge(
      * молча провисит весь таймаут, и мост будет объявлен мёртвым.
      */
     fun dialTarget(): Pair<String, Int>? {
-        if (transport == "webtunnel") return null
+        if (addressIsDecoration(transport)) return null
         val host = endpoint.substringBeforeLast(':').trim('[', ']')
         val port = endpoint.substringAfterLast(':').toIntOrNull() ?: return null
         if (host.isEmpty() || port !in 1..65535) return null
@@ -63,7 +63,51 @@ data class TorBridge(
         .put("fingerprint", fingerprint)
         .put("url", url)
 
+    /**
+     * Значение аргумента `имя=` из строки моста.
+     *
+     * Читается из [line], а не хранится полем: полей у строки моста два десятка
+     * (`fronts`, `ice`, `ampcache`, `sqsqueue`, `utls-imitate`…), они разные у
+     * разных транспортов и меняются с версиями snowflake. Хранить их значило бы
+     * повышать версию файла на каждый новый аргумент и терять те, о которых мы
+     * ещё не знаем; строка же хранится целиком именно затем, чтобы её не
+     * приходилось разбирать на поля.
+     *
+     * @return значение без имени, либо пустая строка.
+     */
+    fun arg(name: String): String {
+        val prefix = "$name="
+        return line.split(Regex("\\s+"))
+            .firstOrNull { it.startsWith(prefix, ignoreCase = true) }
+            ?.substring(prefix.length)
+            .orEmpty()
+    }
+
     companion object {
+
+        /**
+         * Транспорты, у которых адрес в начале строки — украшение, а не адрес.
+         *
+         * `webtunnel` пишет туда документационный `2001:db8::/32`, `snowflake` —
+         * `192.0.2.0/24`: и тот и другой это идентификатор моста для tor, а
+         * настоящая точка входа лежит в аргументах (`url=` у первого, брокер и
+         * фронты у второго). Предикат общий на все четыре места, где он нужен
+         * (разбор, проверка живости, отбор перед torrc, ожидание мостов в
+         * службе): расходящиеся копии одного признака в этом проекте уже стоили
+         * дефекта (G49), а четвёртая копия — ещё одного (I23).
+         */
+        fun addressIsDecoration(transport: String): Boolean =
+            transport == "webtunnel" || transport == "snowflake"
+
+        /**
+         * Годится ли мост к употреблению этим транспортом.
+         *
+         * «Годится» значит «есть куда звонить»: либо разобранный адрес, либо
+         * транспорт, у которого адреса и не должно быть.
+         */
+        fun isUsable(bridge: TorBridge): Boolean =
+            addressIsDecoration(bridge.transport) || bridge.dialTarget() != null
+
         /**
          * Адреса-заглушки, по которым соединения не бывает.
          *
@@ -108,17 +152,39 @@ data class TorBridge(
         /**
          * Транспорты, которыми приложение действительно умеет подключаться.
          *
-         * Ровно те три, что отдаёт `ConnectionSelectorPolicy.torBridgeTransportFor`.
-         * Всё остальное — мост, который нельзя выбрать: `snowflake` в
-         * `libgojni.so` не собран (pion/webrtc и `anet` ломают компоновку, G176),
-         * у `meek_lite` и `conjure` нет способа входа, `obfs3`/`obfs2` lyrebird не
-         * даёт вовсе. Сборщик их исправно приносил, хранил и считал: на экране
-         * стояло «живых мостов 37 (obfs4 15, webtunnel 5, snowflake 2, vanilla 15)»
-         * — тридцать семь, из которых подключиться могли тридцать пять. Счёт,
-         * которым нельзя воспользоваться, — неверный счёт, поэтому лишнее
-         * отбрасывается в разборе, а не прячется в отрисовке.
+         * Ровно те четыре, что отдаёт `ConnectionSelectorPolicy.torBridgeTransportFor`.
+         * Всё остальное — мост, который нельзя выбрать: у `meek_lite` и `conjure`
+         * нет способа входа, `obfs3`/`obfs2` lyrebird не даёт вовсе. Сборщик их
+         * исправно приносил, хранил и считал: на экране стояло «живых мостов 37
+         * (obfs4 15, webtunnel 5, snowflake 2, vanilla 15)» — тридцать семь, из
+         * которых подключиться могли тридцать пять. Счёт, которым нельзя
+         * воспользоваться, — неверный счёт, поэтому лишнее отбрасывается в
+         * разборе, а не прячется в отрисовке.
+         *
+         * `snowflake` стоит здесь с 1.32.2: транспорт собран в ядро (G176
+         * закрыт), сокеты pion и рандеву с брокером помечены `protect()`, а
+         * строки мостов у него встроенные — см. [TorBuiltinBridges].
          */
-        private val SUPPORTED_TRANSPORTS = setOf("obfs4", "webtunnel", "vanilla")
+        private val SUPPORTED_TRANSPORTS = setOf("obfs4", "webtunnel", "snowflake", "vanilla")
+
+        /**
+         * Те из них, что ходят через наш SOCKS с транспортом в ядре.
+         *
+         * У `vanilla` транспорта нет вовсе: tor соединяется своим сокетом, и
+         * аргументов никому не передаёт — предел на них к нему не относится.
+         */
+        private val PLUGGABLE_TRANSPORTS = setOf("obfs4", "webtunnel", "snowflake")
+
+        /**
+         * Предел на аргументы строки моста: логин и пароль SOCKS5 по 255 байт.
+         *
+         * Это не наше ограничение и не запас «на всякий случай», а формат:
+         * поле логина и поле пароля в RFC 1929 однобайтовой длины каждое, и tor
+         * раскладывает аргументы по обоим. Наша сторона их обратно склеивает
+         * (`socks5ReadUserPassword` в `engine/tor_obfs4.go`), но того, что в них
+         * не поместилось, склеивать неоткуда.
+         */
+        private const val MAX_SOCKS5_ARG_BYTES = 510
 
         /**
          * Разбирает строку моста.
@@ -154,6 +220,19 @@ data class TorBridge(
             // в разборе: иначе строка доедет и до файла, и до счётчика, и до
             // сводки на экране, и везде будет считаться годной.
             if (transport !in SUPPORTED_TRANSPORTS) return null
+            // Строка snowflake с рандеву через SQS не хранится и не считается.
+            //
+            // Внутри snowflake выбор способа встречи с брокером кончается
+            // `log.Fatalln`, если рядом с `sqsqueue=` оказался ещё и адрес
+            // брокера (`client/lib/rendezvous.go`), — а это `os.Exit(1)` в
+            // процессе `:vpn`, то есть смерть живого туннеля от строки,
+            // пришедшей по сети или из буфера обмена. Ядро такую строку тоже
+            // отвергает (`engine/tor_snowflake.go`), и это главная защита; здесь
+            // же она отсекается раньше, чтобы не занимать место в списке и не
+            // попадать в счёт мостов, которыми нельзя подключиться.
+            if (parts.any { it.startsWith("sqsqueue=", true) || it.startsWith("sqscreds=", true) }) {
+                return null
+            }
             val rest = if (hasTransport) parts.drop(1) else parts
             val endpoint = rest.getOrNull(0)?.takeIf { it.contains(':') } ?: return null
             val fingerprint = rest.getOrNull(1)
@@ -161,6 +240,31 @@ data class TorBridge(
                 ?.uppercase()
                 .orEmpty()
             val url = rest.firstOrNull { it.startsWith("url=") }?.removePrefix("url=").orEmpty()
+            // Аргументы, которые не доедут до транспорта, — это мост, который не
+            // подключится молча.
+            //
+            // Внешнему pluggable transport tor передаёт аргументы строки моста
+            // полями логина и пароля SOCKS5, по 255 байт в каждом, то есть 510
+            // всего. Канонические встроенные строки snowflake занимают 384 —
+            // запас есть, но не бесконечный, а строки приходят и от Moat, и из
+            // буфера обмена, и их длину мы не выбираем. Обрезанные аргументы
+            // выглядят снаружи как «мост не отвечает», и найти причину в этом
+            // виде невозможно.
+            //
+            // Проверка стоит здесь, а не перед записью torrc, по той же причине,
+            // что и остальные: иначе такой мост попал бы и в файл, и в счёт на
+            // экране, и считался бы годным.
+            if (transport in PLUGGABLE_TRANSPORTS) {
+                val args = rest.drop(1).filter { it.contains('=') }.joinToString(";")
+                if (args.toByteArray(Charsets.UTF_8).size > MAX_SOCKS5_ARG_BYTES) {
+                    LogManager.log(
+                        "Tor: строка моста $transport отброшена — аргументов " +
+                            "${args.toByteArray(Charsets.UTF_8).size} Б при пределе $MAX_SOCKS5_ARG_BYTES: " +
+                            "tor не смог бы передать их транспорту целиком."
+                    )
+                    return null
+                }
+            }
             // Хранится строка без приставки: torrc собирается как `Bridge <line>`,
             // и «Bridge Bridge obfs4 …» tor не разберёт.
             return TorBridge(transport, body, endpoint, fingerprint, url)
@@ -186,6 +290,116 @@ data class TorBridge(
             )
         }
     }
+}
+
+/**
+ * Встроенные строки мостов — те, которых сборщик не приносит.
+ *
+ * ## Почему у snowflake строки вообще встроенные
+ *
+ * У obfs4 и webtunnel мост — это хост, их тысячи, и смысл сборщика в том, чтобы
+ * найти живой. У snowflake мостов **два на всю сеть**, и «мост» здесь не адрес,
+ * а способ договориться: клиент идёт к брокеру, брокер сводит его со случайной
+ * «снежинкой» — чужим браузером с расширением, — и данные идут по WebRTC. Менять
+ * в такой строке нечего, поэтому Tor Browser, Orbot и сам snowflake возят её с
+ * собой. Публичные сборщики мостов её не отдают по той же причине: собирать
+ * нечего.
+ *
+ * ## Откуда взяты эти строки
+ *
+ * Из `tools/snowflake/client/torrc` и `client/README.md` — то есть из исходников
+ * ровно той версии snowflake, что собрана в ядро (`v2.14.1`, разложена из кэша
+ * модулей и сверена по `go.sum`, см. `tools/deps/fetch_go_deps.sh`). Это лучший
+ * доступный источник: `gitlab.torproject.org` из России не открывается вовсе, а
+ * произвольное зеркало проверить нечем.
+ *
+ * ## Два набора, а не один
+ *
+ * Отличаются они местом встречи с брокером, и это единственное, что у snowflake
+ * можно заблокировать:
+ *
+ *  * [SNOWFLAKE_CDN77] — рандеву фронтингом через CDN77. Основной путь, им же
+ *    ходит Tor Browser.
+ *  * [SNOWFLAKE_AMP] — рандеву через AMP-кэш Google с фронтом `www.google.com`.
+ *    У upstream он закомментирован как запасной; нам он нужен именно как
+ *    запасной, потому что блокировать `www.google.com` дороже, чем CDN77.
+ *
+ * **Одновременно в torrc едет только один набор.** Отпечатки у наборов одни и
+ * те же (мостов-то два), различаются только адреса-украшения `192.0.2.3/.4`
+ * против `.5/.6`: отдав tor'у оба, мы отдали бы ему четыре моста с двумя
+ * личностями. Какой набор брать, решает проверка живости в [TorBridgeManager] —
+ * замером, а не предположением.
+ *
+ * ## Чего здесь намеренно нет
+ *
+ * Набора с рандеву через SQS: он носит в строке ключ доступа AWS чужого
+ * проекта, и живучесть у него не наша.
+ *
+ * Своих STUN-серверов в `ice=`: список менять нельзя без счёта байтов. Tor
+ * передаёт аргументы моста внешнему транспорту в полях логина и пароля SOCKS5,
+ * по 255 байт каждое, то есть 510 всего; у строки ниже аргументы занимают 384
+ * байта — запас 126. Два лишних сервера этот запас съедят, и мост перестанет
+ * подключаться молча.
+ */
+object TorBuiltinBridges {
+
+    /**
+     * Рандеву через CDN77. Основной путь.
+     *
+     * Замер с российской сети (Ростелеком, 2026-09-12): `1098762253.rsc.cdn77.org`,
+     * `www.cdn77.com` и `www.phpmyadmin.net` отвечают по HTTPS, из восьми
+     * серверов `ice=` на запрос STUN отвечают шесть (`voipgate` и `mixvoip`
+     * молчат). Строка при этом оставлена канонической: лишний сервер дороже
+     * двух молчащих — см. счёт байтов в шапке.
+     */
+    val SNOWFLAKE_CDN77: List<String> = listOf(
+        "snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 " +
+            "fingerprint=2B280B23E1107BB62ABFC40DDCC8824814F80A72 " +
+            "url=https://1098762253.rsc.cdn77.org/ " +
+            "fronts=www.cdn77.com,www.phpmyadmin.net " +
+            "ice=stun:stun.antisip.com:3478,stun:stun.epygi.com:3478," +
+            "stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478," +
+            "stun:stun.mixvoip.com:3478,stun:stun.nextcloud.com:3478," +
+            "stun:stun.bethesda.net:3478,stun:stun.nextcloud.com:443 " +
+            "utls-imitate=hellorandomizedalpn",
+        "snowflake 192.0.2.4:80 8838024498816A039FCBBAB14E6F40A0843051FA " +
+            "fingerprint=8838024498816A039FCBBAB14E6F40A0843051FA " +
+            "url=https://1098762253.rsc.cdn77.org/ " +
+            "fronts=www.cdn77.com,www.phpmyadmin.net " +
+            "ice=stun:stun.antisip.com:3478,stun:stun.epygi.com:3478," +
+            "stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478," +
+            "stun:stun.mixvoip.com:3478,stun:stun.nextcloud.com:3478," +
+            "stun:stun.bethesda.net:3478,stun:stun.nextcloud.com:443 " +
+            "utls-imitate=hellorandomizedalpn",
+    )
+
+    /**
+     * Рандеву через AMP-кэш. Запасной путь на случай, когда CDN77 закрыли.
+     *
+     * Замер оттуда же, 2026-09-12: `cdn.ampproject.org` отвечает (404 на корень —
+     * это ответ, а не молчание), `www.google.com` — 200, сам
+     * `snowflake-broker.torproject.net` не заблокирован ни по имени, ни по адресу.
+     */
+    val SNOWFLAKE_AMP: List<String> = listOf(
+        "snowflake 192.0.2.5:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 " +
+            "fingerprint=2B280B23E1107BB62ABFC40DDCC8824814F80A72 " +
+            "url=https://snowflake-broker.torproject.net/ " +
+            "ampcache=https://cdn.ampproject.org/ front=www.google.com " +
+            "ice=stun:stun.antisip.com:3478,stun:stun.epygi.com:3478," +
+            "stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478," +
+            "stun:stun.mixvoip.com:3478,stun:stun.nextcloud.com:3478," +
+            "stun:stun.bethesda.net:3478,stun:stun.nextcloud.com:443 " +
+            "utls-imitate=hellorandomizedalpn",
+        "snowflake 192.0.2.6:80 8838024498816A039FCBBAB14E6F40A0843051FA " +
+            "fingerprint=8838024498816A039FCBBAB14E6F40A0843051FA " +
+            "url=https://snowflake-broker.torproject.net/ " +
+            "ampcache=https://cdn.ampproject.org/ front=www.google.com " +
+            "ice=stun:stun.antisip.com:3478,stun:stun.epygi.com:3478," +
+            "stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478," +
+            "stun:stun.mixvoip.com:3478,stun:stun.nextcloud.com:3478," +
+            "stun:stun.bethesda.net:3478,stun:stun.nextcloud.com:443 " +
+            "utls-imitate=hellorandomizedalpn",
+    )
 }
 
 /**
@@ -336,6 +550,102 @@ object TorEntryModeStore {
     }
 }
 
+/**
+ * Докуда дошёл перебор входов в режиме «Авто».
+ *
+ * ## Зачем это нужно вообще
+ *
+ * Перебор написан как цикл внутри фазы Tor, и на бумаге он такой и есть. На деле
+ * до второго способа он не доходил никогда, и вот почему. Библиотеку tor нельзя
+ * запускать в процессе дважды: её API на это не рассчитан, второй
+ * `tor_run_main` кончается `SIGABRT` (G185). Поэтому `TorTransport.start`
+ * возвращает `NEEDS_FRESH_PROCESS`, и процесс `:vpn` переподнимается. А свежий
+ * процесс читает `tor_entry_mode.txt`, видит там «Авто» и начинает перебор
+ * **с начала** — с того же способа, который только что не подошёл. Карусель.
+ *
+ * Пока способы отваливались до запуска tor (мостов такого вида нет — это дёшево
+ * и в том же процессе), дефект был не виден: цикл честно доходил до конца.
+ * Стоило первому способу дойти до загрузки и на ней не построить цепочку — и
+ * перебор превращался в бесконечное повторение первого варианта.
+ *
+ * ## Как решено
+ *
+ * Файлом, по тем же причинам, что и сам способ входа: пишет его процесс `:vpn`,
+ * а пережить он должен смерть этого процесса (`SharedPreferences` кэшируются
+ * попроцессно, I2, и до диска доехать не успели бы).
+ *
+ * Помеченные способы выбывают из перебора, и свежий процесс продолжает с того
+ * места, где предыдущий остановился. Когда выбыли все — перебор объявляется
+ * исчерпанным вслух, а память очищается, чтобы следующая попытка начиналась
+ * заново.
+ *
+ * ## Почему запись протухает
+ *
+ * Забытая отметка хуже отсутствующей: она вычёркивает рабочий способ из
+ * перебора навсегда. Полный перебор из четырёх способов стоит в худшем случае
+ * четырёх загрузок по 150 с плюс перезапуски — [FRESH_FOR_MS] взят с запасом
+ * над этим и при этом достаточно мал, чтобы попытка через полчаса начиналась с
+ * чистого листа.
+ */
+object TorAutoEntryProgress {
+
+    private const val FILE_NAME = "tor_auto_entry.txt"
+
+    /** Полчаса: с запасом над худшим полным перебором и без памяти на следующий раз. */
+    private const val FRESH_FOR_MS = 30L * 60L * 1000L
+
+    /**
+     * Способы, которые в идущем сейчас переборе уже не сработали.
+     *
+     * Протухшая запись читается как пустая — и тут же удаляется, чтобы не
+     * разбирать её снова на каждом подключении.
+     */
+    fun read(context: Context?): Set<String> {
+        val file = fileFor(context) ?: return emptySet()
+        val raw = runCatching { file.baseFile.takeIf { it.exists() }?.readText(Charsets.UTF_8) }
+            .getOrNull()
+            .orEmpty()
+        if (raw.isBlank()) return emptySet()
+        val lines = raw.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
+        val stamp = lines.firstOrNull()?.toLongOrNull() ?: return emptySet()
+        val age = System.currentTimeMillis() - stamp
+        if (age !in 0 until FRESH_FOR_MS) {
+            clear(context)
+            return emptySet()
+        }
+        return lines.drop(1).toSet()
+    }
+
+    /** Помечает способ как не сработавший. Отметка времени обновляется на каждой записи. */
+    fun note(context: Context?, mode: String): Boolean {
+        val file = fileFor(context) ?: return false
+        val updated = read(context) + mode
+        val payload = (listOf(System.currentTimeMillis().toString()) + updated).joinToString("\n")
+        return runCatching {
+            val stream = file.startWrite()
+            try {
+                stream.write(payload.toByteArray(Charsets.UTF_8))
+                file.finishWrite(stream)
+                true
+            } catch (error: Throwable) {
+                file.failWrite(stream)
+                throw error
+            }
+        }.getOrDefault(false)
+    }
+
+    /** Забывает перебор: после успеха, после смены способа входа руками и на исчерпании. */
+    fun clear(context: Context?) {
+        val file = fileFor(context) ?: return
+        runCatching { file.delete() }
+    }
+
+    private fun fileFor(context: Context?): AtomicFile? {
+        val dir = context?.applicationContext?.filesDir ?: return null
+        return AtomicFile(File(dir, FILE_NAME))
+    }
+}
+
 object TorBridgeManager {
 
     /**
@@ -406,8 +716,29 @@ object TorBridgeManager {
     /** Гонка зеркал: ждём победителя не дольше, чем один честный запрос. */
     private const val MIRROR_RACE_TIMEOUT_MS = 25_000L
 
+    /**
+     * Проверка рандеву snowflake: срок короткий и число попыток ограничено.
+     *
+     * Худший случай — сеть, где закрыто всё: два набора по [RENDEZVOUS_PROBE_LIMIT]
+     * проверок, то есть шесть запросов. При восьми секундах на запрос это меньше
+     * минуты, а не минуты; медленнее было бы платить за ответ, которым всё равно
+     * нельзя воспользоваться.
+     */
+    private const val RENDEZVOUS_PROBE_TIMEOUT_MS = 4_000L
+    private const val RENDEZVOUS_PROBE_LIMIT = 3
+
     /** Сколько мостов оставлять в файле. Tor всё равно не держит больше 30 PT-сессий. */
     private const val KEEP_LIMIT = 40
+
+    /**
+     * Все виды мостов, которые приложение умеет поднимать.
+     *
+     * Один список на счётчик, на сводку и на дележ [KEEP_LIMIT]: три
+     * перечисления одного и того же расходятся ровно тогда, когда появляется
+     * четвёртый транспорт, и расхождение выглядит как «мост есть, но его не
+     * видно».
+     */
+    private val KNOWN_KINDS = listOf("obfs4", "webtunnel", "snowflake", "vanilla")
 
     /** Свежести списка хватает на сутки: источники обновляются раз в час, мы — нет. */
     private const val FRESH_FOR_MS = 24L * 60L * 60L * 1000L
@@ -430,7 +761,7 @@ object TorBridgeManager {
                 "TOR: мосты ещё не загружались"
             }
         }
-        val parts = listOf("obfs4", "webtunnel", "vanilla")
+        val parts = KNOWN_KINDS
             .mapNotNull { kind -> snapshot.countOf(kind).takeIf { it > 0 }?.let { "$kind $it" } }
         return "TOR: живых мостов ${snapshot.bridges.size} (${parts.joinToString(", ")})"
     }
@@ -490,6 +821,17 @@ object TorBridgeManager {
         val sources = mutableListOf<String>()
         var lastError = ""
 
+        // Вердикты о рандеву — на весь прогон, а не на вызов.
+        //
+        // Место встречи проверяется дважды: при выборе встроенного набора и
+        // потом в `probeAlive`. Без общей памяти второй проход не только платит
+        // за те же запросы повторно, но и **отменяет решение первого**: ветка
+        // «ни один набор не ответил, оставляем CDN77» писала мосты в список, а
+        // `probeAlive` тут же выбрасывал их по той же проверке — то есть
+        // запасной путь, ради которого ветка и написана, не существовал.
+        // Теперь вердикт один на прогон, и «оставляем» действительно оставляет.
+        val rendezvousVerdicts = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
         val pool = java.util.concurrent.Executors.newFixedThreadPool(PROBE_WORKERS) { runnable ->
             Thread(runnable, "NovaTorProbe").apply { isDaemon = true }
         }
@@ -529,16 +871,31 @@ object TorBridgeManager {
 
             // Moat — «первый контакт»: он отдаёт по два моста на адрес и не ротирует,
             // зато его snowflake-строка несёт актуальные фронты именно для этой страны.
+            //
+            // Он идёт **раньше** встроенных строк намеренно: у обеих записей
+            // snowflake один и тот же отпечаток, то есть один и тот же [TorBridge.id],
+            // а `putIfAbsent` оставляет первого. Ответ Moat для страны свежее
+            // нашей константы и должен побеждать.
             val moat = fetchMoat(client, context)
             moat.forEach { bridge -> collected.putIfAbsent(bridge.id, bridge) }
             if (moat.isNotEmpty()) sources.add("moat")
+
+            // Встроенные строки snowflake — на случай, когда Moat не ответил.
+            //
+            // Сборщики их не отдают: у snowflake мостов два на всю сеть, и
+            // собирать нечего (см. [TorBuiltinBridges]). Без этой строки способ
+            // входа snowflake был бы кнопкой, которая молча не подключается.
+            val builtin = builtinSnowflake(rendezvousVerdicts)
+            var builtinAdded = 0
+            builtin.forEach { bridge -> if (collected.putIfAbsent(bridge.id, bridge) == null) builtinAdded++ }
+            if (builtinAdded > 0) sources.add("встроенные")
 
             if (collected.isEmpty()) {
                 rememberFailure(context, lastError.ifBlank { "ни один источник не ответил" })
                 return
             }
 
-            val alive = probeAlive(collected.values.toList(), pool)
+            val alive = probeAlive(collected.values.toList(), pool, rendezvousVerdicts)
             if (alive.isEmpty()) {
                 rememberFailure(context, "ни один мост не ответил на проверку")
                 return
@@ -547,7 +904,7 @@ object TorBridgeManager {
             val stored = TorBridgeStore.write(
                 context,
                 TorBridgeStore.Snapshot(
-                    bridges = alive.take(KEEP_LIMIT),
+                    bridges = trimKeepingEveryKind(alive),
                     updatedAtMs = System.currentTimeMillis(),
                     source = sources.distinct().joinToString(", "),
                     lastError = "",
@@ -559,7 +916,7 @@ object TorBridgeManager {
             LogManager.log(
                 if (stored) {
                     "Tor: из ${collected.size} собранных мостов живыми оказались ${alive.size}, " +
-                        "сохранили ${minOf(alive.size, KEEP_LIMIT)} " +
+                        "сохранили ${trimKeepingEveryKind(alive).size} " +
                         "(источники: ${sources.distinct().joinToString(", ")})."
                 } else {
                     "Tor: живых мостов ${alive.size}, но записать список не удалось — " +
@@ -597,17 +954,160 @@ object TorBridgeManager {
     }
 
     /**
+     * Какой из двух встроенных наборов snowflake брать — решает замер, а не вера.
+     *
+     * Наборы отличаются только местом встречи с брокером, и именно оно —
+     * единственное, что у snowflake можно закрыть. Поэтому сначала проверяется
+     * основной путь (CDN77), и лишь если он молчит — запасной (AMP-кэш). Оба
+     * сразу отдавать нельзя: отпечатки у них одни и те же, и tor получил бы
+     * четыре моста с двумя личностями (см. [TorBuiltinBridges]).
+     *
+     * Если молчат оба — возвращается всё равно основной набор, но вслух (I4).
+     * «Не дозвонились до брокера с этой сети» и «snowflake не работает» — разные
+     * утверждения: рандеву идёт с uTLS и из ядра, а не этим клиентом, и оно
+     * вполне может пройти там, где не прошла обычная проверка.
+     */
+    private fun builtinSnowflake(verdicts: MutableMap<String, Boolean>): List<TorBridge> {
+        val cdn77 = TorBuiltinBridges.SNOWFLAKE_CDN77.mapNotNull { TorBridge.parse(it) }
+        val amp = TorBuiltinBridges.SNOWFLAKE_AMP.mapNotNull { TorBridge.parse(it) }
+
+        if (cdn77.any { snowflakeRendezvousReachable(it, verdicts) }) {
+            LogManager.log("Tor: встроенный snowflake — рандеву через CDN77 отвечает, берём его (${cdn77.size} моста).")
+            return cdn77
+        }
+        LogManager.log("Tor: встроенный snowflake — CDN77 молчит, пробуем запасной путь через AMP-кэш.")
+        if (amp.any { snowflakeRendezvousReachable(it, verdicts) }) {
+            LogManager.log("Tor: встроенный snowflake — рандеву через AMP-кэш отвечает, берём его (${amp.size} моста).")
+            return amp
+        }
+        // Оба молчат — и это ровно тот случай, ради которого встроенный набор и
+        // нужен. Вердикт переписывается на «годен» **явно**: обычный запрос идёт
+        // без uTLS и без фронтинга, а рандеву в ядре — с ними, и вполне проходит
+        // там, где не прошла проверка. Оставить мосты в списке и тут же
+        // выбросить их проверкой было бы решением, которое само себя отменяет.
+        cdn77.forEach { verdicts[rendezvousKey(it)] = true }
+        LogManager.log(
+            "Tor: встроенный snowflake — ни CDN77, ни AMP-кэш не ответили обычным запросом. " +
+                "Оставляем CDN77 непроверенным: рандеву в ядре идёт с uTLS и может пройти там, где не прошла проверка."
+        )
+        return cdn77
+    }
+
+    /**
+     * Отвечает ли место встречи с брокером snowflake.
+     *
+     * Проверять сам мост бессмысленно: у snowflake мост — это не хост, а
+     * договорённость. Ходит клиент к брокеру (`url=`, либо `ampcache=` фронтом),
+     * а дальше по WebRTC к случайной «снежинке», которой на момент проверки ещё
+     * не существует. Единственное, что можно измерить заранее, — доходит ли
+     * запрос до места встречи, и ровно это здесь и меряется.
+     *
+     * Ответом считается **любой** HTTP-код: корень брокера отдаёт то 404, то
+     * 502, то заглушку CDN, и требовать `200` значило бы объявить живой путь
+     * мёртвым. Важно, что ответ пришёл, а не какой он.
+     */
+    private fun snowflakeRendezvousReachable(
+        bridge: TorBridge,
+        verdicts: MutableMap<String, Boolean>,
+    ): Boolean {
+        val targets = rendezvousTargets(bridge)
+        if (targets.isEmpty()) return false
+        val key = targets.joinToString("|")
+        verdicts[key]?.let { return it }
+
+        val reachable = targets.take(RENDEZVOUS_PROBE_LIMIT).any { target ->
+            runCatching {
+                val request = Request.Builder().url(target).header("User-Agent", "Nova").build()
+                rendezvousProbeClient.newCall(request).execute().use { true }
+            }.getOrDefault(false)
+        }
+        verdicts[key] = reachable
+        return reachable
+    }
+
+    /** Куда именно ходят, чтобы встретиться с брокером: AMP-кэш, брокер, фронты. */
+    private fun rendezvousTargets(bridge: TorBridge): List<String> {
+        val targets = linkedSetOf<String>()
+        bridge.arg("ampcache").takeIf { it.isNotBlank() }?.let { targets += it }
+        bridge.url.takeIf { it.isNotBlank() }?.let { targets += it }
+        (bridge.arg("fronts").split(',') + bridge.arg("front"))
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .forEach { targets += "https://$it/" }
+        return targets.toList()
+    }
+
+    /** Ключ вердикта: у двух мостов одного набора место встречи одно и то же. */
+    private fun rendezvousKey(bridge: TorBridge): String = rendezvousTargets(bridge).joinToString("|")
+
+    /**
+     * Свой клиент для проверки рандеву, с коротким сроком.
+     *
+     * Не общий с [runRefresh]: у того `callTimeout` 40 с, а проверок рандеву до
+     * [RENDEZVOUS_PROBE_LIMIT] на набор и наборов два — на сети, где закрыто всё,
+     * это минуты молчания посреди сбора мостов, и всё это время человек смотрит
+     * на «собираем мосты». Здесь же важно не «дождаться ответа во что бы то ни
+     * стало», а «ответил ли он быстро»: рандеву, до которого нельзя достучаться
+     * за несколько секунд, транспорту всё равно не годится.
+     *
+     * `by lazy` — клиент общий на объект: у OkHttp за каждым свой пул соединений
+     * и свой executor, и заводить их на каждую проверку значит платить больше,
+     * чем стоит сама проверка.
+     */
+    private val rendezvousProbeClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(RENDEZVOUS_PROBE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            .readTimeout(RENDEZVOUS_PROBE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            .callTimeout(RENDEZVOUS_PROBE_TIMEOUT_MS * 2, TimeUnit.MILLISECONDS)
+            .build()
+    }
+
+    /**
+     * Обрезает список до [KEEP_LIMIT], но не вырезает при этом целый вид моста.
+     *
+     * Простое `take(KEEP_LIMIT)` шло по порядку проверки, а порядок этот —
+     * obfs4, vanilla, webtunnel, snowflake. Бюджеты проверок дают до 16+16+8+2
+     * живых, то есть до сорока двух: последние два, а это ровно оба моста
+     * snowflake, в файл не попадали бы никогда. Способ входа при этом был бы на
+     * экране — то есть кнопка, которая молча не подключается, ради которой всё
+     * и делалось.
+     *
+     * Поэтому раздача по кругу: сначала по одному мосту каждого вида, потом по
+     * второму и так далее. Редкий вид переживает обрезку по построению, а
+     * порядок внутри вида сохраняется — у `startLocked` он всё равно свой
+     * фильтр по транспорту.
+     */
+    private fun trimKeepingEveryKind(alive: List<TorBridge>): List<TorBridge> {
+        if (alive.size <= KEEP_LIMIT) return alive
+        val queues = alive.groupBy { it.transport }.values.map { it.toMutableList() }
+        val result = mutableListOf<TorBridge>()
+        while (result.size < KEEP_LIMIT && queues.any { it.isNotEmpty() }) {
+            for (queue in queues) {
+                if (result.size >= KEEP_LIMIT) break
+                if (queue.isNotEmpty()) result.add(queue.removeAt(0))
+            }
+        }
+        return result
+    }
+
+    /**
      * Живость.
      *
      * `obfs4` и «ванильные» — обычный TCP-connect. `webtunnel` — только апгрейд до
      * WebSocket: обычный `GET` отдаёт 502 и на живом мосту, так что «проверка
      * загрузкой страницы» объявила бы мёртвыми больше половины рабочих.
-     * `snowflake` не проверяется вовсе: у него нет своего адреса, он живёт через
-     * брокера, и «мост» здесь — это набор фронтов.
+     * `snowflake` — доступность места встречи с брокером
+     * ([snowflakeRendezvousReachable]): своего адреса у него нет.
+     *
+     * Пропускать snowflake мимо проверки нельзя было бы даже при желании:
+     * функция возвращает **только** то, что сама проверила, а `dialTarget()` у
+     * snowflake пуст. Без своей ветки все его мосты молча исчезали бы здесь,
+     * между сбором и файлом.
      */
     private fun probeAlive(
         bridges: List<TorBridge>,
         pool: java.util.concurrent.ExecutorService,
+        rendezvousVerdicts: MutableMap<String, Boolean>,
     ): List<TorBridge> {
         // Только HTTP/1.1: см. [webtunnelUpgrades]. По HTTP/2 апгрейда не бывает,
         // и проверка объявляла мёртвыми все мосты подряд.
@@ -620,12 +1120,14 @@ object TorBridgeManager {
 
         // Бюджет свой у каждого транспорта: см. PROBE_LIMIT_PER_TRANSPORT.
         val tcpCandidates = bridges
-            .filter { it.transport != "webtunnel" }
+            .filter { !TorBridge.addressIsDecoration(it.transport) }
             .groupBy { it.transport }
             .flatMap { (_, list) -> list.take(PROBE_LIMIT_PER_TRANSPORT) }
         val webtunnelCandidates = bridges
             .filter { it.transport == "webtunnel" && it.url.isNotBlank() }
             .take(PROBE_LIMIT_WEBTUNNEL)
+        // Потолка у snowflake нет: его мостов на всю сеть два.
+        val snowflakeCandidates = bridges.filter { it.transport == "snowflake" }
 
         val tasks = buildList<java.util.concurrent.Callable<TorBridge?>> {
             tcpCandidates.forEach { bridge ->
@@ -634,6 +1136,9 @@ object TorBridgeManager {
             }
             webtunnelCandidates.forEach { bridge ->
                 add(java.util.concurrent.Callable { bridge.takeIf { webtunnelUpgrades(client, bridge.url) } })
+            }
+            snowflakeCandidates.forEach { bridge ->
+                add(java.util.concurrent.Callable { bridge.takeIf { snowflakeRendezvousReachable(bridge, rendezvousVerdicts) } })
             }
         }
 
@@ -715,8 +1220,12 @@ object TorBridgeManager {
     private fun fetchMoat(client: OkHttpClient, context: Context): List<TorBridge> {
         val payload = JSONObject()
             .put("country", "ru")
-            // snowflake не просим: транспорта в ядре нет, а место в ответе он занимает.
-            .put("transports", JSONArray(listOf("webtunnel", "obfs4")))
+            // snowflake просим снова: транспорт в ядре с 1.32.2, а его строка от
+            // Moat несёт фронты, подобранные под страну, — на замере из РФ это
+            // были `cdn.zk.mk,img.icons8.com,cdn.kde.org` вместо канонических
+            // `www.cdn77.com,www.phpmyadmin.net`. Встроенная строка остаётся
+            // запасной на случай, когда Moat не отвечает вовсе.
+            .put("transports", JSONArray(listOf("webtunnel", "obfs4", "snowflake")))
             .toString()
 
         runCatching { parseMoat(postJson(client, MOAT_SETTINGS_URL, payload)) }

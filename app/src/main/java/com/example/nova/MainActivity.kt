@@ -693,6 +693,15 @@ class MainActivity : AppCompatActivity() {
                 switchToNextVlessProfile()
                 return@setOnClickListener
             }
+            // У Tor «следующий» — это выход, а не профиль: ни списка конфигураций,
+            // ни endpoint'ов у него нет, и ветка WARP ответила бы «нет следующей
+            // конфигурации».
+            if (clientData.getExitRegionPreference().trim().lowercase(Locale.ROOT) ==
+                ConnectionSelectorPolicy.CHIP_TOR
+            ) {
+                switchToNextTorExit()
+                return@setOnClickListener
+            }
             val importedOnly = clientData.isImportedWarpOnlyModeEnabled()
             // Кнопка ведёт по всей цепочке, а не по одному списку.
             //
@@ -963,6 +972,9 @@ class MainActivity : AppCompatActivity() {
             )
         )
         NovaFontHelper.apply(findViewById(android.R.id.content))
+        appliedFontFace = runCatching {
+            NovaTheme.optionFor(NovaTheme.current(this)).face
+        }.getOrDefault(NovaTheme.Face.DEFAULT)
         if (mainBackgroundMode() == MainBackgroundPolicy.MODE_IMAGE) {
             loadBackdropArtSafely()
         } else {
@@ -1146,44 +1158,47 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Ставит фон главного экрана: чёрное поле плюс текущая фактура оформления.
+     *
+     * Здесь декодировался `background.webp` — один растр на все темы. Владелец
+     * убрал картинку совсем: фоном служит та же фактура, что выбрана для
+     * настроек, а «без фактуры» означает чёрный экран ([NovaMainBackdrop]).
+     *
+     * Узор строится не мгновенно, и ждать его нельзя — это главный поток. Пока
+     * его нет, фон остаётся прежним (в первый раз — пустым), а готовый приезжает
+     * посылкой. Подпись выбора запоминается, чтобы возврат с экрана оформления
+     * пересобрал фон, а обычный возврат — нет.
+     */
     private fun loadBackdropArtSafely() {
-        val metrics = resources.displayMetrics
-        val targetWidth = metrics.widthPixels.coerceAtLeast(1)
-        val targetHeight = metrics.heightPixels.coerceAtLeast(1)
-        val boundsOptions = BitmapFactory.Options().apply {
-            inJustDecodeBounds = true
-            inScaled = false
-        }
-        BitmapFactory.decodeResource(resources, R.drawable.background, boundsOptions)
-        val targetScale = if (lowEndUiAnimationDevice || Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) 1.0 else 1.35
-        val sampleSize = computeBackdropSampleSize(
-            sourceWidth = boundsOptions.outWidth.coerceAtLeast(1),
-            sourceHeight = boundsOptions.outHeight.coerceAtLeast(1),
-            targetWidth = (targetWidth * targetScale).toInt().coerceAtLeast(targetWidth),
-            targetHeight = (targetHeight * targetScale).toInt().coerceAtLeast(targetHeight),
-        )
-        val decodeOptions = BitmapFactory.Options().apply {
-            inScaled = false
-            inSampleSize = sampleSize
-            inPreferredConfig = if (lowEndUiAnimationDevice || Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
-                Bitmap.Config.RGB_565
-            } else {
-                Bitmap.Config.ARGB_8888
+        val signature = NovaMainBackdrop.signature(this)
+        appliedBackdropSignature = signature
+        val ready = NovaMainBackdrop.request(this) { bitmap ->
+            // Приходит из фонового потока: виды живут на главном.
+            runOnUiThread {
+                if (appliedBackdropSignature == signature &&
+                    mainBackgroundMode() == MainBackgroundPolicy.MODE_IMAGE
+                ) {
+                    ivBackgroundArt.setImageBitmap(bitmap)
+                }
             }
-            inDither = inPreferredConfig == Bitmap.Config.RGB_565
         }
-        val bitmap = runCatching {
-            BitmapFactory.decodeResource(resources, R.drawable.background, decodeOptions)
-        }.getOrNull()
-        if (bitmap != null) {
-            ivBackgroundArt.setImageBitmap(bitmap)
-            LogManager.log(
-                "Фон загружен безопасно: ${bitmap.width}x${bitmap.height}, sampleSize=$sampleSize, config=${bitmap.config}"
-            )
-        } else {
-            ivBackgroundArt.setImageDrawable(null)
-            LogManager.log("Не удалось загрузить фон безопасно. Оставляем однотонный фон.")
-        }
+        if (ready != null) ivBackgroundArt.setImageBitmap(ready)
+    }
+
+    /** Выбор оформления, под который собран текущий фон. */
+    private var appliedBackdropSignature: String? = null
+
+    /**
+     * Пересобирает фон, если в настройках сменили фактуру или тему.
+     *
+     * Сравнение, а не безусловная пересборка: возврат на главный экран случается
+     * постоянно, а оформление меняют изредка, и сведение растра стоит заметно.
+     */
+    private fun reloadBackdropIfAppearanceChanged() {
+        if (mainBackgroundMode() != MainBackgroundPolicy.MODE_IMAGE) return
+        if (NovaMainBackdrop.signature(this) == appliedBackdropSignature) return
+        loadBackdropArtSafely()
     }
 
     private fun mainBackgroundMode(): String {
@@ -1206,22 +1221,6 @@ class MainActivity : AppCompatActivity() {
         networkBackground.stopAnimation()
         networkBackground.visibility = View.GONE
         networkBackground.alpha = 0f
-    }
-
-    private fun computeBackdropSampleSize(
-        sourceWidth: Int,
-        sourceHeight: Int,
-        targetWidth: Int,
-        targetHeight: Int,
-    ): Int {
-        var sampleSize = 1
-        while (
-            sourceWidth / sampleSize > targetWidth * 2 ||
-                sourceHeight / sampleSize > targetHeight * 2
-        ) {
-            sampleSize *= 2
-        }
-        return sampleSize.coerceAtLeast(1)
     }
 
     private fun maybeRequestNotificationPermission() {
@@ -1278,6 +1277,8 @@ class MainActivity : AppCompatActivity() {
         // а её главный экран сам не пересоздаёт, поэтому акцент ореола читается
         // заново здесь же.
         applySelectionGlowAccent()
+        reapplyFontsIfFaceChanged()
+        reloadBackdropIfAppearanceChanged()
         refreshMainRegionSelector()
         refreshProtonAvailableCountries()
         refreshWarpDiscoverySnapshotFromStorage()
@@ -2122,6 +2123,13 @@ class MainActivity : AppCompatActivity() {
             val appContext = applicationContext
             Thread({
                 TorEntryModeStore.write(appContext, chosen)
+                // Человек вмешался — перебор начинается с чистого листа.
+                //
+                // Память о неудачных способах живёт полчаса, и без этой строки
+                // возврат на «Авто» после ручных проб продолжал бы прошлый
+                // перебор: часть способов оставалась бы вычеркнутой, хотя человек
+                // просил начать заново.
+                TorAutoEntryProgress.clear(appContext)
                 if (reconnecting) {
                     SessionReapply.applyToLiveSession(appContext, ClientData(appContext))
                 }
@@ -2276,7 +2284,18 @@ class MainActivity : AppCompatActivity() {
         // ширина приходит спецификацией `UNSPECIFIED`, то есть нулём: строка
         // рассыпалась на несколько. План выключает перенос вовсе — лишнее уезжает
         // вбок и прокручивается пальцем, как и три основные полосы.
-        (mainSubRegionGroup as? FlowRadioGroup)?.rowPlan = listOf(entries.size)
+        (mainSubRegionGroup as? FlowRadioGroup)?.let { flow ->
+            flow.rowPlan = listOf(entries.size)
+            // Одна ширина на всех — приём для **нескольких** строк: он ставит
+            // колонки соседних полос друг под друга. Здесь строка всегда одна, и
+            // у Tor подписи разной длины («AUTO» против «БЕЗ МОСТОВ») растягивало
+            // короткие до самой длинной, оставляя вокруг них пустоту. Владелец
+            // попросил размер по тексту.
+            //
+            // У Opera и Proton подписи — двухбуквенные коды одинаковой длины, там
+            // равная ширина ничего не портит и менять её незачем.
+            flow.uniformItemWidth = chipValue != ConnectionSelectorPolicy.CHIP_TOR
+        }
         val signature = chipValue + "|" + entries.joinToString(",") { it.first }
         if (signature != mainSubRegionSignature) {
             mainSubRegionSignature = signature
@@ -3928,7 +3947,7 @@ class MainActivity : AppCompatActivity() {
                     if (latency >= 0) {
                          latencyGraph.addLatency(latency)
                          labelView.text = "Ping:\n$latency ms"
-                         labelView.setTextColor(LatencyGraphView.colorForLatency(latency))
+                         labelView.setTextColor(themeAccentColor)
                     } else {
                          latencyGraph.addLatency(-1)
                          labelView.text = "Ping:\n---"
@@ -4012,7 +4031,9 @@ class MainActivity : AppCompatActivity() {
         val tunnelConnected = isTunnelConnected()
         tvIpAddress.setTextColor(
             if (tunnelConnected && tunnelIpResolved) {
-                android.graphics.Color.parseColor("#50C878")
+                // Акцент темы, а не зашитый изумруд: цвет здесь значит «адрес
+                // за туннелем», и он обязан совпадать с чипами и версией.
+                themeAccentColor
             } else {
                 android.graphics.Color.WHITE
             }
@@ -4295,6 +4316,18 @@ class MainActivity : AppCompatActivity() {
         } else {
             "ПОДКЛЮЧЕНИЕ..."
         }
+    }
+
+    /**
+     * Красит подпись «Ping:» акцентом темы.
+     *
+     * Отдельной функцией потому, что цвет ставят три места: смена темы, приход
+     * замера и сброс. Пока замера нет, подпись остаётся серой — «значения нет»
+     * обязано отличаться от «значение есть», и акцент этого различия не даёт.
+     */
+    private fun applyLatencyLabelAccent() {
+        val labelView = findViewById<TextView>(R.id.tv_internet_label) ?: return
+        if (lastMeasuredLatencyMs >= 0) labelView.setTextColor(themeAccentColor)
     }
 
     private fun resetLatencyDisplay() {
@@ -5291,7 +5324,15 @@ class MainActivity : AppCompatActivity() {
      *
      * У WARP, Proton и VLESS кнопка перебирает **свой** список узлов и остаётся.
      */
-    private val NEXT_PROFILE_HIDDEN_REGIONS = setOf("eu", "us", "masque", "tor")
+    /**
+     * Регионы, где «следующего» просто не бывает.
+     *
+     * `tor` отсюда убран: у него следующий есть — это следующий выход, то есть
+     * другая цепочка и другой адрес. Кнопка для него называется иначе
+     * ([applyNextProfileButtonVisibility]), потому что «профиль» у Tor ничего не
+     * значит.
+     */
+    private val NEXT_PROFILE_HIDDEN_REGIONS = setOf("eu", "us", "masque")
 
     /**
      * Подпись «след. профиль» над кнопкой «&gt;».
@@ -5311,7 +5352,69 @@ class MainActivity : AppCompatActivity() {
     private fun applyNextProfileButtonVisibility() {
         if (!::btnNextProfile.isInitialized) return
         val region = clientData.getExitRegionPreference().trim().lowercase(Locale.ROOT)
+        // У Tor нет профилей — есть выходы. Подпись «след. профиль» над кнопкой,
+        // которая меняет цепочку, называла бы вещь не своим именем.
+        nextProfileCaption?.text = if (region == ConnectionSelectorPolicy.CHIP_TOR) {
+            "след. выход"
+        } else {
+            "след. профиль"
+        }
         setNextProfileVisible(region !in NEXT_PROFILE_HIDDEN_REGIONS)
+    }
+
+    /**
+     * Следующий выход Tor: другой способ входа, а значит другая цепочка и адрес.
+     *
+     * Своей команды «дай новую цепочку» у нас нет — управляющего порта tor мы не
+     * поднимаем, — поэтому смена выхода делается тем же путём, что и смена входа
+     * руками: следующий способ по кругу плюс переподключение. Побочный выигрыш в
+     * том, что это ещё и уводит с входа, который на этой сети мог просесть.
+     *
+     * Круг не включает «Авто»: кнопка меняет выход, а не отменяет перебор.
+     */
+    private fun switchToNextTorExit() {
+        val previous = TorEntryModeStore.read(this)
+        // На «Авто» кнопка меняет только выход, а сам способ входа не трогает.
+        //
+        // Первая версия крутила круг и отсюда: одно нажатие уводило с «Авто» на
+        // `webtunnel` и молча отключало перебор. Человек просил другой адрес, а
+        // получал ещё и отмену автоматики — ровно то, чего он не просил (I1).
+        // Новый выход при этом всё равно появляется: переподключение строит
+        // цепочку заново, а цепочка и есть выход.
+        val staysAuto = previous == ConnectionSelectorPolicy.TOR_ENTRY_AUTO
+        val chosen = if (staysAuto) previous else ConnectionSelectorPolicy.nextTorEntry(previous)
+        val label = ConnectionSelectorPolicy.TOR_ENTRY_MODES
+            .firstOrNull { it.first == chosen }?.second ?: chosen
+        val reconnecting = hasLiveSessionToReapply()
+        // Тот же порядок, что у выбора входа чипом: сперва файл, потом реаплай, и
+        // всё в одном своём потоке — иначе служба успевает прочитать прежний
+        // способ (I13, I18).
+        val appContext = applicationContext
+        // Память перебора здесь **не** чистится, и это решение, а не пропуск.
+        //
+        // Кнопка просит другой выход, а не другой способ входа: на «Авто» она
+        // оставляет «Авто» и просто пересобирает цепочку. Стереть память значило
+        // бы заодно отправить перебор обратно к первому входу — то есть на сети,
+        // где он как раз и не работает, подарить человеку лишние две с половиной
+        // минуты ожидания и перезапуск `:vpn` за нажатие, которое к входу
+        // отношения не имело. Явный выбор входа чипом её чистит, и этого
+        // достаточно.
+        Thread({
+            TorEntryModeStore.write(appContext, chosen)
+            if (reconnecting) {
+                SessionReapply.applyToLiveSession(appContext, ClientData(appContext))
+            }
+            runOnUiThread { if (!isFinishing && !isDestroyed) refreshMainRegionSelector() }
+        }, "NovaTorNextExit").apply { isDaemon = true; start() }
+        if (reconnecting) updateUiByState(NovaVpnService.STATE_CONNECTING)
+        LogManager.log(
+            if (staysAuto) {
+                "Главный экран: следующий выход Tor — новая цепочка, вход остаётся AUTO, " +
+                    "переподключение=$reconnecting."
+            } else {
+                "Главный экран: следующий выход Tor — $label, переподключение=$reconnecting."
+            }
+        )
     }
 
     private fun renderStoppedState() {
@@ -5757,16 +5860,154 @@ class MainActivity : AppCompatActivity() {
      * не стоит ни кадра, а `NovaTheme.current` после первого чтения ходит в уже
      * загруженную карту настроек (I13).
      */
+    /**
+     * Начертание, которым сейчас размечен главный экран.
+     *
+     * Главный экран, в отличие от настроек, себя не пересоздаёт: `recreate()` там
+     * зовёт только экран настроек после выбора темы. Поэтому шрифт, поставленный
+     * в `onCreate`, оставался прежним — тема менялась, а надписи оставались
+     * Roboto, хотя Matrix обязан быть моноширинным, а Diablo II — с засечками.
+     */
+    private var appliedFontFace: NovaTheme.Face? = null
+
+    /**
+     * Переставляет шрифт, если тема сменила начертание.
+     *
+     * Обход дерева видов на каждый возврат на экран стоит заметно, а начертание
+     * меняется раз в месяц — поэтому сперва сравнение, и только потом обход.
+     */
+    private fun reapplyFontsIfFaceChanged() {
+        val face = runCatching {
+            NovaTheme.optionFor(NovaTheme.current(this)).face
+        }.getOrDefault(NovaTheme.Face.DEFAULT)
+        if (face == appliedFontFace) return
+        appliedFontFace = face
+        runCatching { NovaFontHelper.apply(findViewById(android.R.id.content)) }
+    }
+
     private fun applySelectionGlowAccent() {
         val themedForAccent = android.view.ContextThemeWrapper(
             this,
             NovaTheme.optionFor(NovaTheme.current(this)).styleRes,
         )
         val accent = NovaTheme.color(themedForAccent, R.attr.novaAccent)
+        themeAccentColor = accent
         listOfNotNull(mainRegionGroup as? FlowRadioGroup, mainSubRegionGroup).forEach { group ->
             group.selectionGlowColor = accent
         }
+
+        // Акцент принадлежит экрану, а не одним чипам.
+        //
+        // Изумруд `#50C878` у IP и у версии и неоновая мята `#3FD9A0` у хорошего
+        // пинга стояли литералами с дотемных времён: какую тему ни выбери, низ
+        // экрана оставался зелёным, и выбор читался как «покрасили только кнопки».
+        // Литералы отсюда не убрать в разметку (`?attr/nova*` в теме главного
+        // экрана нет — см. `NovaDialogs.apply`), поэтому цвет ставится кодом, и
+        // ровно в одном месте.
+        if (::tvVersion.isInitialized) tvVersion.setTextColor(accent)
+
+        // У IP цвет означает «туннель поднят и адрес за ним настоящий», поэтому
+        // здесь ставится только зелёная половина этого признака; белую половину
+        // (туннеля нет) ставит `renderIpRow`, и она из темы не берётся.
+        if (::tvIpAddress.isInitialized && isTunnelConnected() && tunnelIpResolved) {
+            tvIpAddress.setTextColor(accent)
+        }
+
+        // Подпись «Ping:» — по теме, а сама шкала — нет.
+        //
+        // Линия, сияние и заливка графика означают качество связи, и значение это
+        // одинаково во всех десяти темах: перекрась «хорошо» в акцент — и один и
+        // тот же пинг читался бы по-разному в зависимости от оформления. Тема
+        // берёт только текст с числом.
+        applyLatencyLabelAccent()
+
+        // Фоновая анимация: линии, узлы и градиентная заливка. Градиент живёт
+        // внутри самого вида, поэтому он появляется ровно тогда, когда включена
+        // анимация, и гаснет вместе с ней — отдельного признака не нужно.
+        if (::networkBackground.isInitialized) networkBackground.applyAccent(accent)
+
+        applyCountryBadgeAccent(accent)
+
+        // Волны подключения: цвет и точка, из которой они расходятся.
+        if (::tronBackdrop.isInitialized) {
+            tronBackdrop.applyAccent(accent)
+            syncPulseOriginToConnectButton()
+        }
     }
+
+    /**
+     * Отдаёт кольцам границы кнопки «ПОДКЛЮЧИТЬ».
+     *
+     * Волна повторяет форму кнопки, поэтому её размеры приходят от самой кнопки, а
+     * не считаются долей экрана: прежний центр `высота * 0.43` совпадал с кнопкой
+     * ровно на одном размере экрана, а на остальных волны расходились мимо неё.
+     *
+     * Границы известны только после раскладки, поэтому запрос идёт посылкой на
+     * саму кнопку: до неё ширина и высота нулевые.
+     */
+    private fun syncPulseOriginToConnectButton() {
+        if (!::btnConnect.isInitialized || !::tronBackdrop.isInitialized) return
+        btnConnect.post {
+            if (isFinishing || isDestroyed) return@post
+            val w = btnConnect.width.toFloat()
+            val h = btnConnect.height.toFloat()
+            if (w <= 0f || h <= 0f) return@post
+            // Координаты кнопки и вида общие: оба лежат в одном `ConstraintLayout`.
+            tronBackdrop.setPulseOrigin(
+                btnConnect.x + w / 2f,
+                btnConnect.y + h / 2f,
+                w / 2f,
+                h / 2f,
+            )
+        }
+    }
+
+    /**
+     * Бейдж «WARP: RU» — в оформлении чипов выбора региона.
+     *
+     * В разметке у него лежал `bg_country_badge.xml` с зашитой зелёной обводкой
+     * `#8050C878` и зеленоватой заливкой: какую тему ни выбери, бейдж оставался
+     * зелёным рядом с розовыми чипами GTA. Форма и заливка здесь те же, что у
+     * выбранного чипа (`bg_region_chip.xml`), а обводку даёт акцент — ровно так же,
+     * как её рисует `FlowRadioGroup`.
+     *
+     * Фигура собирается кодом, а не ресурсом, по той же причине, по какой её
+     * рисует код у чипов: у темы главного экрана нет словаря `?attr/nova*`.
+     */
+    private fun applyCountryBadgeAccent(accent: Int) {
+        if (!::tvCountryBadge.isInitialized) return
+        val density = resources.displayMetrics.density
+        val shape = android.graphics.drawable.GradientDrawable().apply {
+            this.shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+            cornerRadius = 18f * density
+            setColor(android.graphics.Color.parseColor("#3D0D1219"))
+            setStroke(
+                (1f * density + 0.5f).toInt(),
+                android.graphics.Color.argb(
+                    0x80,
+                    android.graphics.Color.red(accent),
+                    android.graphics.Color.green(accent),
+                    android.graphics.Color.blue(accent),
+                ),
+            )
+        }
+        // Подложка сбрасывает отступы на те, что у новой фигуры, а у неё их нет:
+        // без этой строки текст упирается в обводку (тот же случай, что в
+        // `NovaDialogs.apply`).
+        val padH = (10f * density + 0.5f).toInt()
+        val padV = (6f * density + 0.5f).toInt()
+        tvCountryBadge.background = shape
+        tvCountryBadge.setPadding(padH, padV, padH, padV)
+    }
+
+    /**
+     * Акцент текущей темы, снятый последним вызовом [applySelectionGlowAccent].
+     *
+     * Нужен местам, которые красят сами и позже: отрисовка строки IP и приход
+     * замера задержки. Спрашивать тему заново там нельзя — это `ContextThemeWrapper`
+     * и разбор атрибута на каждый замер, то есть раз в две секунды (I13).
+     */
+    private var themeAccentColor: Int = android.graphics.Color.parseColor("#50C878")
 
     private fun isTunnelLiveForReapply(): Boolean =
         (vpnState == NovaVpnService.STATE_CONNECTED || vpnState == NovaVpnService.STATE_CONNECTING) &&
@@ -6306,6 +6547,14 @@ class MainActivity : AppCompatActivity() {
         }
         tronBackdrop.alpha = 0.86f
         tronBackdrop.visibility = View.VISIBLE
+        // Созвездие принадлежит фоновой анимации, а не кольцам.
+        //
+        // Ветка режима «фактура» — единственная, где кольца крутятся в режиме
+        // CONNECTING, а признак созвездия никто не выставляет: он остаётся тем,
+        // что поставила предыдущая ветка, и после сеанса в режиме анимации
+        // включённым. Тогда при подключении поверх проступающей фактуры кольца
+        // шли сквозь звёзды и линии — владелец попросил оставить только кольца.
+        tronBackdrop.setYogurtIndigoEnabled(false)
         tronBackdrop.setMode(TronRingsView.Mode.CONNECTING)
         if (lowEndUiAnimationDevice) {
             backgroundRevealAnimator = null

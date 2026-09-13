@@ -847,13 +847,21 @@ class NovaVpnService : OperaNativeVpnService() {
          * «подключилось, но ничего не грузится». На IPv6-эндпоинт обвязка на 20 Б
          * больше, и потолок там 1420.
          *
-         * Пол [TUNNEL_MTU_MIN]: ниже выигрыш нигде не измерен, а накладные расходы
-         * растут линейно — 1000 против 1280 это на 28 % больше пакетов на тот же
-         * объём. По умолчанию [TUNNEL_MTU_DEFAULT], минимум канала для IPv6
-         * (RFC 8200) — прежнее поведение приложения.
+         * Пол [TUNNEL_MTU_MIN] — 600, а не 1000. Накладные расходы там уже заметные
+         * (600 против 1280 — вдвое больше пакетов на тот же объём), и по умолчанию
+         * такое значение не выставляется никогда. Но пол существует не ради
+         * оптимального случая, а ради сломанного: сети с PPPoE, двойным VPN,
+         * туннелем оператора и мобильные точки доступа режут путь заметно ниже
+         * 1000, а дыра MTU снаружи выглядит как «подключилось и ничего не
+         * грузится» (G162). Пока значение нельзя опустить, единственный выход для
+         * такого человека — не пользоваться приложением, и это худший ответ, чем
+         * лишние пакеты.
+         *
+         * По умолчанию [TUNNEL_MTU_DEFAULT], минимум канала для IPv6 (RFC 8200) —
+         * прежнее поведение приложения.
          */
         const val WARP_WIRE_OVERHEAD_IPV4 = 60
-        const val TUNNEL_MTU_MIN = 1000
+        const val TUNNEL_MTU_MIN = 600
         const val TUNNEL_MTU_MAX = 1440
         const val TUNNEL_MTU_DEFAULT = 1280
         const val TUNNEL_MTU_STEP = 10
@@ -1093,6 +1101,16 @@ class NovaVpnService : OperaNativeVpnService() {
 
         /** Проба через цепочку Tor: три узла отвечают секундами, а не сотнями миллисекунд. */
         private const val TOR_SESSION_PROBE_TIMEOUT_MS = 12_000
+
+        /**
+         * Сколько ждать, пока прежняя фаза Tor отпустит заслон.
+         *
+         * Двадцать секунд с запасом покрывают быстрый выход фазы, у которой
+         * устарело поколение: она проверяет отмену раз в секунду. Фаза, которая
+         * за это время не вышла, занята настоящим делом — её не перебиваем.
+         */
+        private const val TOR_PHASE_HANDOVER_WAIT_MS = 20_000L
+
 
         /**
          * Сколько времени доказательство живости Tor считается свежим.
@@ -1394,6 +1412,7 @@ class NovaVpnService : OperaNativeVpnService() {
         private const val WHITELIST_REGIME_CACHE_MS = 5L * 60L * 1000L
         private const val BACKGROUND_HEARTBEAT_REQUEST_CODE = 4515
         private const val STOP_CLEANUP_CONFIRM_REQUEST_CODE = 4516
+        private const val DOOMED_RESTART_REQUEST_CODE = 4517
         private const val BACKGROUND_HEARTBEAT_INTERVAL_MS = 120_000L
         private const val BACKGROUND_HEARTBEAT_SCREEN_OFF_INTERVAL_MS = 45_000L
         private const val BACKGROUND_HEARTBEAT_CONNECTING_INTERVAL_MS = 30_000L
@@ -1477,6 +1496,9 @@ class NovaVpnService : OperaNativeVpnService() {
         super.onCreate()
         LogManager.setAppContext(this)
         NovaRelay.attach(this)
+        // Процесс поднялся — будильник восстановления своё отработал. Не снять его
+        // значит получить второй `RESTORE_LAST_SESSION` уже в живой процесс.
+        cancelSessionRestoreAlarm()
         // Служба умеет стартовать без экрана — по автозапуску или из плитки, — поэтому
         // сброс после обновления проверяется и здесь. Отметка версии лежит в файле,
         // так что второй процесс её увидит и повторять сброс не станет.
@@ -3226,14 +3248,100 @@ class NovaVpnService : OperaNativeVpnService() {
     }
 
     private fun requestRestartFromMainProcess() {
+        // Быстрый путь: если главный экран открыт, он поднимет сеанс сразу, как
+        // только обречённый процесс умрёт.
         runCatching {
             sendBroadcast(
                 Intent(ACTION_VPN_PROCESS_DOOMED).apply { setPackage(packageName) }
             )
         }.onFailure {
             LogManager.log(
-                "Не удалось позвать основной процесс на перезапуск: ${it.message}. " +
-                    "Остаётся перезапуск средствами Android с его задержкой."
+                "Не удалось позвать основной процесс на перезапуск: ${it.message}."
+            )
+        }
+        // Надёжный путь: будильник. См. [scheduleSessionRestoreAfterProcessExit].
+        scheduleSessionRestoreAfterProcessExit()
+    }
+
+    /**
+     * Будильник, который поднимет сеанс после смерти этого процесса.
+     *
+     * Дефект, который это чинит, владелец описал так: «при смене сети с мобильной
+     * на Wi-Fi, особенно на TOR, связь теряется и сама не восстанавливается —
+     * только вручную». Причина: `ACTION_VPN_PROCESS_DOOMED` — широковещательное
+     * сообщение, а слушал его **только `MainActivity`**, приёмником, заведённым в
+     * коде экрана. Экран свёрнут или выгружен — слушать некому. А уйти этому
+     * процессу всё равно надо: второй `tor_run_main` в одном процессе кончается
+     * SIGABRT (G185), поэтому новый сеанс Tor обязан подниматься в свежем.
+     * Служба при этом `START_NOT_STICKY`, то есть сама Android её не вернёт.
+     * Снаружи это и есть «отвалилось и висит».
+     *
+     * Будильник живёт в `system_server`, а не в нашем процессе, и поэтому
+     * переживает его смерть — в этом весь смысл. `getForegroundService` начиная с
+     * O: после смерти процесса приложение в фоне, и обычный `startService` на
+     * него бы не сработал.
+     *
+     * Четыре секунды — это `scheduleVpnProcessExit` (0,6 с) плюс запас на разбор
+     * сеанса и на то, чтобы система успела заметить смерть процесса. Раньше
+     * будить бессмысленно: служба поднимется в том же обречённом процессе.
+     */
+    /**
+     * Снимает будильник восстановления: процесс жив, повторный подъём не нужен.
+     *
+     * Без этого будильник срабатывал уже после того, как сеанс подняли, и
+     * приносил в живой процесс второй `RESTORE_LAST_SESSION` — а тот заводил
+     * вторую фазу Tor поверх первой.
+     */
+    private fun cancelSessionRestoreAlarm() {
+        val alarmManager = getSystemService(AlarmManager::class.java) ?: return
+        val intent = Intent(applicationContext, NovaVpnService::class.java).apply {
+            action = ACTION_RESTORE_LAST_SESSION
+        }
+        val flags = PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
+        val pendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            PendingIntent.getForegroundService(applicationContext, DOOMED_RESTART_REQUEST_CODE, intent, flags)
+        } else {
+            PendingIntent.getService(applicationContext, DOOMED_RESTART_REQUEST_CODE, intent, flags)
+        } ?: return
+        runCatching {
+            alarmManager.cancel(pendingIntent)
+            pendingIntent.cancel()
+        }
+    }
+
+    private fun scheduleSessionRestoreAfterProcessExit() {
+        val clientData = ClientData(this)
+        if (!clientData.getAutoReconnect()) {
+            LogManager.log(
+                "Процесс :vpn уходит, но авто-реконнект выключен — будильник на восстановление не ставим."
+            )
+            return
+        }
+        if (isUserStopped || explicitStopRequested) return
+        val alarmManager = getSystemService(AlarmManager::class.java) ?: return
+        val intent = Intent(applicationContext, NovaVpnService::class.java).apply {
+            action = ACTION_RESTORE_LAST_SESSION
+        }
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val pendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            PendingIntent.getForegroundService(
+                applicationContext,
+                DOOMED_RESTART_REQUEST_CODE,
+                intent,
+                flags,
+            )
+        } else {
+            PendingIntent.getService(applicationContext, DOOMED_RESTART_REQUEST_CODE, intent, flags)
+        }
+        val scheduled = scheduleSafeInexactServiceAlarm(
+            alarmManager = alarmManager,
+            triggerAt = SystemClock.elapsedRealtime() + 4_000L,
+            pendingIntent = pendingIntent,
+            label = "restore-after-process-exit",
+        )
+        if (scheduled) {
+            LogManager.log(
+                "Поставлен будильник на восстановление сеанса через 4 с после смерти процесса :vpn."
             )
         }
     }
@@ -5577,6 +5685,20 @@ class NovaVpnService : OperaNativeVpnService() {
             return
         }
         if (!cleanupInProgress.compareAndSet(false, true)) {
+            // Явный останов человека нельзя терять об уже идущую уборку: признаки
+            // в основном процессе к этому моменту уже сняты, экран показывает
+            // «отключено», и молчаливый возврат оставил бы туннель поднятым под
+            // этой надписью (I4). Отмечаем намерение — идущая уборка увидит его и
+            // доведёт останов до конца вместо мягкого перезапуска.
+            if (manualStopRequested && !unexpectedDisconnect) {
+                explicitStopRequested = true
+                isUserStopped = true
+                suppressSessionRestore = true
+                LogManager.log(
+                    "Явный останов пришёл во время уборки: помечаем сеанс остановленным, " +
+                        "идущая уборка доведёт снос до конца."
+                )
+            }
             return
         }
         // Guard снимаем в finally: между взведением и снятием больше сотни строк, и
@@ -8953,6 +9075,71 @@ class NovaVpnService : OperaNativeVpnService() {
      * готовый сокет — вызывающая сторона обязана его закрыть — или null, если узел
      * отказал.
      */
+    /**
+     * Спрашивает у tor адрес IPv4 для имени — расширение SOCKS5 `RESOLVE` (0xF0).
+     *
+     * Зачем. Через SOCKS имя разрешает **выход**, и семейство выбирает тоже он.
+     * `torrc-defaults` службы tor-android объявляет SocksPort с флагами
+     * `IPv6Traffic PreferIPv6`, поэтому выход спрашивал AAAA первым и соединялся
+     * по IPv6 — а `whatismyip.help` честно возвращал адрес IPv6. На главном экране
+     * строка IPv4 оставалась прочерком, и владелец сообщил это как «в TOR не
+     * всегда определяется IPv4». Переопределить флаги нельзя: вторая строка
+     * `SocksPort` в нашем torrc завела бы второй слушатель, а не заменила чужой.
+     *
+     * Поэтому семейство выбирается на нашей стороне: сначала спрашиваем A-запись,
+     * затем дозваниваемся по литералу. Имя при этом остаётся в SNI и в `Host`,
+     * то есть TLS проверяется по настоящему имени.
+     *
+     * Команда 0xF0 — расширение именно tor'а (`socks-extensions.txt`); на чужом
+     * SOCKS она вернёт отказ, и это правильный ответ: звать её больше неоткуда.
+     */
+    private fun resolveIpv4ThroughTorSocks(socksPort: Int, host: String, timeoutMs: Int): String? {
+        var socket: Socket? = null
+        return try {
+            socket = Socket()
+            socket.connect(InetSocketAddress("127.0.0.1", socksPort), timeoutMs)
+            socket.soTimeout = timeoutMs
+            val output = socket.getOutputStream()
+            val input = socket.getInputStream()
+            output.write(byteArrayOf(0x05, 0x01, 0x00))
+            output.flush()
+            val greeting = ByteArray(2)
+            if (!readFully(input, greeting)) return null
+            if (greeting[0].toInt() != 0x05 || greeting[1].toInt() != 0x00) return null
+
+            val hostBytes = host.toByteArray(Charsets.US_ASCII)
+            val request = ByteArray(7 + hostBytes.size)
+            request[0] = 0x05
+            request[1] = 0xF0.toByte()
+            request[2] = 0x00
+            request[3] = 0x03
+            request[4] = hostBytes.size.toByte()
+            hostBytes.copyInto(request, 5)
+            output.write(request)
+            output.flush()
+
+            val head = ByteArray(4)
+            if (!readFully(input, head)) return null
+            if (head[0].toInt() != 0x05 || head[1].toInt() != 0x00) return null
+            // Берём только IPv4: ради него всё и затевалось. Ответ AAAA здесь
+            // означает, что A-записи у имени нет, и дозваниваться по литералу
+            // нечем — пусть выход решает сам, как решал раньше.
+            if ((head[3].toInt() and 0xFF) != 0x01) return null
+            val address = ByteArray(4)
+            if (!readFully(input, address)) return null
+            val port = ByteArray(2)
+            if (!readFully(input, port)) return null
+            address.joinToString(".") { (it.toInt() and 0xFF).toString() }
+        } catch (_: Exception) {
+            null
+        } finally {
+            try {
+                socket?.close()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     private fun openSocksTunnel(socksPort: Int, host: String, port: Int, timeoutMs: Int): Socket? {
         var socket: Socket? = null
         return try {
@@ -9042,7 +9229,90 @@ class NovaVpnService : OperaNativeVpnService() {
      * другим транспортом нельзя (I1): его выбрал пользователь, и честных ответов
      * ровно два — повторить или сказать, что не вышло.
      */
+    /**
+     * Идёт ли фаза Tor прямо сейчас в этом процессе.
+     *
+     * Дефект, который это чинит, виден в журнале как бесконечная карусель:
+     * свежий процесс получает подряд `RESTORE_LAST_SESSION` от будильника,
+     * пустое намерение от главного экрана и ещё пару стартов, каждый заводит
+     * свою фазу Tor, вторая видит `torRanInThisProcess` первой, просит свежий
+     * процесс — и убивает процесс ровно в тот момент, когда первая уже
+     * загружала цепочку. Дальше по кругу, и сеанс не поднимается никогда.
+     *
+     * Второй фазе делать нечего: первая уже поднимает ровно тот же сеанс.
+     */
+    private val torPhaseActive = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * Причина проверки сети, отложенной на время загрузки Tor.
+     *
+     * `@Volatile`, а не атомик: пишет её сетевой обработчик, читает — поток фазы,
+     * и ничего, кроме видимости последнего значения, тут не нужно.
+     */
+    @Volatile
+    private var restartCheckDeferredByTorPhase: String? = null
+
+
     private fun runTorPhase(clientData: ClientData, connectGenerationId: Int): Boolean {
+        if (!torPhaseActive.compareAndSet(false, true)) {
+            // Заслон **ждёт**, а не отказывает, и разница здесь не косметическая.
+            //
+            // Отказ был верен ровно в одном случае: прежняя фаза жива и работает
+            // на актуальном поколении — тогда за нас уже всё делают. Но чаще
+            // бывает иначе: второй старт (а их прилетает подряд несколько —
+            // будильник, намерение от экрана, восстановление сети) сам же сбросил
+            // поколение первой фазы. Тогда первая тихо выходит по ближайшей
+            // проверке отмены, второй уже ушёл со словами «второй заход не
+            // заводим», и не остаётся никого — сеанс мёртв, поднимать некому.
+            // Это G203, и один раз он уже стоил замера: свежий процесс после
+            // смены сети на Mi A1 входил в фазу Tor и молча замолкал навсегда.
+            //
+            // Поэтому ждём: первая фаза, у которой поколение устарело, замечает
+            // это раз в секунду (`awaitBootstrap`) и выходит быстро. Дождались —
+            // работаем сами. Не дождались за [TOR_PHASE_HANDOVER_WAIT_MS] —
+            // значит прежняя фаза действительно жива и занята делом, и тогда
+            // отказ верен.
+            val deadline = SystemClock.elapsedRealtime() + TOR_PHASE_HANDOVER_WAIT_MS
+            var waited = false
+            while (torPhaseActive.get() && SystemClock.elapsedRealtime() < deadline) {
+                // Своё поколение тоже могло устареть, пока мы ждали: тогда нас
+                // сменил кто-то ещё более новый, и работать за него не надо.
+                if (isUserStopped || !isConnectGenerationCurrent(connectGenerationId)) return true
+                waited = true
+                try {
+                    Thread.sleep(120L)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return true
+                }
+            }
+            if (!torPhaseActive.compareAndSet(false, true)) {
+                LogManager.log(
+                    "TOR: фаза уже идёт в этом процессе и за " +
+                        "${TOR_PHASE_HANDOVER_WAIT_MS / 1000} с не закончилась — второй заход не заводим."
+                )
+                return true
+            }
+            if (waited) {
+                LogManager.log("TOR: дождались конца прежней фазы, продолжаем своим заходом.")
+            }
+        }
+        try {
+            return runTorPhaseLocked(clientData, connectGenerationId)
+        } finally {
+            torPhaseActive.set(false)
+            // Проверку, отложенную на время загрузки, заводим заново: сеть могла
+            // смениться по-настоящему, и забыть об этом — значит ждать следующего
+            // сетевого события неизвестно сколько.
+            restartCheckDeferredByTorPhase?.let { deferred ->
+                restartCheckDeferredByTorPhase = null
+                LogManager.log("Фаза Tor закончилась — возвращаемся к отложенной проверке сети ($deferred).")
+                scheduleNetworkRecoveryCheck(deferred)
+            }
+        }
+    }
+
+    private fun runTorPhaseLocked(clientData: ClientData, connectGenerationId: Int): Boolean {
         if (!OperaNativeVpnService.isNativeRuntimeAvailable(this)) {
             LogManager.log(
                 "TOR недоступен: для ABI ${Build.SUPPORTED_ABIS.joinToString()} нет native-библиотеки tun2proxy."
@@ -9072,20 +9342,129 @@ class NovaVpnService : OperaNativeVpnService() {
 
         // Способ входа читается из файла, а не из настроек: его пишет экран, а
         // читает этот процесс, и prefs кэшируются попроцессно (I2).
-        val entryMode = TorEntryModeStore.read(this)
+        val selectedEntry = TorEntryModeStore.read(this)
+        val isAutoEntry = selectedEntry == ConnectionSelectorPolicy.TOR_ENTRY_AUTO
+        val plannedAttempts = ConnectionSelectorPolicy.torEntryAttempts(selectedEntry)
+
+        // Перебор продолжается там, где его оборвал прошлый процесс.
+        //
+        // Способ, дошедший до загрузки и не построивший цепочку, помечается в
+        // [TorAutoEntryProgress], и следующий процесс его пропускает. Без этого
+        // перебор до второго варианта не доходил вовсе: tor нельзя запустить в
+        // процессе дважды (G185), а свежий процесс начинал список сначала. Полный
+        // разбор — в шапке хранилища.
+        val alreadyTried = if (isAutoEntry) TorAutoEntryProgress.read(this) else emptySet()
+        val attempts = plannedAttempts.filterNot { it in alreadyTried }
+        if (isAutoEntry && attempts.isEmpty()) {
+            // Исчерпание — это факт, и о нём надо сказать (I4). Молчаливый заход
+            // на новый круг здесь и был бы той самой каруселью.
+            TorAutoEntryProgress.clear(this)
+            LogManager.log(
+                "TOR: перебор входов исчерпан — не сработал ни один из " +
+                    "${plannedAttempts.size} (${plannedAttempts.joinToString()}). " +
+                    "Следующая попытка начнётся заново."
+            )
+            publishTransportNotice(
+                clientData,
+                "TOR: ни один способ входа не сработал. Соберите мосты в настройках или выберите вход вручную.",
+                keepOnStop = true,
+            )
+            return false
+        }
+        if (isAutoEntry && alreadyTried.isNotEmpty()) {
+            LogManager.log(
+                "TOR: авто-вход продолжается — уже не сработали ${alreadyTried.joinToString()}, " +
+                    "осталось попробовать ${attempts.joinToString()}."
+            )
+        }
+
+        // «Авто» — это перебор, а не отдельный транспорт.
+        //
+        // Владелец попросил, чтобы приложение само выбирало способ входа и
+        // переключалось на другой. Перебор идёт здесь, а не снаружи, по двум
+        // причинам. Во-первых, снаружи неизвестно, **почему** вход не поднялся:
+        // «мостов этого вида нет» и «цепочка не построилась» лечатся следующим
+        // входом, а «нет native-библиотеки» — ничем, и внешний повтор гонял бы
+        // безнадёжное по кругу. Во-вторых, сбор мостов и запуск tor уже стоят
+        // десятки секунд: отдавать неудачу наружу значило бы платить ещё и за
+        // повторную подготовку фазы.
+        //
+        // Прямой вход в переборе не участвует: замер 2026-09-10 показал, что из
+        // России он встаёт на `Bootstrapped 10%`, то есть перебор всегда тратил бы
+        // на него полный таймаут впустую. Выбрать его руками по-прежнему можно.
+        for ((index, entryMode) in attempts.withIndex()) {
+            if (cancelled()) return true
+            if (isAutoEntry) {
+                // Нумерация — по всему плану, а не по остатку: «попытка 1 из 2»
+                // после перезапуска процесса читалась бы как новый перебор.
+                val number = plannedAttempts.indexOf(entryMode) + 1
+                LogManager.log(
+                    "TOR: авто-вход, попытка $number из ${plannedAttempts.size} — $entryMode."
+                )
+                publishTransportNotice(clientData, "TOR: пробуем вход ${entryMode.uppercase()}...")
+            }
+            val outcome = runTorEntryAttempt(
+                clientData = clientData,
+                connectGenerationId = connectGenerationId,
+                entryMode = entryMode,
+                privateDnsWarning = privateDnsWarning,
+                cancelled = cancelled,
+            )
+            if (outcome != null) return outcome
+            // `null` — этот способ не подошёл. Помечаем **до** следующего витка:
+            // следующий как раз и может потребовать свежего процесса, и тогда
+            // отметку ставить будет уже некому.
+            if (isAutoEntry && !TorAutoEntryProgress.note(this, entryMode)) {
+                // Отказ записи — это возврат к карусели G197: свежий процесс
+                // прочтёт пустую память и начнёт перебор сначала. Молчать об
+                // этом нельзя, иначе отличить одно от другого по журналу
+                // нечем (I4).
+                LogManager.log(
+                    "TOR: отметка о неудачном входе $entryMode не записалась — " +
+                        "следующий процесс начнёт перебор заново."
+                )
+            }
+            if (index == attempts.lastIndex && isAutoEntry) {
+                TorAutoEntryProgress.clear(this)
+            }
+        }
+
+        // Молчать нельзя (I4): перебор кончился, и снаружи это неотличимо от
+        // «фаза даже не начиналась».
+        LogManager.log("TOR: ни один способ входа не сработал (${attempts.joinToString()}).")
+        publishTransportNotice(
+            clientData,
+            if (attempts.size > 1) {
+                "TOR: ни один способ входа не сработал. Соберите мосты в настройках."
+            } else {
+                "TOR: вход $selectedEntry не сработал. Соберите мосты или выберите другой."
+            },
+            keepOnStop = true,
+        )
+        return false
+    }
+
+    /**
+     * Одна попытка входа в сеть Tor.
+     *
+     * @return `true`/`false` — окончательный итог фазы; `null` — этот способ входа
+     *         не сработал, и имеет смысл попробовать следующий.
+     */
+    private fun runTorEntryAttempt(
+        clientData: ClientData,
+        connectGenerationId: Int,
+        entryMode: String,
+        privateDnsWarning: String,
+        cancelled: () -> Boolean,
+    ): Boolean? {
         val wantedTransport = ConnectionSelectorPolicy.torBridgeTransportFor(entryMode)
         val direct = wantedTransport.isEmpty()
 
         val bridges = if (direct) emptyList() else awaitTorBridges(clientData, cancelled, wantedTransport)
         if (cancelled()) return true
         if (!direct && bridges.isEmpty()) {
-            LogManager.log("TOR: живых мостов $wantedTransport нет — подключаться не через что.")
-            publishTransportNotice(
-                clientData,
-                "TOR: мостов не нашлось. Соберите их в настройках или выберите другой вход.",
-                keepOnStop = true,
-            )
-            return false
+            LogManager.log("TOR: живых мостов $wantedTransport нет — этот вход отпадает.")
+            return null
         }
 
         try {
@@ -9107,18 +9486,20 @@ class NovaVpnService : OperaNativeVpnService() {
                 return true
             }
             if (socksPort <= 0) {
-                publishTransportNotice(
-                    clientData,
-                    "TOR: цепочка не построилась. ${TorTransport.bootstrapSummary()}".trim(),
-                    keepOnStop = true,
+                LogManager.log(
+                    "TOR: через $entryMode цепочка не построилась. " +
+                        TorTransport.bootstrapSummary()
                 )
-                return false
+                return null
             }
 
             if (!startProxyTunnel(clientData, socksPort, BACKEND_TOR, "NovaTorVPN", "NovaTorTunThread")) {
                 return false
             }
             markSuccessfulTunnelProbe()
+            // Память перебора здесь **не** чистится: туннель поднят, но через
+            // него ещё ничего не прошло. Чистит её первая удачная проба в
+            // [holdTorSession] — см. разбор там.
             // Предупреждение про «Частный DNS» переживает подключение: туннель
             // поднялся, а имена всё равно не резолвятся, и стереть строку значило
             // бы сказать «всё в порядке» там, где не в порядке.
@@ -9128,7 +9509,18 @@ class NovaVpnService : OperaNativeVpnService() {
                 "TOR активен: SOCKS5 tor на 127.0.0.1:$socksPort, вход $entryMode, мостов ${bridges.size}."
             )
 
-            return holdTorSession(clientData, socksPort, connectGenerationId)
+            val outcome = holdTorSession(clientData, socksPort, connectGenerationId)
+            if (outcome == null) {
+                // Вход не сработал, хотя туннель подняли. Экран обязан об этом
+                // узнать: оставить «подключено» и молча уйти пробовать
+                // следующий — это ровно то враньё, от которого заведён I4.
+                broadcastState(STATE_CONNECTING)
+                publishTransportNotice(
+                    clientData,
+                    "TOR: вход ${entryMode.uppercase()} не провёз трафик, пробуем следующий...",
+                )
+            }
+            return outcome
         } finally {
             clientData.clearTransportLatency()
             // Тот же порядок, что и у VLESS: живую сессию разбирать нельзя, а всё
@@ -9158,10 +9550,12 @@ class NovaVpnService : OperaNativeVpnService() {
     ): List<TorBridge> {
         fun bridgesOfKind(): List<TorBridge> =
             TorBridgeStore.read(this).bridges.filter { bridge ->
-                bridge.transport == transport &&
-                    // У webtunnel адрес в строке — заглушка RFC 3849: ходить надо
-                    // по `url=`, и это делает сам tor.
-                    (transport == "webtunnel" || bridge.dialTarget() != null)
+                // У webtunnel и snowflake адрес в строке — заглушка: ходить надо
+                // по `url=` либо к брокеру, и это делает сам транспорт. Предикат
+                // общий с разбором и с отбором перед torrc намеренно: это была
+                // четвёртая его копия, а расходящаяся копия одного признака в
+                // этом проекте уже стоила двух дефектов (G49, I23).
+                bridge.transport == transport && TorBridge.isUsable(bridge)
             }
 
         val known = bridgesOfKind()
@@ -9181,11 +9575,27 @@ class NovaVpnService : OperaNativeVpnService() {
     }
 
     /** Держит поднятый туннель Tor, пока через него идёт трафик. */
+    /**
+     * Держит поднятый туннель Tor и заодно решает, работал ли этот вход вообще.
+     *
+     * Ответ тройной, как и у [runTorEntryAttempt], и третье значение здесь не
+     * украшение. Вход, который загрузился до 100 % и поднял туннель, но не
+     * пропустил ни одного байта, до этой правки заканчивался обычным `false` —
+     * то есть «фаза не удалась, гасим всё». Перебор при этом не помечал его
+     * неудачным (`false` выходит из цикла сразу), а память перебора к тому
+     * моменту была уже очищена, и следующее подключение начинало с него же.
+     * Получалась карусель G197, только на уровень выше: мосты, которые
+     * договариваются, но не возят трафик, — обычное дело под настоящей
+     * блокировкой, и именно ради них перебор и написан.
+     *
+     * @return `true` — фазу прервали снаружи; `false` — сеанс работал и умер;
+     *         `null` — этот вход не провёз ни байта, имеет смысл следующий.
+     */
     private fun holdTorSession(
         clientData: ClientData,
         socksPort: Int,
         connectGenerationId: Int,
-    ): Boolean {
+    ): Boolean? {
         val tunThread = operaTunThread
         var failures = 0
         var probeEverSucceeded = false
@@ -9194,11 +9604,11 @@ class NovaVpnService : OperaNativeVpnService() {
         while (!isUserStopped && isConnectGenerationCurrent(connectGenerationId)) {
             if (tunThread != null && !tunThread.isAlive) {
                 LogManager.log("TOR: tun2proxy завершился, туннеля больше нет.")
-                return false
+                return if (probeEverSucceeded) false else null
             }
             if (!TorTransport.isRunning()) {
                 LogManager.log("TOR: служба tor остановилась.")
-                return false
+                return if (probeEverSucceeded) false else null
             }
 
             Thread.sleep(2_000L)
@@ -9217,6 +9627,12 @@ class NovaVpnService : OperaNativeVpnService() {
                     // тот мусор, из-за которого журнал не читают.
                     LogManager.log("TOR: проба через цепочку прошла за $elapsedMs мс.")
                 }
+                if (!probeEverSucceeded) {
+                    // Вот здесь вход доказан, и только здесь память перебора
+                    // становится не нужна: до первой прошедшей пробы «работает»
+                    // — это предположение, а не факт.
+                    TorAutoEntryProgress.clear(this)
+                }
                 probeEverSucceeded = true
                 failures = 0
                 lastHealthyAtMs = SystemClock.elapsedRealtime()
@@ -9226,6 +9642,16 @@ class NovaVpnService : OperaNativeVpnService() {
 
             failures++
             if (failures >= 4 && SystemClock.elapsedRealtime() - lastHealthyAtMs >= 30_000L) {
+                if (!probeEverSucceeded) {
+                    // Разница видна только отсюда, и сказать о ней надо вслух:
+                    // «перестала пропускать» и «не пропускала ни разу» лечатся
+                    // по-разному, и второе — повод сменить вход, а не сдаться.
+                    LogManager.log(
+                        "TOR: цепочка через этот вход не провезла ни одной пробы. " +
+                            nova.Nova.torPtProxyStats()
+                    )
+                    return null
+                }
                 LogManager.log("TOR: цепочка перестала пропускать трафик. ${nova.Nova.torPtProxyStats()}")
                 return false
             }
@@ -14425,6 +14851,25 @@ class NovaVpnService : OperaNativeVpnService() {
                 val connectGenerationId = beginConnectGeneration(stopExisting = true)
 
                 val regionPreference = normalizeRegionPreference(clientData.getExitRegionPreference())
+                // У Tor своя ветка, и её отсутствие было дефектом, а не упрощением.
+                //
+                // `shouldUseWarpTransport` и `shouldAllowOperaTransport` на `tor`
+                // отвечают `false` оба, поэтому до этой правки восстановление после
+                // смены сети делало ровно половину работы: сбрасывало поколение
+                // подключения (`beginConnectGeneration(stopExisting = true)` выше) и
+                // глушило транспорт — а поднимать заново было некому. Живая фаза
+                // видела, что её поколение устарело, и выходила; экран оставался в
+                // «подключаемся», и сеанс возвращался только через другой механизм,
+                // минуты спустя. Замер на Pixel 4a: 88 секунд.
+                //
+                // Обиднее всего, что будильник ровно для этого случая давно есть
+                // (`scheduleSessionRestoreAfterProcessExit`, заведён по жалобе
+                // владельца «при смене сети, особенно на TOR, связь теряется и сама
+                // не восстанавливается»), — его просто никто не звал.
+                if (regionPreference == ConnectionSelectorPolicy.CHIP_TOR) {
+                    recoverTorSessionAfterNetworkChange(clientData, connectGenerationId)
+                    return@startSafeServiceThread
+                }
                 if (shouldUseWarpTransport(regionPreference, clientData)) {
                     val config = clientData.getConfig()
                     if (config != null) {
@@ -14468,6 +14913,57 @@ class NovaVpnService : OperaNativeVpnService() {
         }
     }
 
+    /**
+     * Поднимает сеанс Tor заново после смены подложной сети.
+     *
+     * Библиотеку tor в этом процессе перезапустить нельзя: второй `tor_run_main`
+     * обрывает процесс сигналом (G185). Поэтому честный способ ровно один —
+     * попросить свежий процесс `:vpn` и дать будильнику восстановить сеанс. Это
+     * тот же путь, которым уже пользуется смена способа входа, то есть он не
+     * новый и проверен.
+     *
+     * Спрашиваем у [TorTransport.hasRunInThisProcess] **до** запуска фазы, а не
+     * узнаём от неё в конце: `runTorPhase` сперва дождался бы сбора мостов (до
+     * двух минут), и только потом вернул бы «нужен свежий процесс» — время,
+     * потраченное на заведомо известный ответ, да ещё и при оборванном туннеле.
+     *
+     * Своего потолка частоты здесь **нет**, и это решение. Он напрашивается —
+     * цена ошибки тут смерть процесса, а признак «туннель не отвечает» на Tor
+     * бывает ложным, — но работать он не может: восстановление убивает процесс,
+     * а вместе с ним и любое поле, в котором хранилось бы время прошлого раза.
+     * Пережил бы его только файл, а это лишний механизм там, где заслон уже
+     * есть: вызывающая сторона требует **двух** неудачных проб подряд
+     * («Ждём повторного подтверждения перед реконнектом»), и повторный вход
+     * закрыт `reconnectingForNetworkChange`. Хуже того, потолок создал бы ветку,
+     * которая **ничего не делает** после того, как поколение уже сброшено и
+     * транспорт остановлен, — то есть ровно тот дефект, который здесь чинится.
+     */
+    private fun recoverTorSessionAfterNetworkChange(clientData: ClientData, connectGenerationId: Int) {
+        setCurrentBackend(BACKEND_TOR)
+        currentTransportLabel = TRANSPORT_TOR
+
+        if (!TorTransport.hasRunInThisProcess()) {
+            // Tor в этом процессе ещё не запускали — фазу можно поднять прямо здесь.
+            if (!isConnectGenerationCurrent(connectGenerationId)) return
+            if (!ensureFreshTransportState(connectGenerationId, "tor-network-recovery")) return
+            installSocketProtector()
+            if (runTorPhase(clientData, connectGenerationId)) return
+            if (isUserStopped || !isConnectGenerationCurrent(connectGenerationId)) return
+            LogManager.log("TOR не поднялся после смены сети, а подменять его другим протоколом нельзя.")
+            broadcastState(STATE_STOPPED)
+            return
+        }
+
+        LogManager.log(
+            "Смена сети на живом сеансе TOR: tor в этом процессе уже запускали, второй запуск оборвал бы " +
+                "процесс сигналом. Просим свежий процесс :vpn и восстановление сеанса на новой сети."
+        )
+        requestRestartFromMainProcess()
+        stopTorSessionQuietly()
+        closeActiveInterface()
+        scheduleVpnProcessExit()
+    }
+
     private fun scheduleNetworkRecoveryCheck(reason: String) {
         pendingNetworkRecoveryReason = reason
         networkRecoveryHandler.removeCallbacks(networkRecoveryRunnable)
@@ -14497,6 +14993,33 @@ class NovaVpnService : OperaNativeVpnService() {
             return
         }
         if (currentState != STATE_CONNECTING) return
+
+        // Пока идёт загрузка Tor, перезапуск connect-цикла не помогает, а мешает.
+        //
+        // Цена этой строки видна в журнале двух телефонов. Перезапуск сбрасывает
+        // поколение подключения, после чего фаза Tor видит, что её поколение
+        // устарело, и бросает загрузку; а сам перезапуск доходит до `runTorPhase`,
+        // видит `torPhaseActive` первой фазы и уходит со словами «второй заход не
+        // заводим». Обе стороны уступают друг другу, и не остаётся никого:
+        // сеанс мёртв, и его никто не поднимает.
+        //
+        // Проявляется это ровно на медленной загрузке: у snowflake из России она
+        // занимает десятки секунд, а фоновое сердцебиение приходит каждые
+        // полминуты. То есть чем хуже сеть, тем вернее подключение не состоится —
+        // обратное тому, ради чего перезапуск написан.
+        //
+        // Ждать не страшно: у загрузки свой срок (`BOOTSTRAP_TIMEOUT_MS`), и по
+        // нему фаза честно скажет, что не вышло. А отложенную проверку заводим
+        // заново, когда фаза закончится, — иначе настоящая смена сети осталась бы
+        // незамеченной до следующего события.
+        if (torPhaseActive.get()) {
+            restartCheckDeferredByTorPhase = reason
+            LogManager.log(
+                "Сеть просит перезапустить подключение ($reason), но идёт загрузка Tor. " +
+                    "Дожидаемся её: перезапуск сейчас оборвал бы загрузку и не поднял бы ничего взамен."
+            )
+            return
+        }
 
         val clientData = ClientData(this)
         val session = clientData.getRestartSession()
@@ -26357,11 +26880,21 @@ class NovaVpnService : OperaNativeVpnService() {
         // Срок втрое больше умолчания: через цепочку из трёх узлов только TLS
         // занимает секунды, и на шести секундах замер не успевал ни разу —
         // бейдж оставался пустым при живом туннеле (Pixel 4a, 2026-09-10).
+        // Семейство выбираем сами: см. [resolveIpv4ThroughTorSocks]. Не вышло —
+        // дозваниваемся по имени, как прежде: замер без IPv4 лучше, чем без замера.
+        val literalV4 = resolveIpv4ThroughTorSocks(socksPort, EXIT_ADDRESS_HOST, timeoutMs = 12_000)
+        if (literalV4 == null) {
+            LogManager.log(
+                "TOR: A-запись $EXIT_ADDRESS_HOST через цепочку не получена — " +
+                    "семейство адреса выберет выход."
+            )
+        }
         val body = readTextThroughSocks(
             socksPort,
             EXIT_ADDRESS_HOST,
             EXIT_ADDRESS_PATH,
             timeoutMs = 20_000,
+            connectHost = literalV4 ?: EXIT_ADDRESS_HOST,
         )
         if (body == null) {
             // Молчаливый `null` здесь и был причиной того, что бейдж оставался
@@ -26400,13 +26933,20 @@ class NovaVpnService : OperaNativeVpnService() {
     }
 
     /** GET по HTTPS через SOCKS-инбаунд ядра. Имя резолвит узел. */
+    /**
+     * @param connectHost куда дозваниваться через SOCKS. По умолчанию — то же имя.
+     *   Отдельный параметр нужен, чтобы можно было дозвониться по литеральному
+     *   адресу, оставив `host` для SNI и заголовка `Host`: только так и получается
+     *   выбрать семейство адреса, не соврав при этом в рукопожатии TLS.
+     */
     private fun readTextThroughSocks(
         socksPort: Int,
         host: String,
         path: String,
         timeoutMs: Int = 6_000,
+        connectHost: String = host,
     ): String? {
-        val tunnel = openSocksTunnel(socksPort, host, 443, timeoutMs) ?: return null
+        val tunnel = openSocksTunnel(socksPort, connectHost, 443, timeoutMs) ?: return null
         return try {
             val factory = javax.net.ssl.SSLSocketFactory.getDefault() as javax.net.ssl.SSLSocketFactory
             factory.createSocket(tunnel, host, 443, true).use { tls ->

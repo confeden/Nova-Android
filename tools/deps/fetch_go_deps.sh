@@ -25,6 +25,11 @@ deps=(
     "tools/warp-plus|https://github.com/bepass-org/warp-plus|f70ea7e4f193717c73f9a4357cbc98d6944b36bb|warp-plus.patch"
     "build/deps/usque|https://github.com/Diniboy1123/usque|d0eb96e7e5c56cce6cf34a7f8d75abbedba58fef|"
     "build/deps/gvisor|https://github.com/google/gvisor|af7a19336e551af6f2fa050e1749bc5d2f1eeea5|gvisor.patch"
+    # anet патчится ради компоновки, а не поведения: он писал в приватный кэш зон
+    # IPv6 стандартной библиотеки через `go:linkname`, Go 1.23 такие ссылки
+    # запретил, и `gomobile bind` падал на `invalid reference to net.zoneCache`.
+    # Без этого патча snowflake в ядро не собирается вовсе (G176).
+    "tools/anet|https://github.com/wlynxg/anet|839bc3a920f1b87dd3ce1386e425aa5ef2e69d24|anet.patch"
 )
 
 for entry in "${deps[@]}"; do
@@ -60,6 +65,47 @@ for entry in "${deps[@]}"; do
         git -C "$target" apply "$patches_dir/$patch"
     fi
 done
+
+# Готовые бинарники из anet убираются, и не для порядка.
+#
+# В репозитории anet лежит демо-пример gomobile — `mobile/libs/mobile.aar` и
+# `mobile-sources.jar`. Сборке они не нужны: пакет `anet/mobile` не импортирует
+# никто, ядро берёт только корневой `anet`. Но сканер F-Droid отказывает во всей
+# сборке, увидев в дереве готовый AAR или JAR, — ровно так и упал эталонный
+# прогон 1.32.2: «Found Android AAR library at tools/anet/mobile/libs/mobile.aar
+# … Can't build due to 2 errors while scanning». Сканер идёт после `prebuild`, где
+# и работает этот скрипт, поэтому удалить их здесь достаточно.
+#
+# Здесь, а не `scandelete` в рецепте: так дерево чистое у любого, кто собирает
+# из исходников, а рецепт F-Droid не расходится с ними на каждом выпуске.
+# Вне цикла намеренно — ветка «уже на пине, пропускаем» выходит из итерации до
+# накладки патча, а убрать бинарники надо и в уже разложенном дереве.
+rm -rf "$root_dir/tools/anet/mobile/libs"
+
+# snowflake раскладывается не клоном, а из кэша модулей.
+#
+# Его канонический репозиторий — gitlab.torproject.org, и он недоступен с части
+# сетей (соединение рвётся), а живого зеркала с тегами v2.x нет: keroserene/snowflake
+# на GitHub остановился на webext-тегах. Кэш модулей при этом сверен по контрольной
+# сумме из go.sum, то есть источник тут строже, чем произвольное зеркало.
+snowflake_version="v2.14.1"
+snowflake_module="gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/v2"
+snowflake_target="$root_dir/tools/snowflake"
+snowflake_have=""
+[ -f "$snowflake_target/.version" ] && snowflake_have="$(cat "$snowflake_target/.version")"
+if [ "$snowflake_have" = "$snowflake_version" ]; then
+    echo "== tools/snowflake: уже на $snowflake_version, пропускаем"
+else
+    echo "== tools/snowflake: берём $snowflake_version из кэша модулей"
+    rm -rf "$snowflake_target"
+    (cd "$root_dir/nova-core" && GOFLAGS=-mod=mod go mod download "$snowflake_module@$snowflake_version")
+    snowflake_src="$(cd "$root_dir/nova-core" && go env GOMODCACHE)/$snowflake_module@$snowflake_version"
+    cp -r "$snowflake_src" "$snowflake_target"
+    chmod -R u+w "$snowflake_target"
+    echo "== tools/snowflake: накладываем snowflake.patch"
+    (cd "$snowflake_target" && git apply "$patches_dir/snowflake.patch")
+    printf '%s' "$snowflake_version" > "$snowflake_target/.version"
+fi
 
 echo
 echo "Готово. Проверить сборку ядра: (cd nova-core && GOOS=linux GOARCH=arm64 go build ./engine)"

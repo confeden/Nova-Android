@@ -1,0 +1,107 @@
+diff --git a/interface_android.go b/interface_android.go
+index 6b080c5..4b19a54 100644
+--- a/interface_android.go
++++ b/interface_android.go
+@@ -5,9 +5,7 @@ import (
+ 	"errors"
+ 	"net"
+ 	"os"
+-	"sync"
+ 	"syscall"
+-	"time"
+ 	"unsafe"
+ )
+ 
+@@ -36,10 +34,6 @@ func Interfaces() ([]net.Interface, error) {
+ 	if err != nil {
+ 		return nil, &net.OpError{Op: "route", Net: "ip+net", Source: nil, Addr: nil, Err: err}
+ 	}
+-	if len(ift) != 0 {
+-		zoneCache.update(ift, true)
+-		zoneCacheX.update(ift, true)
+-	}
+ 	return ift, nil
+ }
+ 
+@@ -93,10 +87,6 @@ func InterfaceByName(name string) (*net.Interface, error) {
+ 	if err != nil {
+ 		return nil, &net.OpError{Op: "route", Net: "ip+net", Source: nil, Addr: nil, Err: err}
+ 	}
+-	if len(ift) != 0 {
+-		zoneCache.update(ift, true)
+-		zoneCacheX.update(ift, true)
+-	}
+ 	for _, ifi := range ift {
+ 		if name == ifi.Name {
+ 			return &ifi, nil
+@@ -148,52 +138,25 @@ func androidApiLevel() int {
+ 	return androidDeviceApiLevel()
+ }
+ 
+-// An ipv6ZoneCache represents a cache holding partial network
+-// interface information. It is used for reducing the cost of IPv6
+-// addressing scope zone resolution.
++// Кэша зон IPv6 здесь больше нет.
+ //
+-// Multiple names sharing the index are managed by first-come
+-// first-served basis for consistency.
+-type ipv6ZoneCache struct {
+-	sync.RWMutex                // guard the following
+-	lastFetched  time.Time      // last time routing information was fetched
+-	toIndex      map[string]int // interface name to its index
+-	toName       map[int]string // interface index to its name
+-}
+-
+-//go:linkname zoneCache net.zoneCache
+-var zoneCache ipv6ZoneCache
+-
+-//go:linkname zoneCacheX golang.org/x/net/internal/socket.zoneCache
+-var zoneCacheX ipv6ZoneCache
+-
+-// update refreshes the network interface information if the cache was last
+-// updated more than 1 minute ago, or if force is set. It reports whether the
+-// cache was updated.
+-func (zc *ipv6ZoneCache) update(ift []net.Interface, force bool) (updated bool) {
+-	zc.Lock()
+-	defer zc.Unlock()
+-	now := time.Now()
+-	if !force && zc.lastFetched.After(now.Add(-60*time.Second)) {
+-		return false
+-	}
+-	zc.lastFetched = now
+-	if len(ift) == 0 {
+-		var err error
+-		if ift, err = interfaceTable(0); err != nil {
+-			return false
+-		}
+-	}
+-	zc.toIndex = make(map[string]int, len(ift))
+-	zc.toName = make(map[int]string, len(ift))
+-	for _, ifi := range ift {
+-		zc.toIndex[ifi.Name] = ifi.Index
+-		if _, ok := zc.toName[ifi.Index]; !ok {
+-			zc.toName[ifi.Index] = ifi.Name
+-		}
+-	}
+-	return true
+-}
++// Апстрим держал в этом месте две переменные, объявленные через `//go:linkname`
++// на `net.zoneCache` и `golang.org/x/net/internal/socket.zoneCache`, и после
++// каждого обхода интерфейсов переписывал их своей таблицей. Смысл был в том,
++// чтобы на Android, где `net.Interfaces()` не работает, стандартная библиотека
++// всё-таки умела переводить имя зоны IPv6 в индекс и обратно.
++//
++// Go 1.23 запретил такие ссылки, и компоновка падает на
++// `invalid reference to net.zoneCache`. Лечится это либо `-checklinkname=0` на
++// **всё** ядро — то есть снятием проверки компоновщика ради одного транспорта,
++// — либо удалением. Удаление возможно потому, что обе переменные здесь только
++// **писались**: ни anet, ни его вызывающие их не читают (единственные
++// упоминания во всём пакете — четыре вызова `update`).
++//
++// Что теряется. Приватный кэш зон в `net` и `x/net` на Android остаётся пустым,
++// поэтому scoped-адреса IPv6 с именем зоны (`fe80::1%wlan0`) стандартная
++// библиотека там не разрешит. Для ICE это только link-local кандидаты; хостовые
++// IPv4 и полученные через STUN не затрагиваются. Публичное API anet не меняется.
+ 
+ // If the ifindex is zero, interfaceTable returns mappings of all
+ // network interfaces. Otherwise it returns a mapping of a specific

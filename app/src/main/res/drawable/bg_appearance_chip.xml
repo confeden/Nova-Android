@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Подложка чипа на экране «Оформление».
+
+    Отдельный файл, а не `bg_region_chip`: у того радиус 18dp под высоту 36dp, а
+    здесь высота 44dp, и с чужим радиусом овал превращается в скруглённый
+    прямоугольник. Цвета те же и по той же причине — обводку выбранного рисует
+    `FlowRadioGroup` акцентом темы, тем десять, и прибитый здесь цвет был бы верен
+    ровно для одной.
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item android:state_checked="true">
+        <shape android:shape="rectangle">
+            <solid android:color="#3D0D1219" />
+            <corners android:radius="52dp" />
+        </shape>
+    </item>
+
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#14FFFFFF" />
+            <stroke
+                android:width="1dp"
+                android:color="#2EFFFFFF" />
+            <corners android:radius="52dp" />
+        </shape>
+    </item>
+</selector>

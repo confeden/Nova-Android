@@ -38,6 +38,20 @@ data class WarpGeneratedProfile(
      * каждом подключении.
      */
     val failures: Int = 0,
+    /**
+     * Своё прикрытие: `I1`, собранный для этого профиля.
+     *
+     * Пустая строка — профиль из старого снимка, у которого прикрытия нет;
+     * тогда подставляется общий пакет из семени, как было раньше. Значение по
+     * умолчанию поэтому и стоит: разбор старого файла не должен падать.
+     *
+     * Хранится, а не строится на каждом чтении, потому что `toVerifiedConfigs`
+     * зовётся на каждую попытку подключения. Свежий пакет там означал бы, что
+     * текст конфигурации меняется под очередью сам собой — для неё это новая
+     * запись, и `seedOrder` с накопленной статистикой обнулялись бы на ровном
+     * месте.
+     */
+    val maskPacket: String = "",
 ) {
     val id: String get() = "warpgen|$host|$port"
 }
@@ -191,6 +205,7 @@ class WarpGeneratedStore(context: Context) {
                     junkMax = item.optInt("jmax", 70),
                     createdAt = item.optLong("created_at", 0L),
                     failures = item.optInt("failures", 0),
+                    maskPacket = item.optString("i1"),
                 )
             )
         }
@@ -209,6 +224,7 @@ class WarpGeneratedStore(context: Context) {
                         .put("jmax", profile.junkMax)
                         .put("created_at", profile.createdAt)
                         .put("failures", profile.failures)
+                        .put("i1", profile.maskPacket)
                 )
             }
         }
@@ -341,9 +357,13 @@ class WarpGeneratedStore(context: Context) {
          * это значения обычного WireGuard, и узел WARP других не понимает.
          * Параметризовать их значило бы предложить сломать туннель.
          *
-         * @param maskPacket содержимое `I1` — поддельный первый пакет. Пусто —
-         *        строка не добавляется вовсе: `uapi.go` убивает туннель на любом
-         *        неизвестном ключе, и пустое значение считается неизвестным (N6).
+         * @param maskPacket запасное содержимое `I1` — общий пакет из семени.
+         *        Берётся, только если у профиля нет своего
+         *        ([WarpGeneratedProfile.maskPacket]), то есть для снимков, снятых до
+         *        того, как генератор начал собирать прикрытие каждому профилю
+         *        отдельно. Пусто — строка не добавляется вовсе: `uapi.go` убивает
+         *        туннель на любом неизвестном ключе, и пустое значение считается
+         *        неизвестным (N6).
          */
         fun buildRawConfig(
             identity: Identity,
@@ -367,7 +387,8 @@ class WarpGeneratedStore(context: Context) {
             appendLine("H2 = 2")
             appendLine("H3 = 3")
             appendLine("H4 = 4")
-            if (maskPacket.isNotBlank()) appendLine("I1 = $maskPacket")
+            val i1 = profile.maskPacket.ifBlank { maskPacket }
+            if (i1.isNotBlank()) appendLine("I1 = $i1")
             appendLine()
             appendLine("[Peer]")
             appendLine("PublicKey = ${identity.peerPublicKey}")

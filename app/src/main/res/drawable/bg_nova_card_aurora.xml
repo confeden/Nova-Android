@@ -2,28 +2,28 @@
 <!-- Сгенерировано tools/gen_nova_themes.py. Руками не править:
      правка переживёт ровно до следующего запуска генератора. -->
 <ripple xmlns:android="http://schemas.android.com/apk/res/android"
-    android:color="#20FFFFFF">
+    android:color="?attr/novaFocusFill">
     <item>
         <selector>
             <item android:state_focused="true">
                 <shape android:shape="rectangle">
-                    <solid android:color="@color/tv_focus_fill" />
+                    <solid android:color="?attr/novaFocusFill" />
                     <corners android:radius="14dp" />
-                    <stroke android:width="3dp" android:color="@color/tv_focus_stroke" />
+                    <stroke android:width="3dp" android:color="?attr/novaFocusStroke" />
                 </shape>
             </item>
             <item android:state_pressed="true">
                 <shape android:shape="rectangle">
-                    <solid android:color="@color/tv_focus_fill" />
+                    <solid android:color="?attr/novaFocusFill" />
                     <corners android:radius="14dp" />
-                    <stroke android:width="3dp" android:color="@color/tv_focus_stroke" />
+                    <stroke android:width="3dp" android:color="?attr/novaFocusStroke" />
                 </shape>
             </item>
             <item>
                 <shape android:shape="rectangle">
                     <solid android:color="#0BFFFFFF" />
                     <corners android:radius="14dp" />
-                    <stroke android:width="1dp" android:color="#17FFFFFF" />
+                    <stroke android:width="1dp" android:color="#1FA88DFF" />
                 </shape>
             </item>
         </selector>

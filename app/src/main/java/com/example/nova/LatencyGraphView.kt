@@ -666,10 +666,18 @@ class LatencyGraphView @JvmOverloads constructor(
         private val COLOR_POOR = Color.parseColor("#D96A78")
         private val COLOR_IDLE = Color.parseColor("#5A6B7A")
 
-        fun colorForLatency(ms: Int): Int {
+        /**
+         * Шкала качества — общая для всех тем, и это решение владельца.
+         *
+         * Линия, её сияние и заливка означают «быстро / терпимо / плохо», а не
+         * оформление: перекрась «хорошо» в акцент — и один и тот же пинг выглядел
+         * бы по-разному в десяти темах, то есть перестал бы что-либо значить.
+         * Тему на этом экране носит подпись «Ping:», а не график.
+         */
+        fun colorForLatency(ms: Int, good: Int = COLOR_GOOD): Int {
             return when {
                 ms < 0 -> COLOR_IDLE
-                ms < 100 -> COLOR_GOOD
+                ms < 100 -> good
                 ms < 400 -> COLOR_FAIR
                 else -> COLOR_POOR
             }

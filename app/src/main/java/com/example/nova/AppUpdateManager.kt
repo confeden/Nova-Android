@@ -980,8 +980,9 @@ object AppUpdateManager {
         )
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_qs_nova)
-            .setContentTitle("Доступна новая версия Nova")
-            .setContentText("Версия ${metadata.version}. По мобильной сети загрузка только вручную.")
+            .setColor(NovaNotificationPalette.current(context).accent)
+            .setContentTitle(NovaLanguage.tr(context, "Доступна новая версия Nova"))
+            .setContentText(NovaLanguage.tr(context, "Версия ${metadata.version}. По мобильной сети загрузка только вручную."))
             .setStyle(NotificationCompat.DecoratedCustomViewStyle())
             .setCustomContentView(customView)
             .setCustomBigContentView(customView)
@@ -990,7 +991,7 @@ object AppUpdateManager {
             .setContentIntent(openAppIntent)
             .addAction(
                 0,
-                "Скачать",
+                NovaLanguage.tr(context, "Скачать"),
                 PendingIntent.getBroadcast(
                     context,
                     5001,
@@ -1000,7 +1001,7 @@ object AppUpdateManager {
             )
             .addAction(
                 0,
-                "Отмена",
+                NovaLanguage.tr(context, "Отмена"),
                 PendingIntent.getBroadcast(
                     context,
                     5002,
@@ -1020,8 +1021,9 @@ object AppUpdateManager {
         val customView = buildReadyUpdateRemoteViews(context, version, installIntent)
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_qs_nova)
-            .setContentTitle("Обновление Nova загружено")
-            .setContentText("Версия $version готова к установке.")
+            .setColor(NovaNotificationPalette.current(context).accent)
+            .setContentTitle(NovaLanguage.tr(context, "Обновление Nova загружено"))
+            .setContentText(NovaLanguage.tr(context, "Версия $version готова к установке."))
             .setStyle(NotificationCompat.DecoratedCustomViewStyle())
             .setCustomContentView(customView)
             .setCustomBigContentView(customView)
@@ -1080,8 +1082,8 @@ object AppUpdateManager {
         val openAppIntent = buildOpenAppPendingIntent(context, 5008)
         val notification = NotificationCompat.Builder(context, CHANNEL_ID_UPDATED)
             .setSmallIcon(R.drawable.ic_qs_nova)
-            .setContentTitle("Nova обновлена до v$version")
-            .setContentText("Нажми, чтобы открыть приложение")
+            .setContentTitle(NovaLanguage.tr(context, "Nova обновлена до v$version"))
+            .setContentText(NovaLanguage.tr(context, "Нажми, чтобы открыть приложение"))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_STATUS)
             .setAutoCancel(true)
@@ -1117,6 +1119,8 @@ object AppUpdateManager {
         val ownRow = showDisconnect && !collapsed && readyVersion.isBlank()
         val builder = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(R.drawable.ic_qs_nova)
+            // Шапка карточки — акцентом темы; читаемость шапки система выправляет сама.
+            .setColor(NovaNotificationPalette.current(context).accent)
             .setOnlyAlertOnce(true)
             .setOngoing(true)
             .setSilent(true)
@@ -1135,7 +1139,7 @@ object AppUpdateManager {
             builder.addAction(
                 NotificationCompat.Action.Builder(
                     R.drawable.ic_widget_power,
-                    "Отключить",
+                    NovaLanguage.tr(context, "Отключить"),
                     buildDisconnectPendingIntent(context),
                 ).build()
             )
@@ -1146,7 +1150,7 @@ object AppUpdateManager {
             val customView = buildReadyUpdateRemoteViews(context, readyVersion, installIntent)
             return builder
                 .setContentTitle("Nova")
-                .setContentText("Обновление $readyVersion готово к установке")
+                .setContentText(NovaLanguage.tr(context, "Обновление $readyVersion готово к установке"))
                 .setStyle(NotificationCompat.DecoratedCustomViewStyle())
                 .setCustomContentView(customView)
                 .setCustomBigContentView(customView)
@@ -1157,7 +1161,7 @@ object AppUpdateManager {
             val row = buildVpnStatusRemoteViews(context, subtitle, buildDisconnectPendingIntent(context))
             return builder
                 .setContentTitle("Nova VPN")
-                .setContentText(subtitle)
+                .setContentText(NovaLanguage.tr(context, subtitle))
                 .setStyle(NotificationCompat.DecoratedCustomViewStyle())
                 .setCustomContentView(row)
                 .setCustomBigContentView(row)
@@ -1166,7 +1170,7 @@ object AppUpdateManager {
 
         return builder
             .setContentTitle("Nova VPN")
-            .setContentText(subtitle)
+            .setContentText(NovaLanguage.tr(context, subtitle))
             .build()
     }
 
@@ -1186,7 +1190,7 @@ object AppUpdateManager {
         }
         if (!hasReadyDownloadedUpdate(appContext)) return
         Handler(Looper.getMainLooper()).post {
-            Toast.makeText(appContext, "Пробуем установить обновление", Toast.LENGTH_SHORT).show()
+            Toast.makeText(appContext, NovaLanguage.tr(appContext, "Пробуем установить обновление"), Toast.LENGTH_SHORT).show()
         }
         installReadyUpdate(appContext)
     }
@@ -1199,7 +1203,7 @@ object AppUpdateManager {
             LogManager.log("Кнопка установки нажата, но APK обновления не найден по пути ${apkFile.absolutePath}.")
             getReadyDownloadedUpdate(context, clientData)
             Handler(Looper.getMainLooper()).post {
-                Toast.makeText(context, "Файл обновления пропал, проверь загрузку ещё раз", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, NovaLanguage.tr(context, "Файл обновления пропал, проверь загрузку ещё раз"), Toast.LENGTH_SHORT).show()
             }
             return
         }
@@ -1566,7 +1570,7 @@ object AppUpdateManager {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID_UPDATED,
-                "Nova обновлена",
+                NovaLanguage.tr(context, "Nova обновлена"),
                 NotificationManager.IMPORTANCE_HIGH,
             )
             context.getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
@@ -1646,9 +1650,18 @@ object AppUpdateManager {
         subtitle: String,
         clickPendingIntent: PendingIntent,
     ): RemoteViews {
+        val palette = NovaNotificationPalette.current(context)
         return RemoteViews(context.packageName, R.layout.notification_update_ready).apply {
-            setTextViewText(R.id.tv_update_title, title)
-            setTextViewText(R.id.tv_update_subtitle, subtitle)
+            setTextViewText(R.id.tv_update_title, NovaLanguage.tr(context, title))
+            setTextViewText(R.id.tv_update_subtitle, NovaLanguage.tr(context, subtitle))
+            // Слои фона и текст — по акценту темы; макет раздувает SystemUI, и
+            // `?attr/nova*` до него не доходит (G192).
+            setInt(R.id.iv_update_base, "setColorFilter", palette.cardBase)
+            setInt(R.id.iv_update_glow, "setColorFilter", palette.cardGlow)
+            setInt(R.id.iv_update_stroke, "setColorFilter", palette.cardStroke)
+            setTextColor(R.id.tv_update_title, palette.cardTitle)
+            setTextColor(R.id.tv_update_subtitle, palette.cardSubtitle)
+            setTextColor(R.id.tv_update_chevron, palette.cardChevron)
             setOnClickPendingIntent(R.id.notification_root, clickPendingIntent)
         }
     }
@@ -1675,8 +1688,17 @@ object AppUpdateManager {
         subtitle: String,
         disconnectPendingIntent: PendingIntent,
     ): RemoteViews {
+        val palette = NovaNotificationPalette.current(context)
         return RemoteViews(context.packageName, R.layout.notification_vpn_status).apply {
-            setTextViewText(R.id.tv_vpn_notification_subtitle, subtitle)
+            setTextViewText(R.id.tv_vpn_notification_subtitle, NovaLanguage.tr(context, subtitle))
+            // Подпись кнопки в макете — русская заглушка: макет раздувает шторка, и
+            // наш перевод до неё не доходит. Ставим текст явно.
+            setTextViewText(R.id.btn_vpn_notification_disconnect, NovaLanguage.tr(context, "Отключить"))
+            // Заливка, обводка и подпись кнопки — по акценту темы, с контрастом
+            // подписи не ниже `NovaNotificationPalette.MIN_CONTRAST`.
+            setInt(R.id.iv_vpn_notification_disconnect_fill, "setColorFilter", palette.buttonFill)
+            setInt(R.id.iv_vpn_notification_disconnect_stroke, "setColorFilter", palette.buttonStroke)
+            setTextColor(R.id.btn_vpn_notification_disconnect, palette.buttonText)
             setViewVisibility(
                 R.id.tv_vpn_notification_subtitle,
                 if (subtitle.isBlank()) android.view.View.GONE else android.view.View.VISIBLE,

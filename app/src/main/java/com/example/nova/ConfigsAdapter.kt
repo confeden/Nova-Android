@@ -80,7 +80,10 @@ class ConfigsAdapter(
         private val tvMeta: TextView = view.findViewById(R.id.tv_config_meta)
         private val tvExpand: TextView = view.findViewById(R.id.tv_config_expand)
         private val boxDetails: LinearLayout = view.findViewById(R.id.box_config_details)
-        private val tvBody: TextView = view.findViewById(R.id.tv_config_body)
+        private val tvBody: TextView = view.findViewById<TextView>(R.id.tv_config_body).also {
+            // Тело конфигурации — чужой текст: имена узлов из подписки не переводятся.
+            NovaLanguage.verbatim(it)
+        }
         private val btnCopy: TextView = view.findViewById(R.id.btn_copy_config)
         private val btnEdit: TextView = view.findViewById(R.id.btn_edit_config)
         private val btnDelete: TextView = view.findViewById(R.id.btn_delete_config)
@@ -185,7 +188,7 @@ class ConfigsAdapter(
                 clipboard?.setPrimaryClip(
                     ClipData.newPlainText("warp-config", activity.renderConfigForDisplayPublic(item))
                 )
-                Toast.makeText(activity, "Конфигурация скопирована", Toast.LENGTH_SHORT).show()
+                Toast.makeText(activity, NovaLanguage.tr(activity, "Конфигурация скопирована"), Toast.LENGTH_SHORT).show()
             }
             // Встроенные профили не редактируются (I6): их текст приходит из
             // прошивки, и подменить его значило бы получить профиль, о

@@ -262,7 +262,7 @@ data class WarpConfigsMenuSnapshot(
 
 data class DiagnosticLogSettingsConfig(
     val enabled: Boolean = false,
-    val level: String = "error",
+    val level: String = "info",
 )
 
 data class WarpVerifiedConfig(
@@ -9910,41 +9910,13 @@ class ClientData(context: Context) {
             .commit()
     }
 
-    // Diagnostic logging settings methods
-    private fun normalizeDiagnosticLogLevel(value: String?): String {
-        return when (value?.trim()?.lowercase(Locale.US)) {
-            "debug" -> "debug"
-            "info" -> "info"
-            "warn", "warning" -> "warn"
-            else -> "error"
-        }
-    }
+    // Настройка журнала живёт в файле, а не в prefs: её читает и `:vpn` (I2).
+    // Хозяин формата — `LogManager`.
+    fun getDiagnosticLogSettingsConfig(): DiagnosticLogSettingsConfig =
+        LogManager.readSettings(appContext)
 
-    fun getDiagnosticLogSettingsConfig(): DiagnosticLogSettingsConfig {
-        val raw = prefs.getString("diagnostic_log_settings_json", null).orEmpty()
-        if (raw.isBlank()) return DiagnosticLogSettingsConfig()
-        return try {
-            val json = JSONObject(raw)
-            DiagnosticLogSettingsConfig(
-                enabled = json.optBoolean("enabled", false),
-                level = normalizeDiagnosticLogLevel(json.optString("level")),
-            )
-        } catch (_: Exception) {
-            DiagnosticLogSettingsConfig()
-        }
-    }
-
-    fun saveDiagnosticLogSettingsConfig(config: DiagnosticLogSettingsConfig) {
-        val normalized = DiagnosticLogSettingsConfig(
-            enabled = config.enabled,
-            level = normalizeDiagnosticLogLevel(config.level),
-        )
-        val raw = JSONObject().apply {
-            put("enabled", normalized.enabled)
-            put("level", normalized.level)
-        }.toString()
-        prefs.edit().putString("diagnostic_log_settings_json", raw).commit()
-    }
+    fun saveDiagnosticLogSettingsConfig(config: DiagnosticLogSettingsConfig): Boolean =
+        LogManager.saveSettings(appContext, config)
 
     fun getDiagnosticLogSettingsSummary(): String {
         val config = getDiagnosticLogSettingsConfig()

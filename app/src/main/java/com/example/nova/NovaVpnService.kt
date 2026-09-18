@@ -222,6 +222,15 @@ class NovaVpnService : OperaNativeVpnService() {
     private var observedUnderlyingUnavailable = false
     @Volatile
     private var lastNetworkReconnectAt = 0L
+    /**
+     * Когда живой сеанс последний раз увидел смену или потерю подложной сети.
+     *
+     * Нужен, чтобы не штрафовать узел за переезд (G214). Причина «VPN потерял underlying
+     * networks» для этого не годится: на Android ≤ 11 подложные сети VPN не читаются вовсе, и
+     * проверка здоровья называет её при любом отказе, в том числе на неизменной сети.
+     */
+    @Volatile
+    private var lastUnderlyingNetworkChangeAtMs = 0L
     /** Идёт ли сейчас перебор профилей VLESS: только он умеет менять узел на ходу. */
     @Volatile
     private var vlessRotationActive = false
@@ -915,12 +924,17 @@ class NovaVpnService : OperaNativeVpnService() {
         const val ACTION_PROBE_MASQUE = "PROBE_MASQUE"
 
         /**
-         * Замер Proton-профилей рукопожатием.
+         * Замер Proton-профилей: TCP-отклик по всему списку и одно рукопожатие в
+         * голову очереди.
          *
          * Живёт в службе, а не в интерфейсе, по одной причине: `protect()` есть
          * только у `VpnService`. Без него замер уходил бы внутрь поднятого туннеля
          * и описывал бы его канал, а не прямой путь до узла Proton — то есть
          * ранжировал бы профили по чужой задержке.
+         *
+         * Рукопожатий здесь ровно одно, и это не экономия времени: пачка отбирает
+         * ключ у живого туннеля и на 25+ минут ссорит нас с узлами
+         * (`kb/proton-generator.md`).
          */
         const val ACTION_PROBE_PROTON_PROFILES = "PROBE_PROTON_PROFILES"
 
@@ -1119,6 +1133,13 @@ class NovaVpnService : OperaNativeVpnService() {
          * сторож успевал бы посчитать туннель мёртвым между двумя пробами.
          */
         private const val TOR_PROOF_WINDOW_MS = 45_000L
+
+        /**
+         * Столько после смены подложной сети отказ туннеля не ставится узлу в вину (G214):
+         * реконнект по переезду и его повторы укладываются в первые секунды, а узел,
+         * который не работает и на новой сети, получит штраф на следующем отказе.
+         */
+        private const val NETWORK_CHANGE_NO_BLAME_WINDOW_MS = 30_000L
 
         /** Порт SOCKS5-inbound по умолчанию, если занять свободный не удалось. */
         private const val VLESS_SOCKS_FALLBACK_PORT = 10808
@@ -1390,22 +1411,17 @@ class NovaVpnService : OperaNativeVpnService() {
         private const val PROTON_CONFIG_CACHE_MS = 3_000L
 
         /**
-         * Сколько проб идёт одновременно и сколько ждать ответа.
+         * Сколько TCP-проб идёт одновременно.
          *
-         * Дюжина параллельных UDP-отправок — потолок, за которым на мобильной сети
-         * начинаются потери, и медленным выглядит канал, а не узел.
+         * Дюжина — потолок, за которым на мобильной сети начинаются потери, и
+         * медленным выглядит канал, а не узел. Рукопожатие через этот пул не ходит:
+         * его шлют ровно одно, в голову очереди.
          */
         private const val PROTON_PROBE_PARALLELISM = 12
         /** Хватает на первый выстрел и три повтора по 700 мс. */
         private const val PROTON_PROBE_TIMEOUT_MS = 3_500
 
-        /**
-         * Срок запасного TCP-замера ([ProtonLatency]).
-         *
-         * Короче срока рукопожатия намеренно: оба замера идут **одновременно** на
-         * одного кандидата, и запасной обязан уложиться внутрь основного, иначе он
-         * добавит времени прогону вместо того, чтобы спрятаться в нём.
-         */
+        /** Срок TCP-замера ([ProtonLatency]), которым меряется весь список. */
         private const val PROTON_PROBE_TCP_TIMEOUT_MS = 3_000
 
         /** Режим сети меняется вместе с сетью, а не по часам; таймер тут — страховка. */
@@ -1495,7 +1511,12 @@ class NovaVpnService : OperaNativeVpnService() {
     override fun onCreate() {
         super.onCreate()
         LogManager.setAppContext(this)
+        DiagnosticSnapshot.attachVpnService(this)
         NovaRelay.attach(this)
+        // Язык интерфейса выбирает основной процесс; уведомление строит этот.
+        NovaLanguage.followForeignWrites(this)
+        // Тема тоже: из неё уведомлению нужен акцент для заливки.
+        NovaNotificationPalette.followForeignWrites()
         // Процесс поднялся — будильник восстановления своё отработал. Не снять его
         // значит получить второй `RESTORE_LAST_SESSION` уже в живой процесс.
         cancelSessionRestoreAlarm()
@@ -1694,6 +1715,11 @@ class NovaVpnService : OperaNativeVpnService() {
                 )
             }
         }
+
+        // Смена языка интерфейса и темы едет тем же намерением: уведомление ниже
+        // уже рисуется на новом языке и в новых цветах (I19).
+        NovaLanguage.applyFromIntent(this, intent)
+        NovaNotificationPalette.applyFromIntent(intent)
 
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification())
@@ -2212,10 +2238,39 @@ class NovaVpnService : OperaNativeVpnService() {
         }
     }
     
+    /**
+     * Хребет журнала: каждая смена состояния сеанса — одной строкой. Раньше переходы
+     * восстанавливали по косвенным строкам разных подсистем, а сама смена не писалась.
+     * На старте сеанса к ней добавляется снимок настроек и окружения глазами `:vpn`.
+     */
+    private fun logSessionStateChange(previous: String, state: String, transport: String, notice: String) {
+        val details = buildList {
+            add("backend=$currentBackendLabel")
+            val shownTransport = currentTransportLabel.ifBlank { transport }
+            if (shownTransport.isNotBlank()) add("транспорт=$shownTransport")
+            if (currentAttemptTotal > 0) add("попытка $currentAttemptOrdinal/$currentAttemptTotal")
+            if (state == STATE_STOPPED) {
+                add("остановлен явно=${if (explicitStopRequested || isUserStopped) "да" else "нет"}")
+                if (notice.isNotBlank()) add("заметка «$notice»")
+            }
+        }.joinToString(", ")
+        LogManager.log("Состояние сеанса: $previous → $state ($details).")
+        if (previous == STATE_STOPPED && state == STATE_CONNECTING) {
+            startSafeServiceThread("nova-log-session-snapshot") {
+                DiagnosticSnapshot.logSessionStart(this)
+            }
+        }
+    }
+
     private fun broadcastState(state: String) {
         if (explicitStopRequested && state != STATE_STOPPED) {
             return
         }
+        // Ветка STOPPED ниже чистит транспорт и заметку, а строке о переходе нужны
+        // значения до чистки: это и есть «на чём остановились и почему».
+        val previousState = currentState
+        val transportBeforeChange = currentTransportLabel
+        val noticeBeforeChange = currentTransportNotice
         val clientData = ClientData(this)
         if (state == STATE_CONNECTED) {
             lastStoppedStateCleanupAtMs = 0L
@@ -2242,6 +2297,9 @@ class NovaVpnService : OperaNativeVpnService() {
             }
         }
         currentState = state
+        if (previousState != state) {
+            logSessionStateChange(previousState, state, transportBeforeChange, noticeBeforeChange)
+        }
         syncNotificationDetailsTicker()
         clientData.saveServiceState(
             state,
@@ -3243,6 +3301,9 @@ class NovaVpnService : OperaNativeVpnService() {
         startSafeServiceThread("NovaVpnProcessExit") {
             Thread.sleep(600L)
             LogManager.log("Процесс :vpn завершает себя, чтобы сеанс поднялся в чистом.")
+            // Запись журнала идёт отдельным потоком; без сброса строка о причине
+            // смерти не успевала бы на диск раньше SIGKILL.
+            LogManager.flush()
             android.os.Process.killProcess(android.os.Process.myPid())
         }
     }
@@ -3551,6 +3612,15 @@ class NovaVpnService : OperaNativeVpnService() {
             .orEmpty()
         if (!selectedNetworkClass.contains("wifi")) return false
         if (!probeNetworkClass.contains("cell") || probeNetworkClass.contains("wifi")) return false
+        // Переезжаем без пробы только на Wi‑Fi, который система уже проверила. Иначе у двери
+        // дома или в сети с порталом туннель уходил с рабочей мобильной сети в сеть без
+        // интернета — а с выбором «проверенная сеть впереди» ещё и туда-обратно, стоит
+        // мобильной на миг потерять VALIDATED.
+        val selectedValidated = selectedUnderlying?.let {
+            connectivityManager?.getNetworkCapabilities(it)
+                ?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        } == true
+        if (!selectedValidated) return false
         if (hasRecentSuccessfulTunnelProbeForUnderlying(connectivityManager, selectedUnderlying)) return false
         return true
     }
@@ -3724,7 +3794,13 @@ class NovaVpnService : OperaNativeVpnService() {
     }
 
     private fun logOperaProxyManagerMessage(message: String) {
-        LogManager.log(message)
+        // Строка на каждый запрос — только в logcat (`DiagnosticLogNoise`); разбор ниже
+        // по-прежнему видит все строки.
+        if (DiagnosticLogNoise.isPerConnectionChatter(message)) {
+            LogManager.d(message)
+        } else {
+            LogManager.log(message)
+        }
         if (isTransportConnectivityFailureLog(message)) {
             noteTransportConnectivityLoss("Opera proxy", message)
         }
@@ -4452,31 +4528,57 @@ class NovaVpnService : OperaNativeVpnService() {
         broadcastState(STATE_CONNECTING)
 
         if (shouldUseWarpTransport(regionPreference, clientData)) {
-            val config = clientData.getConfig()
-            if (config == null) {
-                // Молчаливый `return false` здесь означал «служба ничего не сделала»,
-                // и снаружи это выглядело как «кнопка не работает».
-                LogManager.log(
-                    "REAPPLY: WARP-конфигурация не зарегистрирована, поднимать сессию нечем. " +
-                        "Запустите подключение с главного экрана."
-                )
-                return false
-            }
-            clientData.saveRestartSession(
-                RestartSession(
-                    kind = "warp",
-                    region = regionPreference,
-                    privateKey = config.privateKey,
-                    ipv4 = config.ipv4,
-                    ipv6 = config.ipv6,
-                    peerPublicKey = config.peerPublicKey,
-                    peerEndpoint = config.peerEndpoint,
-                    reserved = config.reserved,
-                    savedPort = clientData.getLastSuccessPort().takeIf { it in 1..65535 },
-                    savedProto = clientData.getLastSuccessProtocol(),
-                )
-            )
+            // Личность берётся в рабочем потоке и по той же цепочке, что у «Smart start»
+            // (`resolveWarpConfigForServiceStart`), а не одной сохранённой регистрацией.
+            //
+            // Её стирает самолечение после провалов подряд, и с одним `getConfig()`
+            // переприменение на живом сеансе гасило его, а новый не начинало: состояние
+            // успевало стать CONNECTING, служба возвращала `false`, и дальше не
+            // происходило ничего (Mi A1, 2026-09-13, OPERA → PROTON). В потоке — потому
+            // что прошивочное семя читается из ассета, а регистрация идёт в сеть.
+            isRunning = true
             startSafeServiceThread("NovaReapplyWarp") {
+                val config = runCatching {
+                    resolveWarpConfigForServiceStart(clientData, connectGenerationId, "REAPPLY")
+                }.getOrElse { error ->
+                    LogManager.log("REAPPLY: получить WARP-конфигурацию не вышло — ${error.message}")
+                    null
+                }
+                if (isUserStopped || !isConnectGenerationCurrent(connectGenerationId)) {
+                    return@startSafeServiceThread
+                }
+                if (config == null) {
+                    // Молчаливый выход здесь означал «служба ничего не сделала», и
+                    // снаружи это выглядело как «кнопка не работает» — с CONNECTING в
+                    // файле состояния. Останавливаемся вслух (I4).
+                    LogManager.log(
+                        "REAPPLY: WARP-конфигурация не зарегистрирована, поднимать сессию нечем. " +
+                            "Запустите подключение с главного экрана."
+                    )
+                    publishTransportNotice(
+                        clientData,
+                        "Не удалось получить конфигурацию WARP для переподключения — нажмите «ПОДКЛЮЧИТЬ».",
+                        keepOnStop = true,
+                    )
+                    isRunning = false
+                    broadcastState(STATE_STOPPED)
+                    stopSelf()
+                    return@startSafeServiceThread
+                }
+                clientData.saveRestartSession(
+                    RestartSession(
+                        kind = "warp",
+                        region = regionPreference,
+                        privateKey = config.privateKey,
+                        ipv4 = config.ipv4,
+                        ipv6 = config.ipv6,
+                        peerPublicKey = config.peerPublicKey,
+                        peerEndpoint = config.peerEndpoint,
+                        reserved = config.reserved,
+                        savedPort = clientData.getLastSuccessPort().takeIf { it in 1..65535 },
+                        savedProto = clientData.getLastSuccessProtocol(),
+                    )
+                )
                 configureAndStartVpn(
                     privateKey = config.privateKey,
                     ipv4 = config.ipv4,
@@ -4493,7 +4595,8 @@ class NovaVpnService : OperaNativeVpnService() {
                     connectGenerationId = connectGenerationId,
                 )
             }
-            isRunning = true
+            // `isRunning` поднят до запуска потока: здесь его повторная установка могла
+            // бы выполниться уже после того, как поток остановился с ошибкой.
             return true
         }
 
@@ -5517,6 +5620,65 @@ class NovaVpnService : OperaNativeVpnService() {
         }
     }
 
+    /**
+     * WARP-личность для подключения, которое служба начинает сама, без экрана.
+     *
+     * Одно правило на все такие старты — «Smart start» и переприменение настроек к
+     * живому сеансу: сохранённая регистрация, затем restart-сеанс, затем отложенный
+     * bootstrap-перезапуск, затем прошивочное семя — та же цепочка, по которой
+     * «ПОДКЛЮЧИТЬ» на главном экране поднимает сеанс, — и только если нет ничего из
+     * этого, регистрация по сети.
+     *
+     * Зачем одна функция. Переприменение брало одну только сохранённую регистрацию
+     * (`getConfig()`), а её стирает самолечение после нескольких полных провалов
+     * подряд (`resetWarpRuntimeState(clearStoredConfig = true)`) — то есть ровно после
+     * того, как человек долго не мог подключиться. Выбор PROTON на живом сеансе Opera
+     * тогда гасил сеанс, а новый не начинал вовсе (Mi A1, 2026-09-13). Копия правила,
+     * разошедшаяся с двумя другими, — та же история, что G49.
+     *
+     * Сохранённая здесь личность пишется из `:vpn`, и экранный процесс может откатить
+     * её своим кэшем настроек (I2) — поэтому цепочка проходится заново на каждом старте,
+     * а не считается сделанной однажды. Семя прошивочное, и восстановить его можно
+     * всегда.
+     *
+     * Только из рабочего потока: семя читается из ассета, регистрация идёт в сеть.
+     */
+    private fun resolveWarpConfigForServiceStart(
+        clientData: ClientData,
+        connectGenerationId: Int,
+        label: String,
+    ): WarpConfig? {
+        val resolved = clientData.resolveWarpConfigForReuse(repairWithBootstrap = true)
+        if (resolved != null) {
+            if (!resolved.persisted) {
+                clientData.saveConfig(resolved.config)
+                LogManager.log(
+                    "$label: восстановили WARP identity из ${resolved.source} " +
+                        "и сохранили её, чтобы не регистрироваться повторно."
+                )
+            } else if (resolved.source != "saved-config") {
+                LogManager.log(
+                    "$label: сохранённой регистрации WARP не было — взяли конфигурацию " +
+                        "из ${resolved.source}, без новой регистрации."
+                )
+            }
+            return resolved.config
+        }
+        broadcastState(STATE_CONNECTING)
+        LogManager.log("$label: регистрируем/восстанавливаем WARP-конфигурацию без UI.")
+        val warpClient = WarpClient(
+            applicationContext,
+            LogManager::log,
+            shouldAbort = {
+                isUserStopped ||
+                    explicitStopRequested ||
+                    cleanupInProgress.get() ||
+                    !isConnectGenerationCurrent(connectGenerationId)
+            }
+        )
+        return warpClient.register()?.also { clientData.saveConfig(it) }
+    }
+
     private fun startSmartConnection(
         regionPreferenceOverride: String?,
         diagnosticsMode: Boolean,
@@ -5557,33 +5719,7 @@ class NovaVpnService : OperaNativeVpnService() {
                 return
             }
 
-            val resolvedConfig = clientData.resolveWarpConfigForReuse(repairWithBootstrap = true)
-            var config = resolvedConfig?.config
-            if (config != null && resolvedConfig?.persisted == false) {
-                clientData.saveConfig(config)
-                LogManager.log(
-                    "Smart start: восстановили WARP identity из ${resolvedConfig.source} " +
-                        "и сохранили её, чтобы не регистрироваться повторно."
-                )
-            }
-            if (config == null) {
-                broadcastState(STATE_CONNECTING)
-                LogManager.log("Smart start: регистрируем/восстанавливаем WARP-конфигурацию без UI.")
-                val warpClient = WarpClient(
-                    applicationContext,
-                    LogManager::log,
-                    shouldAbort = {
-                        isUserStopped ||
-                            explicitStopRequested ||
-                            cleanupInProgress.get() ||
-                            !isConnectGenerationCurrent(connectGenerationId)
-                    }
-                )
-                config = warpClient.register()
-                if (config != null) {
-                    clientData.saveConfig(config)
-                }
-            }
+            val config = resolveWarpConfigForServiceStart(clientData, connectGenerationId, "Smart start")
 
             if (config != null) {
                 clientData.saveRestartSession(
@@ -5723,6 +5859,11 @@ class NovaVpnService : OperaNativeVpnService() {
             suppressSessionRestore = false
             isUserStopped = manualStopRequested && !unexpectedDisconnect
             isRunning = false
+            // Состояние меняется здесь напрямую, и `broadcastState(STOPPED)` дальше
+            // перехода уже не видит — поэтому строка о нём пишется тут.
+            if (currentState != STATE_STOPPED) {
+                logSessionStateChange(currentState, STATE_STOPPED, currentTransportLabel, currentTransportNotice)
+            }
             currentState = STATE_STOPPED
             releaseRecoveryWakeLock()
             resetEstablishNullLoopGuard()
@@ -7491,7 +7632,11 @@ class NovaVpnService : OperaNativeVpnService() {
 
     override fun onTun2ProxyLog(message: String) {
         if (message.isNotBlank()) {
-            LogManager.log("[tun2proxy] $message")
+            if (DiagnosticLogNoise.isPerConnectionChatter(message)) {
+                LogManager.d("[tun2proxy] $message")
+            } else {
+                LogManager.log("[tun2proxy] $message")
+            }
             if (isTransportConnectivityFailureLog(message)) {
                 noteTransportConnectivityLoss("tun2proxy", message)
             }
@@ -14338,8 +14483,12 @@ class NovaVpnService : OperaNativeVpnService() {
         unregisterUnderlyingNetworkObserver()
         vpnConsistencyHandler.removeCallbacks(vpnConsistencyRunnable)
         isRunning = false
+        if (currentState != STATE_STOPPED) {
+            logSessionStateChange(currentState, STATE_STOPPED, currentTransportLabel, currentTransportNotice)
+        }
         currentState = STATE_STOPPED
         LogManager.log("NovaVpnService уничтожен.")
+        DiagnosticSnapshot.attachVpnService(null)
         try { unregisterReceiver(stopReceiver) } catch (e: Exception) {}
         try { unregisterReceiver(deviceWakeReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(tetherStateReceiver) } catch (_: Exception) {}
@@ -14716,6 +14865,7 @@ class NovaVpnService : OperaNativeVpnService() {
                 observedUnderlyingNetworkId = selectedId
                 observedUnderlyingNetworkSignature = selectedSignature
             }
+            lastUnderlyingNetworkChangeAtMs = SystemClock.elapsedRealtime()
             LogManager.log(
                 "Сразу после пробуждения игнорируем transient событие подложной сети " +
                     "($triggerId -> ${selectedId ?: "<none>"}), пока Wi‑Fi/VPN стабилизируются."
@@ -14853,6 +15003,7 @@ class NovaVpnService : OperaNativeVpnService() {
             else -> "Сменился сетевой интерфейс ($previousId -> $selectedId). Проверяем, сохранился ли рабочий VPN."
         }
         LogManager.log(description)
+        lastUnderlyingNetworkChangeAtMs = SystemClock.elapsedRealtime()
         val recoveryReason = if (selectedId.isNullOrBlank() || lost) "underlying-loss" else "underlying-change"
         requestAcceleratedVpnCheck(
             triggerReason = recoveryReason,
@@ -14916,8 +15067,48 @@ class NovaVpnService : OperaNativeVpnService() {
                     return@startSafeServiceThread
                 }
                 if (shouldUseWarpTransport(regionPreference, clientData)) {
-                    val config = clientData.getConfig()
+                    // Личность — по той же цепочке, что у REAPPLY и «Smart start»
+                    // (`resolveWarpConfigForServiceStart`, G209), а не одной сохранённой
+                    // регистрацией: её стирают самолечение и сброс выученного после
+                    // обновления, а restart-сеанс с ключами при этом цел.
+                    //
+                    // С одним `getConfig()` смена сети на собственных профилях гасила
+                    // живой сеанс (поколение уже сброшено, интерфейс закрыт) и новый не
+                    // начинала: CONNECTING без единой попытки, туннеля нет ни на
+                    // мобильной сети, ни на вернувшемся Wi‑Fi. При включённом экране
+                    // так оставалось сколько угодно — сердцебиение поднимает сеанс
+                    // только во сне (Pixel 4a, PROTON, 2026-09-15; жалоба владельца
+                    // «на мобильную сеть не переходит, дома Wi‑Fi не ловится, пока не
+                    // отключишь Nova»).
+                    val config = runCatching {
+                        resolveWarpConfigForServiceStart(clientData, connectGenerationId, "Смена сети")
+                    }.getOrElse { error ->
+                        LogManager.log("Смена сети: получить WARP-конфигурацию не вышло — ${error.message}")
+                        null
+                    }
+                    if (isUserStopped || !isConnectGenerationCurrent(connectGenerationId)) {
+                        return@startSafeServiceThread
+                    }
                     if (config != null) {
+                        // Личность пришла из семени или регистрации — значит, restart-сеанса не
+                        // было. Без него поднятый сейчас сеанс не восстановили бы ни сердцебиение,
+                        // ни смерть процесса `:vpn`; REAPPLY и «Smart start» сохраняют его так же.
+                        if (clientData.getRestartSession() == null) {
+                            clientData.saveRestartSession(
+                                RestartSession(
+                                    kind = "warp",
+                                    region = regionPreference,
+                                    privateKey = config.privateKey,
+                                    ipv4 = config.ipv4,
+                                    ipv6 = config.ipv6,
+                                    peerPublicKey = config.peerPublicKey,
+                                    peerEndpoint = config.peerEndpoint,
+                                    reserved = config.reserved,
+                                    savedPort = clientData.getLastSuccessPort().takeIf { it in 1..65535 },
+                                    savedProto = clientData.getLastSuccessProtocol(),
+                                )
+                            )
+                        }
                         val reconnectWarpOnly = autoReconnectShouldPreferWarpOnly(clientData, regionPreference)
                         val operaAllowed = shouldAllowOperaTransport(regionPreference, clientData)
                         configureAndStartVpn(
@@ -14944,18 +15135,48 @@ class NovaVpnService : OperaNativeVpnService() {
                     } else {
                         // Своими профилями подключаться нечем без WARP-идентичности, а
                         // подставлять встроенную Opera нельзя: пользователь выбрал не её.
+                        // Сеанс к этому моменту уже погашен, поэтому останавливаемся
+                        // вслух, а не оставляем CONNECTING, за которым ничего нет (I4).
                         LogManager.log(
-                            "Смена сети: выбраны собственные профили, но WARP-конфигурация " +
-                                "не зарегистрирована. Встроенную Opera не подставляем."
+                            "Смена сети: выбраны собственные профили, но WARP-конфигурацию получить " +
+                                "не вышло. Встроенную Opera не подставляем — останавливаемся."
+                        )
+                        stopAfterUnrecoverableNetworkChange(
+                            clientData,
+                            "Не удалось переподключиться после смены сети: нет конфигурации WARP — " +
+                                "нажмите «ПОДКЛЮЧИТЬ».",
                         )
                     }
                 } else if (shouldAllowOperaTransport(regionPreference, clientData)) {
                     configureAndStartOperaOnly(regionPreference, connectGenerationId)
+                } else {
+                    LogManager.log(
+                        "Смена сети: для режима $regionPreference не нашлось транспорта, " +
+                            "которым поднять сеанс заново."
+                    )
+                    stopAfterUnrecoverableNetworkChange(
+                        clientData,
+                        "Не удалось переподключиться после смены сети — нажмите «ПОДКЛЮЧИТЬ».",
+                    )
                 }
             } finally {
                 reconnectingForNetworkChange = false
             }
         }
+    }
+
+    /**
+     * Восстановление после смены сети поднять сеанс не может, а прежний уже погашен.
+     *
+     * Так же, как REAPPLY в том же положении (G209): причина на экране и STOPPED, а не
+     * CONNECTING, за которым ничего не идёт, — такой держался бесконечно, пока горит
+     * экран, и снаружи выглядел как «сеть пропала».
+     */
+    private fun stopAfterUnrecoverableNetworkChange(clientData: ClientData, notice: String) {
+        publishTransportNotice(clientData, notice, keepOnStop = true)
+        isRunning = false
+        broadcastState(STATE_STOPPED)
+        stopSelf()
     }
 
     /**
@@ -15236,7 +15457,11 @@ class NovaVpnService : OperaNativeVpnService() {
             } else {
                 resetConnectedWarpHealthWindow()
             }
-            if (reason != "watchdog") {
+            if (reason == "background-heartbeat") {
+                // Сердцебиение приходит каждые несколько минут, и смены сети за ним нет:
+                // строка про «после смены сети» здесь только вводила в заблуждение.
+                LogManager.d("После смены сети tunnel-probe через текущий VPN уже проходит. Реконнект не требуется.")
+            } else if (reason != "watchdog") {
                 LogManager.log("После смены сети tunnel-probe через текущий VPN уже проходит. Реконнект не требуется.")
             }
             return
@@ -15399,7 +15624,39 @@ class NovaVpnService : OperaNativeVpnService() {
             else -> "После смены сети $reconnectReason."
         }
         if (currentBackendLabel.trim().uppercase(Locale.ROOT).startsWith(BACKEND_WARP)) {
-            markActiveWarpQualityTargetDegraded(clientData, reconnectReason)
+            // Смена сети — не приговор узлу. Штраф — десять минут cooldown и сброс
+            // «последнего удачного»: после каждого перехода Wi‑Fi ↔ мобильная рабочий узел
+            // уезжал в хвост, переподключение перебирало чужие (на MegaFon LTE шесть
+            // попыток и 40 с без туннеля), а вернувшись домой в эти десять минут, человек
+            // снова начинал не с него.
+            //
+            // Признак переезда — само событие сети или узел, в последний раз подтверждённый
+            // на другой сети, а не причина «VPN потерял underlying networks»: на Android ≤ 11
+            // подложные сети VPN не читаются, и эта причина звучит там при любом отказе —
+            // штраф пропал бы и у узла, который режет DPI на неизменной сети. Узел, не
+            // подтвердившийся сразу после CONNECTED, штрафуем всегда: он провалился уже на
+            // новой сети.
+            val provenSignature = lastSuccessfulTunnelProbeNetworkSignature.orEmpty()
+            val currentSignature =
+                buildUnderlyingNetworkSignature(connectivityManager, health.selectedUnderlying).orEmpty()
+            val sinceNetworkChangeMs = SystemClock.elapsedRealtime() - lastUnderlyingNetworkChangeAtMs
+            val networkChangeArtifact = !forceImmediateRecovery && (
+                reason == "underlying-loss" ||
+                    reason == "underlying-change" ||
+                    (lastUnderlyingNetworkChangeAtMs > 0L &&
+                        sinceNetworkChangeMs in 0..NETWORK_CHANGE_NO_BLAME_WINDOW_MS) ||
+                    (provenSignature.isNotBlank() &&
+                        currentSignature.isNotBlank() &&
+                        provenSignature != currentSignature)
+                )
+            if (networkChangeArtifact) {
+                LogManager.log(
+                    "Реконнект вызван сменой сети ($reconnectReason), а не отказом узла — " +
+                        "текущий профиль не штрафуем."
+                )
+            } else {
+                markActiveWarpQualityTargetDegraded(clientData, reconnectReason)
+            }
             clearActiveWarpQualityTarget()
         }
         LogManager.log("$reconnectPrefix Запускаем реконнект.")
@@ -22595,9 +22852,24 @@ class NovaVpnService : OperaNativeVpnService() {
         val clientData = ClientData(this)
         val candidates = buildSeamlessRotationCandidates(clientData)
         if (candidates.isEmpty()) {
-            LogManager.log(
-                "Обратный поток пропал: ${outcome.reason}. Бесшовно уходить некуда: " +
-                    "у текущей личности нет других узлов."
+            // Пустой список кандидатов — не повод ничего не делать.
+            //
+            // Бесшовный переход и так выключен (`MAX_ROTATIONS_PER_SESSION = 0`):
+            // лечит провал только обычное переподключение, и весь смысл этой
+            // функции — до него дойти. А эта ветка уходила из неё раньше, чем
+            // [LiveNodeRotation] успевал сказать `Exhausted`, — то самое
+            // «обещание без действия», от которого ветку `Exhausted` уже лечили.
+            //
+            // Стоило это целого транспорта. Pixel 4a, WARP RU, 2026-09-16: узел
+            // из собственного набора поднялся, отдал первую порцию трафика, прошёл
+            // tunnel-probe — и замер. Дальше каждые одиннадцать секунд в журнале
+            // «обратный поток пропал… бесшовно уходить некуда», на экране «активно,
+            // работает», в поле пинга прочерк, и ни одного переподключения за всё
+            // время. Снаружи это ровно «Cloudflare не подключается».
+            handOverStalledNodeToReconnect(
+                clientData = clientData,
+                outcome = outcome,
+                reason = "у текущей личности нет других узлов",
             )
             return
         }
@@ -22618,58 +22890,7 @@ class NovaVpnService : OperaNativeVpnService() {
             }
 
             is LiveNodeRotation.Decision.Exhausted -> {
-                // Обещание «дальше обычное переподключение» обязано что-то делать.
-                // В первом прогоне эта строка печаталась каждые девять секунд, а
-                // реконнект не запускал никто: снаружи это неотличимо от зависшего
-                // туннеля, и правило «молчаливый отказ запрещён» нарушала именно
-                // она — обещанием без действия.
-                if (stallHandoverRequested) return
-                val nowMs = System.currentTimeMillis()
-                val sinceLastMs = if (lastStallReconnectAtMs == 0L) Long.MAX_VALUE else nowMs - lastStallReconnectAtMs
-                if (sinceLastMs < STALL_RECONNECT_MIN_INTERVAL_MS) {
-                    // Отложить — не значит отказаться навсегда. Флаг здесь **не**
-                    // выставляется: он живёт до конца туннеля, и отметив его на
-                    // отложенной попытке, мы выключили бы передачу отказа до самого
-                    // конца сеанса. Проверено на устройстве: после одной такой
-                    // отсрочки детектор замолкал совсем и туннель оставался мёртвым.
-                    if (nowMs - stallHandoverDeferralLoggedAtMs >= STALL_RECONNECT_MIN_INTERVAL_MS) {
-                        stallHandoverDeferralLoggedAtMs = nowMs
-                        // Отказ не молчаливый (I4): «сеть плохая целиком» и «узел
-                        // плохой» — разные диагнозы, и первый переподключением не лечится.
-                        LogManager.log(
-                            "Обратный поток пропал: ${outcome.reason}. Прошлое переподключение из-за " +
-                                "провала было ${sinceLastMs / 1000} с назад — не дёргаем сеанс чаще, чем " +
-                                "раз в ${STALL_RECONNECT_MIN_INTERVAL_MS / 1000} с. Пока остаёмся на узле."
-                        )
-                    }
-                    return
-                }
-                stallHandoverRequested = true
-                // Узел бросаем на cooldown ровно так же, как при бесшовном уходе. Без
-                // этого переподключение начиналось с него же: он остаётся последним
-                // успехом, а короткий путь «последняя стабильная стратегия» идёт мимо
-                // очереди и записи об удержании не видит.
-                rememberTransientDegradedWarpProfile(
-                    engine = "wireguard",
-                    mode = activeEndpointMode,
-                    host = activeEndpointHost,
-                    port = activeEndpointPort,
-                    cooldownMs = STALLED_NODE_COOLDOWN_MS,
-                )
-                rememberStalledEndpoint(
-                    host = activeEndpointHost,
-                    port = activeEndpointPort,
-                    cooldownMs = STALLED_NODE_COOLDOWN_MS,
-                )
-                lastStallReconnectAtMs = nowMs
-                LogManager.log(
-                    "Обратный поток пропал: ${outcome.reason}. Бесшовный уход исчерпан " +
-                        "(${decision.reason}) — узел $activeEndpointHost:$activeEndpointPort уходит " +
-                        "на паузу, запускаем обычное переподключение."
-                )
-                if (!isUserStopped && !explicitStopRequested) {
-                    triggerReconnectForNetworkChange(clientData)
-                }
+                handOverStalledNodeToReconnect(clientData, outcome, decision.reason)
             }
 
             is LiveNodeRotation.Decision.Switch -> {
@@ -22716,6 +22937,73 @@ class NovaVpnService : OperaNativeVpnService() {
     }
 
     /**
+     * Отдаёт замерший узел обычному переподключению — единственному, что его лечит.
+     *
+     * Вынесено из ветки `Exhausted` ради второго вызывающего: когда бесшовно
+     * уходить некуда, до решения [LiveNodeRotation] дело не доходит вовсе, а
+     * переподключение нужно там ровно то же. Пока этот путь возвращался молча,
+     * замерший узел оставался под сеансом до конца — «обещание без действия»
+     * жило в двух ветках, вылечили одну.
+     *
+     * Обещание «дальше обычное переподключение» обязано что-то делать. В первом
+     * прогоне строка про исчерпанный уход печаталась каждые девять секунд, а
+     * реконнект не запускал никто: снаружи это неотличимо от зависшего туннеля.
+     */
+    private fun handOverStalledNodeToReconnect(
+        clientData: ClientData,
+        outcome: TunnelStallDetector.Outcome,
+        reason: String,
+    ) {
+        if (stallHandoverRequested) return
+        val nowMs = System.currentTimeMillis()
+        val sinceLastMs = if (lastStallReconnectAtMs == 0L) Long.MAX_VALUE else nowMs - lastStallReconnectAtMs
+        if (sinceLastMs < STALL_RECONNECT_MIN_INTERVAL_MS) {
+            // Отложить — не значит отказаться навсегда. Флаг здесь **не**
+            // выставляется: он живёт до конца туннеля, и отметив его на
+            // отложенной попытке, мы выключили бы передачу отказа до самого
+            // конца сеанса. Проверено на устройстве: после одной такой
+            // отсрочки детектор замолкал совсем и туннель оставался мёртвым.
+            if (nowMs - stallHandoverDeferralLoggedAtMs >= STALL_RECONNECT_MIN_INTERVAL_MS) {
+                stallHandoverDeferralLoggedAtMs = nowMs
+                // Отказ не молчаливый (I4): «сеть плохая целиком» и «узел
+                // плохой» — разные диагнозы, и первый переподключением не лечится.
+                LogManager.log(
+                    "Обратный поток пропал: ${outcome.reason}. Прошлое переподключение из-за " +
+                        "провала было ${sinceLastMs / 1000} с назад — не дёргаем сеанс чаще, чем " +
+                        "раз в ${STALL_RECONNECT_MIN_INTERVAL_MS / 1000} с. Пока остаёмся на узле."
+                )
+            }
+            return
+        }
+        stallHandoverRequested = true
+        // Узел бросаем на cooldown ровно так же, как при бесшовном уходе. Без
+        // этого переподключение начиналось с него же: он остаётся последним
+        // успехом, а короткий путь «последняя стабильная стратегия» идёт мимо
+        // очереди и записи об удержании не видит.
+        rememberTransientDegradedWarpProfile(
+            engine = "wireguard",
+            mode = activeEndpointMode,
+            host = activeEndpointHost,
+            port = activeEndpointPort,
+            cooldownMs = STALLED_NODE_COOLDOWN_MS,
+        )
+        rememberStalledEndpoint(
+            host = activeEndpointHost,
+            port = activeEndpointPort,
+            cooldownMs = STALLED_NODE_COOLDOWN_MS,
+        )
+        lastStallReconnectAtMs = nowMs
+        LogManager.log(
+            "Обратный поток пропал: ${outcome.reason}. Бесшовный уход исчерпан " +
+                "($reason) — узел $activeEndpointHost:$activeEndpointPort уходит " +
+                "на паузу, запускаем обычное переподключение."
+        )
+        if (!isUserStopped && !explicitStopRequested) {
+            triggerReconnectForNetworkChange(clientData)
+        }
+    }
+
+    /**
      * Узлы, на которые можно перейти, не роняя интерфейс: та же личность,
      * что у текущего профиля.
      *
@@ -22726,16 +23014,40 @@ class NovaVpnService : OperaNativeVpnService() {
     private fun buildSeamlessRotationCandidates(
         clientData: ClientData,
     ): List<LiveNodeRotation.Candidate> {
-        val configs = runCatching { clientData.getWarpVerifiedConfigs() }
-            .getOrElse {
-                LogManager.log("Не удалось прочитать список профилей для смены узла: ${it.message}")
-                return emptyList()
-            }
         val host = activeEndpointHost.trim().removePrefix("[").removeSuffix("]")
-        val current = configs.firstOrNull {
+        fun currentIn(configs: List<WarpVerifiedConfig>): WarpVerifiedConfig? = configs.firstOrNull {
             it.host.trim().removePrefix("[").removeSuffix("]").equals(host, ignoreCase = true) &&
                 it.port == activeEndpointPort
-        } ?: return emptyList()
+        }
+        val verified = runCatching { clientData.getWarpVerifiedConfigs() }
+            .getOrElse {
+                LogManager.log("Не удалось прочитать список профилей для смены узла: ${it.message}")
+                emptyList()
+            }
+        // Собственные сгенерированные профили — такой же источник живого узла, как и
+        // список проверенных конфигураций. Без них текущая точка входа просто не
+        // находилась: пара `host:port` у неё своя, в проверенном списке её нет, и поиск
+        // личности обрывался на первом шаге — «у текущей личности нет других узлов» при
+        // полусотне узлов этой самой личности.
+        //
+        // Читаются только когда узла нет среди проверенных, и это не мелочь: мы на
+        // главном потоке `:vpn` (тик `vpnConsistencyRunnable`), проверенный список лежит
+        // в памяти `SharedPreferences`, а снимок сгенерированных — в файле. Лишнее чтение
+        // на каждом подтверждённом провале ничего бы не дало.
+        //
+        // Личность у всего набора одна ([WarpGeneratedStore.Identity]), поэтому фильтр по
+        // приватному ключу ниже разделяет два набора сам, а порядок их склейки ни на что
+        // не влияет: кандидата выбирает `rank`, а не позиция в списке.
+        val configs = if (currentIn(verified) != null) {
+            verified
+        } else {
+            verified + runCatching { generatedWarpConfigs(clientData) }
+                .getOrElse {
+                    LogManager.log("Не удалось прочитать свои WARP-профили для смены узла: ${it.message}")
+                    emptyList()
+                }
+        }
+        val current = currentIn(configs) ?: return emptyList()
         val identity = extractPrivateKey(current.rawConfig) ?: return emptyList()
 
         val nowMs = System.currentTimeMillis()
@@ -22959,8 +23271,14 @@ class NovaVpnService : OperaNativeVpnService() {
             val validated = caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)
             val isActive = network == active
             var score = 0
+            // Проверенная системой сеть выше непроверенной при любом транспорте. Прежние
+            // +140 проигрывали одному Wi‑Fi (+300), и непроверенный Wi‑Fi обходил рабочую
+            // мобильную сеть: у двери дома, пока система ещё проверяет вернувшийся Wi‑Fi,
+            // и на улице, когда она уже признала его плохим и ушла на мобильную. Nova в
+            // обоих случаях привязывала туннель к сети, которой система не пользуется.
+            // Из двух проверенных Wi‑Fi по-прежнему впереди.
+            if (validated) score += 500
             if (isWifi) score += 300
-            if (validated) score += 140
             if (isActive) score += if (isWifi) 80 else 20
             if (isCellular && !isWifi) score += 30
             return score
@@ -25614,118 +25932,64 @@ class NovaVpnService : OperaNativeVpnService() {
             store.writeProbeState(
                 ProtonProfileStore.ProbeState(ProtonProfileStore.STATE_RUNNING, total, 0, 0)
             )
-            LogManager.log("Proton probe: меряем $total кандидатов рукопожатием, сокеты защищены.")
+            LogManager.log(
+                "Proton probe: меряем $total кандидатов TCP-откликом, сокеты защищены; " +
+                    "рукопожатие уйдёт одно — в голову очереди."
+            )
 
-            val pool = java.util.concurrent.Executors.newFixedThreadPool(PROTON_PROBE_PARALLELISM)
-            // Второй пул того же размера — под запасной TCP-замер.
+            // Рукопожатием пачку узлов не мерят — это измерено и стоит дорого.
             //
-            // Он идёт **одновременно** с рукопожатием, а не после него: последовательно
-            // мёртвый узел стоил бы трёх секунд сверх трёх с половиной, то есть
-            // удвоил бы весь замер. Параллельно цена — max(рукопожатие, TCP), а это и
-            // есть срок рукопожатия.
+            // Доведённое до конца рукопожатие — это уже сессия: Proton отдаёт ключ
+            // тому, кто поздоровался последним, и живой туннель на другом узле
+            // замолкает секунд через пятнадцать. Узел, которому рукопожатия надоели,
+            // перестаёт отвечать на этот ключ на 25+ минут — на ПК в таком состоянии
+            // оказались сразу несколько узлов после одного прогона по списку. И даже
+            // такой ценой пачка не ответила бы на свой вопрос: узел отвечает не
+            // «вообще», а на пару (местный порт, порт узла), а случайный порт пробы
+            // ничего не говорит о том порте, который возьмёт движок
+            // (Nova PC `kb/profiles.md#wg-probe`, G218).
+            //
+            // Поэтому пачку мерит TCP-отклик — он ничего не занимает и ничем не
+            // грозит, — а рукопожатие уходит ниже, на один-единственный узел: тот,
+            // что встанет в очереди первым.
             val tcpPool = java.util.concurrent.Executors.newFixedThreadPool(PROTON_PROBE_PARALLELISM)
             val done = java.util.concurrent.atomic.AtomicInteger(0)
             val alive = java.util.concurrent.atomic.AtomicInteger(0)
-            val probeReplyType2 = java.util.concurrent.atomic.AtomicInteger(0)
-            val probeReplyCookie = java.util.concurrent.atomic.AtomicInteger(0)
-            val probeReplyOther = java.util.concurrent.atomic.AtomicInteger(0)
             val measured = try {
                 val futures = candidates.mapIndexed { index, candidate ->
-                    pool.submit<ProtonProfile> {
-                        val tcpFuture = tcpPool.submit<Int> {
-                            ProtonLatency.probeTcpRttMs(
-                                host = candidate.entryIp,
-                                timeoutMs = PROTON_PROBE_TCP_TIMEOUT_MS,
-                                protect = { socket ->
-                                    // Порядок здесь **не** такой, как у рукопожатия,
-                                    // и это принципиально. `probeHandshakeRttMs`
-                                    // работает с `DatagramSocket`, который
-                                    // привязывается уже в конструкторе, поэтому
-                                    // дескриптор у него есть сразу. У `Socket()`
-                                    // дескриптора ещё нет — он создаётся в `bind`
-                                    // или `connect`, — а `VpnService.protect(Socket)`
-                                    // его разыменовывает. Без явного `bind` защита
-                                    // отказывала на каждом кандидате, отказ глотался
-                                    // (`catch { -1 }`), и весь TCP-ярус ранжирования
-                                    // молча вырождался в сортировку по нагрузке.
-                                    val boundLocal = runCatching {
-                                        socket.bind(java.net.InetSocketAddress(0))
-                                    }.isSuccess
-                                    val protectedOk = runCatching { protect(socket) }.getOrDefault(false)
-                                    val bound = underlyingNetwork?.let { network ->
-                                        runCatching { network.bindSocket(socket) }.isSuccess
-                                    }
-                                    // Молчать нельзя (I4): незащищённый сокет ушёл бы
-                                    // в проверяемый туннель, и «TCP-откликом 0»
-                                    // читалось бы как «узлы мертвы».
-                                    if (index == 0) {
-                                        LogManager.log(
-                                            "Proton probe TCP: bind=$boundLocal, protect=$protectedOk, " +
-                                                "bindSocket=$bound."
-                                        )
-                                    }
-                                },
-                            )
-                        }
-                        val rtt = ProtonCrypto.probeHandshakeRttMs(
-                            privateKeyB64 = privateKey,
-                            peerPublicKeyB64 = candidate.peerPublicKey,
+                    tcpPool.submit<ProtonProfile> {
+                        val tcp = ProtonLatency.probeTcpRttMs(
                             host = candidate.entryIp,
-                            port = candidate.port,
-                            timeoutMs = PROTON_PROBE_TIMEOUT_MS,
-                            i1 = candidate.i1,
-                            junkCount = candidate.junkCount,
-                            junkMin = candidate.junkMin,
-                            junkMax = candidate.junkMax,
+                            timeoutMs = PROTON_PROBE_TCP_TIMEOUT_MS,
                             protect = { socket ->
-                                val protectedOk = protect(socket)
+                                // У `Socket()` дескриптора ещё нет — он создаётся в
+                                // `bind` или `connect`, — а `VpnService.protect(Socket)`
+                                // его разыменовывает. Без явного `bind` защита
+                                // отказывала на каждом кандидате, отказ глотался
+                                // (`catch { -1 }`), и весь TCP-ярус ранжирования
+                                // молча вырождался в сортировку по нагрузке.
+                                val boundLocal = runCatching {
+                                    socket.bind(java.net.InetSocketAddress(0))
+                                }.isSuccess
+                                val protectedOk = runCatching { protect(socket) }.getOrDefault(false)
                                 val bound = underlyingNetwork?.let { network ->
                                     runCatching { network.bindSocket(socket) }.isSuccess
                                 }
-                                // Молча проглоченный отказ здесь читался бы как
-                                // «узел мёртв» (I4): и защита, и привязка меняют
-                                // маршрут пакета целиком.
+                                // Молчать нельзя (I4): незащищённый сокет ушёл бы в
+                                // проверяемый туннель, и «TCP-откликом 0» читалось бы
+                                // как «узлы мертвы».
                                 if (index == 0) {
                                     LogManager.log(
-                                        "Proton probe: protect=$protectedOk, bindSocket=$bound, " +
-                                            "сеть=${underlyingNetwork?.toString() ?: "нет"}."
+                                        "Proton probe TCP: bind=$boundLocal, protect=$protectedOk, " +
+                                            "bindSocket=$bound, сеть=${underlyingNetwork?.toString() ?: "нет"}."
                                     )
                                 }
                             },
-                            diagnosticLabel = "Proton probe [${candidate.entryIp}:${candidate.port}]"
-                                .takeIf { index == 0 },
-                            // Без разбора по типам «0 из 52» ничего не значит: это
-                            // одинаково и «узлы молчат», и «узлы отвечают cookie, а
-                            // мы его выбрасываем». Разные диагнозы, разное лечение.
-                            onPacketType = { type ->
-                                when (type) {
-                                    2 -> probeReplyType2.incrementAndGet()
-                                    3 -> probeReplyCookie.incrementAndGet()
-                                    else -> probeReplyOther.incrementAndGet()
-                                }
-                            },
                         )
-                        val tcp = runCatching {
-                            tcpFuture.get(PROTON_PROBE_TCP_TIMEOUT_MS * 2L, TimeUnit.MILLISECONDS)
-                        }.getOrDefault(-1)
-                        // Рукопожатие сильнее TCP-отклика и потому идёт первым: оно
-                        // доказывает, что узел знает наш ключ, а TCP говорит только
-                        // «сервер жив и вот столько до него лететь». Но замер,
-                        // выданный за рукопожатие, когда его не было, — это враньё в
-                        // журнале, поэтому источник записывается рядом с числом.
-                        val result = when {
-                            rtt > 0 -> candidate.copy(
-                                pingMs = rtt,
-                                pingSource = ProtonLatency.SOURCE_HANDSHAKE,
-                            )
-                            tcp > 0 -> candidate.copy(
-                                pingMs = tcp,
-                                pingSource = ProtonLatency.SOURCE_TCP,
-                            )
-                            else -> candidate.copy(
-                                pingMs = -1,
-                                pingSource = ProtonLatency.SOURCE_NONE,
-                            )
+                        val result = if (tcp > 0) {
+                            candidate.copy(pingMs = tcp, pingSource = ProtonLatency.SOURCE_TCP)
+                        } else {
+                            candidate.copy(pingMs = -1, pingSource = ProtonLatency.SOURCE_NONE)
                         }
                         if (result.pingMs > 0) alive.incrementAndGet()
                         val finished = done.incrementAndGet()
@@ -25743,68 +26007,142 @@ class NovaVpnService : OperaNativeVpnService() {
                     }
                 }
                 futures.mapNotNull {
-                    runCatching { it.get(PROTON_PROBE_TIMEOUT_MS * 4L, TimeUnit.MILLISECONDS) }.getOrNull()
+                    runCatching {
+                        it.get(PROTON_PROBE_TCP_TIMEOUT_MS * 4L, TimeUnit.MILLISECONDS)
+                    }.getOrNull()
                 }
             } finally {
-                pool.shutdownNow()
                 tcpPool.shutdownNow()
             }
 
-            // Три яруса, а не два.
+            // Два яруса: ответившие по TCP — по задержке, молчащие — по нагрузке.
             //
-            // Раньше их было два: ответившие на рукопожатие — по задержке, все
-            // остальные — по нагрузке. Из России рукопожатие отвечает нулю узлов из
-            // пятидесяти (открытый P11), то есть ярус ровно один, и «отсортировать
-            // по возрастанию задержки» превращалось в «отсортировать по
-            // загруженности сервера»: первым в очереди оказывался не ближайший узел,
-            // а наименее занятый — на другом континенте.
-            //
-            // Теперь ниже рукопожатия лежит TCP-отклик ([ProtonLatency]). Он слабее —
-            // ничего не доказывает про ключ, — но это настоящая задержка до того же
-            // адреса, и порядок он задаёт правильный. Ярус нагрузки остаётся третьим,
-            // для узлов, не ответивших вообще ничем.
-            val answered = measured.filter { it.pingSource == ProtonLatency.SOURCE_HANDSHAKE }
+            // TCP-отклик слабее рукопожатия: он ничего не доказывает про ключ и, как
+            // показали на ПК, не предсказывает живость по UDP (50 из 50 ответили на
+            // 443, когда 36 из них молчали на любом UDP-порту). Но это настоящая
+            // задержка до того же адреса, а здесь решается именно **порядок**, и для
+            // порядка этого достаточно. Нагрузка — второй ключ, а не первый: разница
+            // задержек между континентами — сотни миллисекунд, разница нагрузок —
+            // проценты, и сортировка по нагрузке уводила очередь на другой континент.
+            val byLatencyThenLoad = compareBy<ProtonProfile>({ it.pingMs }, { it.load })
             val tcpOnly = measured.filter { it.pingSource == ProtonLatency.SOURCE_TCP }
             val silent = measured.filter { it.pingMs <= 0 }
-            // Нагрузка — второй ключ, а не первый.
-            //
-            // Владелец просит «в выбранной стране брать самый незагруженный узел», и
-            // при равной задержке это именно то, что здесь и получается. Первым
-            // ключом её ставить нельзя: разница задержек между континентами —
-            // сотни миллисекунд, разница нагрузок — проценты, и сортировка по
-            // нагрузке уводила очередь на другой континент (ровно это и лечили
-            // ярусом TCP-отклика выше).
-            val byLatencyThenLoad = compareBy<ProtonProfile>({ it.pingMs }, { it.load })
-            // Ближайшие узлы получают запасные порты: назначенный узлу порт может
-            // быть заглушён оператором, а замером это не видно (см.
-            // `ProtonProfileStore.expandPortFallbacks`).
-            val ranked = ProtonProfileStore.expandPortFallbacks(
-                answered.sortedWith(byLatencyThenLoad) +
-                    tcpOnly.sortedWith(byLatencyThenLoad) +
-                    silent.sortedBy { it.load },
+            // Ближайшие узлы получают запасные порты: узел отвечает на пару (местный
+            // порт, порт узла), так что другой порт узла — это другой поток и
+            // честная вторая попытка (см. `ProtonProfileStore.expandPortFallbacks`).
+            var ranked = ProtonProfileStore.expandPortFallbacks(
+                tcpOnly.sortedWith(byLatencyThenLoad) + silent.sortedBy { it.load },
                 ProtonProfileManager.TARGET_COUNT,
             )
+
+            // Одно рукопожатие — в голову очереди, то есть в тот узел, с которого
+            // подключение и начнётся.
+            //
+            // Зачем оно, раз порядок задаёт TCP: это единственная проверка, которая
+            // доказывает, что сервер знает наш ключ и туннель вообще поднимется. Без
+            // неё «выпустили 50 профилей» и «выпустили 50 бумажек» выглядят
+            // одинаково — именно так и прошли шестнадцать заходов по P5-P16.
+            //
+            // Голова берётся из `connectOrder`, а не из этого же списка: очередь
+            // подключения переставляет его по итогам прошлых попыток (подтверждённый
+            // адрес идёт первым, отказавший — в хвост), и первый по задержке узел
+            // сплошь и рядом не тот, который будут набирать. Мерить не тот узел —
+            // значит отвечать не на тот вопрос.
+            //
+            // Живой туннель Proton запрещает рукопожатие насухо: тем же ключом на
+            // другом узле оно отбирает сессию у текущего — замер убил бы человеку
+            // связь ради строчки в журнале. Молча пропускать тоже нельзя (I4).
+            val protonTunnelLive = isRunning && currentTransportLabel == TRANSPORT_AWG_PROTON
+            val connectRanks = runCatching {
+                ProtonProfileStore.connectOrder(
+                    ranked,
+                    store.readAttemptOutcomes(protonOutcomeNetworkClass()),
+                    System.currentTimeMillis(),
+                ).ranks
+            }.getOrNull()
+            val head = if (connectRanks.isNullOrEmpty()) {
+                ranked.firstOrNull()
+            } else {
+                ranked.minByOrNull {
+                    connectRanks[ProtonProfileStore.endpointKey(it.entryIp, it.port)] ?: Int.MAX_VALUE
+                }
+            }
+            var headRtt = -1
+            when {
+                head == null -> LogManager.log("Proton probe: рукопожатие некому слать — очередь пуста.")
+                protonTunnelLive -> LogManager.log(
+                    "Proton probe: рукопожатие пропущено — на этой же личности живёт туннель Proton, " +
+                        "а завершённое рукопожатие отобрало бы у него ключ."
+                )
+                else -> {
+                    headRtt = ProtonCrypto.probeHandshakeRttMs(
+                        privateKeyB64 = privateKey,
+                        peerPublicKeyB64 = head.peerPublicKey,
+                        host = head.entryIp,
+                        port = head.port,
+                        timeoutMs = PROTON_PROBE_TIMEOUT_MS,
+                        i1 = head.i1,
+                        junkCount = head.junkCount,
+                        junkMin = head.junkMin,
+                        junkMax = head.junkMax,
+                        protect = { socket ->
+                            val protectedOk = protect(socket)
+                            val bound = underlyingNetwork?.let { network ->
+                                runCatching { network.bindSocket(socket) }.isSuccess
+                            }
+                            // Молча проглоченный отказ здесь читался бы как «узел
+                            // мёртв» (I4): и защита, и привязка меняют маршрут пакета
+                            // целиком.
+                            LogManager.log(
+                                "Proton probe: protect=$protectedOk, bindSocket=$bound, " +
+                                    "сеть=${underlyingNetwork?.toString() ?: "нет"}."
+                            )
+                        },
+                        diagnosticLabel = "Proton probe [${head.entryIp}:${head.port}]",
+                    )
+                    if (headRtt > 0) {
+                        // Число заменяется вместе с источником: отдавать TCP-число за
+                        // рукопожатие значило бы врать в журнале и на экране. Порядок
+                        // списка при этом не трогаем — его задаёт задержка, а очередь
+                        // подключения всё равно строится отдельно.
+                        val headKey = ProtonProfileStore.endpointKey(head.entryIp, head.port)
+                        ranked = ranked.map { profile ->
+                            if (ProtonProfileStore.endpointKey(profile.entryIp, profile.port) == headKey) {
+                                profile.copy(
+                                    pingMs = headRtt,
+                                    pingSource = ProtonLatency.SOURCE_HANDSHAKE,
+                                )
+                            } else {
+                                profile
+                            }
+                        }
+                    }
+                    LogManager.log(
+                        if (headRtt > 0) {
+                            "Proton probe: голова очереди ${head.entryIp}:${head.port} ответила " +
+                                "подтверждённым рукопожатием за $headRtt мс — ключ зарегистрирован, " +
+                                "туннель поднимется."
+                        } else {
+                            "Proton probe: голова очереди ${head.entryIp}:${head.port} на рукопожатие " +
+                                "молчит. Порядок остаётся по TCP-отклику."
+                        }
+                    )
+                }
+            }
+
             store.writeProfiles(ranked)
             store.writeProbeState(
                 ProtonProfileStore.ProbeState(
                     ProtonProfileStore.STATE_DONE,
                     total,
                     total,
-                    answered.size + tcpOnly.size,
+                    tcpOnly.size,
                 )
             )
             LogManager.log(
-                "Proton probe: из $total рукопожатием ответили ${answered.size}, " +
-                    "TCP-откликом ${tcpOnly.size}, молчат ${silent.size}. " +
+                "Proton probe: из $total TCP-откликом ответили ${tcpOnly.size}, молчат ${silent.size}. " +
                     "Сохранено ${ranked.size}, лучший ${ranked.firstOrNull()?.pingMs ?: -1} мс " +
                     "(${ranked.firstOrNull()?.pingSource?.takeIf { it.isNotEmpty() } ?: "без замера"})."
-            )
-            // Счётчик без разбивки лжёт (G11): «ответили 0» — это и «узлы молчат», и
-            // «узлы отвечают, а мы ответ выбрасываем». Пакетов приходит больше, чем
-            // засчитано ответов, ровно во втором случае.
-            LogManager.log(
-                "Proton probe: принято пакетов — рукопожатий (тип 2): ${probeReplyType2.get()}, " +
-                    "cookie (тип 3): ${probeReplyCookie.get()}, прочих: ${probeReplyOther.get()}."
             )
 
             // Диагностика идёт **после** выдачи результата, а не до неё.
@@ -25817,13 +26155,16 @@ class NovaVpnService : OperaNativeVpnService() {
             // `writeProfiles`, так что `awaitProbe` держал прогон всё это время.
             // Порядок важен только этим: сами замеры не изменились.
             //
-            // Условие — молчание **рукопожатия**, а не отсутствие замера вообще.
-            // TCP-отклик теперь почти всегда есть, и по нему диагностика молчания
-            // рукопожатия не заводилась бы никогда — а именно она и остаётся
-            // единственным источником сведений по открытому P11.
-            if (answered.isEmpty()) {
+            // Заводится она только когда голова очереди на рукопожатие промолчала:
+            // ответ головы означает, что и пакет, и ключ, и путь исправны, и
+            // сравнивать больше не с чем. Пропуск из-за живого туннеля Proton — тоже
+            // не повод: туннельный замер идёт **тем же ключом**, то есть отобрал бы у
+            // этого туннеля сессию ровно так же.
+            if (headRtt <= 0 && !protonTunnelLive) {
                 runControlHandshakeProbe(underlyingNetwork)
-                runTunnelledProtonProbe(candidates.first(), privateKey)
+                // Тот же узел, что молчал снаружи: вопрос «узел мёртв или до него не
+                // пускают» имеет смысл только про него.
+                runTunnelledProtonProbe(head ?: candidates.first(), privateKey)
             }
           } finally {
             // `startSafeServiceThread` проглатывает любое исключение, поэтому без
@@ -26100,6 +26441,11 @@ class NovaVpnService : OperaNativeVpnService() {
      * Разделяет два исхода, которые снаружи выглядят одинаково: узел мёртв или до
      * него не пускает сеть оператора. Ответ отсюда означает, что узел живой и
      * ключ зарегистрирован, а молчание защищённой пробы — заслуга блокировки.
+     *
+     * Звать можно **только при не-Proton туннеле**: рукопожатие идёт тем же ключом,
+     * и доведённое до конца оно отобрало бы сессию у живого туннеля Proton. Условие
+     * стоит на стороне вызова — здесь его не продублировать, не заведя второй
+     * источник истины о том, что сейчас поднято.
      */
     private fun runTunnelledProtonProbe(candidate: ProtonProfile, privateKey: String) {
         val rtt = ProtonCrypto.probeHandshakeRttMs(

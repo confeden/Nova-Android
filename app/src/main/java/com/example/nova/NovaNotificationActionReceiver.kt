@@ -26,6 +26,7 @@ import android.content.Intent
 class NovaNotificationActionReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
+        LogManager.setAppContext(context)
         when (intent.action) {
             ACTION_DISCONNECT -> NovaTunnelControl.stop(context, "Уведомление")
             // Молчать нельзя даже здесь (I4): нераспознанное действие означает, что

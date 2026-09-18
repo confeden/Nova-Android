@@ -35,8 +35,9 @@ import kotlin.concurrent.thread
  * Поэтому имя резолвит и TLS устанавливает сама Android — у неё и резолвер
  * настроен, и хранилище корневых сертификатов на месте, — а `opera-proxy`
  * получает адрес вида `http://логин:пароль@127.0.0.1:порт`, где имени резолвить
- * уже нечего. Мост только перекладывает байты: разбирать HTTP ему не нужно,
- * `CONNECT` и учётные данные проходят насквозь.
+ * уже нечего. Мост перекладывает байты: `CONNECT` и учётные данные проходят
+ * насквозь. Единственное, что он читает, — заголовок ответа релея на `CONNECT`:
+ * по нему [NovaRelay] узнаёт, что ключ этой сборки погашен (P53).
  *
  * Слушаем строго на петле и держим мост не дольше самого процесса `opera-proxy`
  * (останавливается в [OperaProxyManager.stopManaged]): открытый прокси к своему
@@ -150,7 +151,13 @@ object OperaApiRelayBridge {
             upstream = openUpstream(target)
             val remote = upstream
             pipe(client.getInputStream(), remote.getOutputStream(), client, remote)
-            pipe(remote.getInputStream(), client.getOutputStream(), remote, client)
+            // `opera-proxy` об отказе узнаёт сам, а приложению нужен вердикт: без него
+            // Opera шла бы в погашенный ключ на каждом запуске и каждом discovery.
+            pipe(remote.getInputStream(), client.getOutputStream(), remote, client) { head ->
+                runCatching { NovaRelay.noteFromConnectHead(head, "Opera") }.onFailure { e ->
+                    logger("Мост до релея API: ответ релея не разобран (${e::class.java.simpleName}: ${e.message}).")
+                }
+            }
         } catch (e: Exception) {
             logger("Мост до релея API: соединение не установлено (${e::class.java.simpleName}: ${e.message}).")
             runCatching { client.close() }
@@ -189,13 +196,37 @@ object OperaApiRelayBridge {
         return socket
     }
 
-    private fun pipe(input: InputStream, output: OutputStream, source: Socket, sink: Socket) {
+    /**
+     * Перекладывает поток из [input] в [output].
+     *
+     * [onResponseHead] получает начало потока, как только в нём дочитан заголовок
+     * HTTP-ответа (или набрано [RelayConnectHead.LIMIT_BYTES]), — один раз на
+     * соединение и **до** того, как эти байты уйдут дальше. Порядок важен: отказ
+     * получает `opera-proxy`, а следующий план запуска спрашивает паузу у
+     * [NovaRelay], и вердикт должен лечь раньше, чем кто-то узнает об отказе.
+     */
+    private fun pipe(
+        input: InputStream,
+        output: OutputStream,
+        source: Socket,
+        sink: Socket,
+        onResponseHead: ((ByteArray) -> Unit)? = null,
+    ) {
         thread(start = true, isDaemon = true, name = "nova-opera-relay-pipe") {
             val buffer = ByteArray(16 * 1024)
+            var head = if (onResponseHead != null) java.io.ByteArrayOutputStream() else null
             try {
                 while (true) {
                     val read = input.read(buffer)
                     if (read < 0) break
+                    head?.let { collected ->
+                        collected.write(buffer, 0, minOf(read, RelayConnectHead.LIMIT_BYTES - collected.size()))
+                        val bytes = collected.toByteArray()
+                        if (RelayConnectHead.parse(bytes) != null || bytes.size >= RelayConnectHead.LIMIT_BYTES) {
+                            head = null
+                            onResponseHead?.invoke(bytes)
+                        }
+                    }
                     output.write(buffer, 0, read)
                     output.flush()
                 }

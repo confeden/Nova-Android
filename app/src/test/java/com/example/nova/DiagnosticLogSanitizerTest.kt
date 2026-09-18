@@ -146,4 +146,50 @@ class DiagnosticLogSanitizerTest {
         val line = "Ports 80 443 853 1080 open"
         assertEquals(line, DiagnosticLogSanitizer.sanitize(line))
     }
+
+    // Строка попытки WARP из NovaVpnService: до правки узел в ней стирался целиком —
+    // на Pixel 4a 2026-09-16 она приезжала как «Пробуем endpoint: <endpoint>».
+    @Test
+    fun `узел после endpoint с двоеточием маскируется, а не стирается`() {
+        val sanitized = DiagnosticLogSanitizer.sanitize(
+            "Пробуем endpoint: 162.159.192.5:968, источник: warp-generated, режим: warp-awg-exact"
+        )
+        assertEquals(
+            "Пробуем endpoint: 162.159.192.***:968, источник: warp-generated, режим: warp-awg-exact",
+            sanitized,
+        )
+    }
+
+    @Test
+    fun `endpoint в выгрузке конфига маскируется так же`() {
+        assertEquals("Endpoint = 188.114.97.***:2408", DiagnosticLogSanitizer.sanitize("Endpoint = 188.114.97.3:2408"))
+    }
+
+    @Test
+    fun `IPv6 после endpoint теряет хвост, но не пропадает`() {
+        val sanitized = DiagnosticLogSanitizer.sanitize("endpoint=[2606:4700:d0::a29f:c001]:2408 ok")
+        assertTrue(sanitized, sanitized.contains("2606:4700:d0::***"))
+        assertTrue(sanitized, sanitized.contains(":2408"))
+        assertFalse(sanitized, sanitized.contains("c001"))
+    }
+
+    @Test
+    fun `ссылка после endpoint теряет имя и путь`() {
+        val sanitized = DiagnosticLogSanitizer.sanitize("endpoint: https://nova.ivan.workers.dev/k3y ok")
+        assertEquals("endpoint: https://<host> ok", sanitized)
+    }
+
+    @Test
+    fun `имя без точки после endpoint тоже скрывается, слово-заглушка нет`() {
+        assertEquals("Endpoint = <host>:51820", DiagnosticLogSanitizer.sanitize("Endpoint = myhome:51820"))
+        assertEquals("endpoint=auto, режим", DiagnosticLogSanitizer.sanitize("endpoint=auto, режим"))
+    }
+
+    @Test
+    fun `имя своего сервера после endpoint скрывается, порт остаётся`() {
+        assertEquals(
+            "endpoint: <host>:51820, режим: awg",
+            DiagnosticLogSanitizer.sanitize("endpoint: vpn.my-home-server.example:51820, режим: awg"),
+        )
+    }
 }

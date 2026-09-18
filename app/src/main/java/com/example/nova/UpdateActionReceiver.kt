@@ -7,6 +7,7 @@ import android.content.Intent
 
 class UpdateActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        LogManager.setAppContext(context)
         if (intent.action == DownloadManager.ACTION_DOWNLOAD_COMPLETE) {
             val downloadId = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
             AppUpdateManager.handleDownloadComplete(context.applicationContext, downloadId)

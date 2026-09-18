@@ -158,7 +158,9 @@ object GatewayPortal {
                 output,
                 200,
                 "text/html; charset=utf-8",
-                buildPage(context, localHost, endpoint),
+                // Страницу открывают на другом устройстве, но это интерфейс Nova — на
+                // выбранном в приложении языке.
+                NovaLanguage.tr(context, buildPage(context, localHost, endpoint)),
                 headOnly,
             )
         }

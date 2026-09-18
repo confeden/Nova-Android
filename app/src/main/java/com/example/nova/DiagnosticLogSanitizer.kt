@@ -122,13 +122,26 @@ object DiagnosticLogSanitizer {
         var value = withoutUrlCredentials
 
         value = keyLineRegex.replace(value) { match ->
-            "${match.groupValues[1]}<hidden>"
+            val prefix = match.groupValues[1]
+            if (prefix.trim().startsWith("Endpoint", ignoreCase = true)) {
+                // Правило строки берёт всё до конца строки; адрес — только первое слово.
+                val rest = match.groupValues[2]
+                val token = rest.takeWhile { it !in ",; \t" }
+                "$prefix${maskEndpointValue(token)}${rest.substring(token.length)}"
+            } else {
+                "$prefix<hidden>"
+            }
         }
 
         value = keyValueRegex.replace(value) { match ->
             val key = match.groupValues[1].lowercase(Locale.US)
             val separator = match.groupValues[2]
-            "${match.groupValues[1]}$separator${replacementForKey(key)}"
+            val replacement = if (key == "endpoint" || key == "peerendpoint") {
+                maskEndpointValue(match.groupValues[3])
+            } else {
+                replacementForKey(key)
+            }
+            "${match.groupValues[1]}$separator$replacement"
         }
 
         value = ssidQuotedRegex.replace(value) { match ->
@@ -265,13 +278,49 @@ object DiagnosticLogSanitizer {
         return value.contains("::") || groups.size == 8
     }
 
+    /**
+     * Узел после `endpoint:` — адресом, а не `<endpoint>`.
+     *
+     * Прежнее правило стирало значение целиком, и главная строка попытки WARP
+     * приезжала как «Пробуем endpoint: <endpoint>, источник: warp-generated» — то
+     * есть без того единственного, ради чего её читают. Адрес здесь проходит ту же
+     * маску, что и везде (сеть и порт видны, хост нет — это делает правило адресов
+     * ниже). Имя хоста скрывается, порт остаётся: имя своего сервера в
+     * импортированном профиле указывает на человека, а номер порта — нет.
+     */
+    private fun maskEndpointValue(value: String): String {
+        val lower = value.lowercase(Locale.US)
+        if (lower in endpointPlaceholders) return value
+        if (looksLikeIpv6(lower)) return value
+        // `https://host:443/путь`: хост — после схемы, путь отбрасывается целиком
+        // (в пути у воркеров бывает ключ).
+        val scheme = if (value.contains("://")) value.substringBefore("://") + "://" else ""
+        val authority = value.removePrefix(scheme).substringBefore('/')
+        val bracketed = authority.startsWith("[")
+        val singleColon = !bracketed && authority.count { it == ':' } == 1
+        val host = when {
+            bracketed -> authority.substringAfter('[').substringBefore(']')
+            singleColon -> authority.substringBefore(':')
+            else -> authority
+        }
+        if (ipv4Regex.matches(host) || looksLikeIpv6(host.lowercase(Locale.US))) return value
+        val port = when {
+            bracketed -> authority.substringAfter(']', "")
+            singleColon -> ":" + authority.substringAfter(':')
+            else -> ""
+        }
+        return "$scheme<host>$port"
+    }
+
+    /** Не адрес и не имя — прятать нечего. Всё остальное, что не IP, считается именем. */
+    private val endpointPlaceholders = setOf("auto", "none", "<none>", "нет", "-", "null", "unknown")
+
     private fun replacementForKey(key: String): String {
         return when (key) {
             "ssid" -> "<ssid>"
             "bssid" -> "<bssid>"
             "mac" -> "<mac>"
             "package", "pkg" -> "<package>"
-            "peerendpoint", "endpoint" -> "<endpoint>"
             "email" -> "<email>"
             "phone" -> "<phone>"
             else -> "<hidden>"

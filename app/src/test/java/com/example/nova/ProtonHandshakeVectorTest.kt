@@ -1,19 +1,26 @@
 package com.example.nova
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * Сверяет наше рукопожатие WireGuard с эталоном.
  *
- * Вектор снят с `wireguard-go` (`device/noise-protocol.go` + `device/cookie.go`)
- * на фиксированных ключах, эфемерном ключе, номере отправителя и метке времени, и
- * проверен независимой реализацией на Python — обе дали ровно эти байты.
+ * Векторы сняты с реализации на Python (`Nova PC resources/nova_wg_probe.py`,
+ * пинится своими тестами) и сходятся с `wireguard-go`
+ * (`tools/amneziawg-go/device/noise-protocol.go`) на фиксированных ключах,
+ * эфемерном ключе, номере отправителя и метке времени.
  *
  * Тест нужен потому, что WireGuard на неверный пакет **молчит**, ровно как на
- * недоступный узел. Без эталона «ответили 0 из 63» одинаково хорошо объяснялось и
- * блокировкой сети, и ошибкой в собственной криптографии, и на разделение этих
- * версий ушёл целый заход по устройству.
+ * недоступный узел. И ровно этим тестом ошибку и закрепили: до 2026-09-16 он пинил
+ * байты, снятые с нашей же опечатки в имени протокола
+ * (`ChaCha20Poly1305` вместо `ChaChaPoly`), то есть подтверждал сам себя. Шестнадцать
+ * заходов расследования объясняли «ответили 0 из 50» сетью, блокировкой и занятой
+ * личностью, пока то же рукопожатие на ПК не ответило с правильным именем (G218).
+ *
+ * Отсюда правило: эталон обязан приходить **извне** нашей реализации.
  */
 class ProtonHandshakeVectorTest {
 
@@ -32,9 +39,9 @@ class ProtonHandshakeVectorTest {
 
         val expected =
             "01000000deadbeeffbf34a420f8196539fac3050351a0edd1db01863a2cf37f8c3a7cb583f32cd3f" +
-                "b519a958870ca682ae3a896f3048649976246d7f46b656b0a3aefd1d3822e0e6f49737a329f16522" +
-                "49abe7d51853da3d55221c9b8c64bb4586625a1146cd951721489c43a6a96171b95a285301d6525a" +
-                "9f5c7f44cc942b34e06b636400000000000000000000000000000000"
+                "1394507878a58581eac3f7621de3fb41689c90b8856f4072d2f4c7d87e76ff916d8677e418275b11" +
+                "daa4140ead7871d7e4b1759bffa5a492e5eb9199eaa0c61c6d693bb65cee229e7389e03c34fbead9" +
+                "fc62ce5c1a1acb56b9f469b500000000000000000000000000000000"
 
         val actual = ProtonCrypto.buildInitiation(
             staticPriv = staticPriv,
@@ -42,10 +49,67 @@ class ProtonHandshakeVectorTest {
             ephPriv = ephPriv,
             senderIndex = sender,
             timestamp = timestamp,
-        )
+        ).packet
 
         assertEquals(148, actual.size)
         assertEquals(expected, actual.joinToString("") { "%02x".format(it) })
+    }
+
+    /**
+     * Ответ засчитывается, только если на нём сходится пустой AEAD.
+     *
+     * Вектор снят с той же реализации на Python: её `respond()` — это
+     * `ConsumeMessageInitiation` + `CreateMessageResponse` из `wireguard-go`, с
+     * фиксированным приватным ключом сервера, его эфемерным ключом и номером
+     * отправителя, так что ответ воспроизводим до байта.
+     *
+     * Проверять обязательно: до этого проба засчитывала любой пакет с двойкой в
+     * первом байте. Такой счётчик не отличает «сервер поднял бы сессию» от «что-то
+     * прилетело» — а весь смысл рукопожатия именно в первом.
+     */
+    @Test
+    fun `only an authenticated response counts`() {
+        val staticPriv = hex("a01010101010101010101010101010101010101010101010101010101010101f")
+        // Публичный ключ тестового сервера: его приватный — b0202020…2f.
+        val peerPub = hex("1ec093b3c47bc90a4c15bf492f1ad64bca9b974742c9d962cbcb7ce1a09b7a0b")
+        val ephPriv = hex("5011010101010101010101010101010101010101010101010101010101010177")
+        val sender = hex("deadbeef")
+        val timestamp = hex("400000000068aabb00000001")
+
+        val initiation = ProtonCrypto.buildInitiation(
+            staticPriv = staticPriv,
+            peerPub = peerPub,
+            ephPriv = ephPriv,
+            senderIndex = sender,
+            timestamp = timestamp,
+        )
+        assertEquals(
+            "01000000deadbeeffbf34a420f8196539fac3050351a0edd1db01863a2cf37f8c3a7cb583f32cd3f" +
+                "c964acb7a8e239b0dba1ae57a92c3a9004a0b85865b25e28d1ebc90fc3cefabff005bffbb0db1f0d" +
+                "804912f9eb18c0cb9c40d5feb33c52f9f6549d72ef161c13c8d499cd96f42e9e5cc626a2b196654f" +
+                "2a3b11415040ddd14ac3031400000000000000000000000000000000",
+            initiation.packet.joinToString("") { "%02x".format(it) },
+        )
+
+        val response = hex(
+            "0200000004030201deadbeef4c7a6ebbfa0750c9a21818f80c2a4da863b18c26b9020ed19b511b84" +
+                "4475c90b415845e775eafd523c7e59c1f92ac64dca6b4816383355efab8b0fccf47e7a1c00000000" +
+                "000000000000000000000000"
+        )
+        assertEquals(92, response.size)
+        assertTrue(ProtonCrypto.verifyResponse(initiation, response, response.size))
+
+        // Подделанная метка AEAD — тот же пакет, тот же тип, тот же индекс.
+        val tampered = response.copyOf().also { it[44] = (it[44].toInt() xor 1).toByte() }
+        assertFalse(ProtonCrypto.verifyResponse(initiation, tampered, tampered.size))
+
+        // Ответ на чужую инициацию: индекс получателя не наш.
+        val foreign = response.copyOf().also { it[8] = (it[8].toInt() xor 1).toByte() }
+        assertFalse(ProtonCrypto.verifyResponse(initiation, foreign, foreign.size))
+
+        // Обрезанный пакет: длина берётся из датаграммы, а не из размера буфера —
+        // буфер у пробы всегда больше пришедшего.
+        assertFalse(ProtonCrypto.verifyResponse(initiation, response, response.size - 1))
     }
 
     /**

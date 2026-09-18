@@ -13,7 +13,7 @@ class StrokeTextView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
     defStyleAttr: Int = 0
-) : AppCompatTextView(context, attrs, defStyleAttr) {
+) : AppCompatTextView(context, attrs, defStyleAttr), NovaLanguage.LocalizedText {
 
     private var strokeColor: Int = Color.TRANSPARENT
     private var strokeWidthPx: Float = 0f
@@ -265,4 +265,9 @@ class StrokeTextView @JvmOverloads constructor(
     }
 
     private fun dp(value: Float): Float = value * resources.displayMetrics.density
+
+    // Текст переводится в момент показа: код ставит русский исходник (см. NovaLanguage).
+    override fun setText(text: CharSequence?, type: BufferType?) = NovaLanguage.onSetText(this, text, type)
+
+    override fun setTextDirect(text: CharSequence?, type: BufferType?) = super.setText(text, type)
 }

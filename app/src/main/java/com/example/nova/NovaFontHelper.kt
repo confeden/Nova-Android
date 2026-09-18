@@ -17,6 +17,7 @@ object NovaFontHelper {
 
     private val mediumIds = setOf(
         R.id.btn_settings,
+        R.id.btn_language,
         R.id.tv_country_badge,
         R.id.tvAttemptProgress,
         R.id.tv_version,

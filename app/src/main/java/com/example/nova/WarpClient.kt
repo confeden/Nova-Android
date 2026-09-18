@@ -1055,7 +1055,7 @@ class WarpClient(
             logger("Релей API не настроен — регистрация Cloudflare через него пропущена.")
             return null
         }
-        if (NovaRelay.isOutdated()) {
+        if (NovaRelay.isPaused()) {
             logger("Релей API: ${NovaRelay.OUTDATED_MESSAGE}.")
             return null
         }
@@ -1092,7 +1092,7 @@ class WarpClient(
                         sourceLabel = "nova-relay-${NovaRelay.describe(index)}",
                     )
                 } catch (e: Exception) {
-                    if (NovaRelay.isOutdated()) {
+                    if (NovaRelay.isPaused()) {
                         logger("Релей API: ${NovaRelay.OUTDATED_MESSAGE}.")
                         return null
                     }

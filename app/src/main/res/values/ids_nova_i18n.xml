@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Ключи тегов перевода интерфейса (NovaLanguage). В тегах вида лежит русский
+    исходник показанного текста и последний вывод перевода: по ним смена языка
+    переводит экран заново, ничего не пересоздавая.
+-->
+<resources>
+    <item name="nova_i18n_text_source" type="id" />
+    <item name="nova_i18n_text_output" type="id" />
+    <item name="nova_i18n_hint_source" type="id" />
+    <item name="nova_i18n_hint_output" type="id" />
+    <item name="nova_i18n_cd_source" type="id" />
+    <item name="nova_i18n_cd_output" type="id" />
+    <item name="nova_i18n_verbatim" type="id" />
+    <item name="nova_i18n_window_watch" type="id" />
+</resources>

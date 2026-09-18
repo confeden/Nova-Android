@@ -1242,7 +1242,7 @@ object TorBridgeManager {
             LogManager.log("Tor: релей не настроен — путь к Moat через него пропущен.")
             return null
         }
-        if (NovaRelay.isOutdated()) {
+        if (NovaRelay.isPaused()) {
             LogManager.log("Tor: ${NovaRelay.OUTDATED_MESSAGE}.")
             return null
         }
@@ -1275,6 +1275,12 @@ object TorBridgeManager {
                 if (parsed != null && parsed.isNotEmpty()) {
                     NovaRelay.clearOutdated()
                     return parsed
+                }
+                // Отказ «ключ погашен» относится к ключу, а не к порту: второй порт
+                // ответил бы тем же `407`.
+                if (NovaRelay.isPaused()) {
+                    LogManager.log("Tor: ${NovaRelay.OUTDATED_MESSAGE}.")
+                    return null
                 }
             }
         } finally {

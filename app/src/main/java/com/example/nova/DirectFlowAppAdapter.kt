@@ -44,6 +44,10 @@ class DirectFlowAppAdapter(private val onToggle: (String, Boolean) -> Unit) :
     class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
         val icon: ImageView = view.findViewById(R.id.iv_icon)
         val name: TextView = view.findViewById(R.id.tv_name)
+        init {
+            // Имя приложения из системы — показывается как есть, без перевода.
+            NovaLanguage.verbatim(name)
+        }
         val direct: TextView = view.findViewById(R.id.tv_app_direct)
         val check: CheckBox = view.findViewById(R.id.cb_select)
     }

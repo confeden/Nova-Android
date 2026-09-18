@@ -23,9 +23,10 @@ import android.widget.TextView
  * фокуса пульта (`tv_focus_*`) не разъехались между семью копиями — они молча
  * ломаются и обнаруживаются только на телевизоре.
  *
- * Где хранится выбор. В `SharedPreferences` этого процесса, а не в файле:
- * тему читает только интерфейс, служба `:vpn` о ней не знает и знать не должна,
- * поэтому правило I2 (состояние UI↔`:vpn` живёт в файлах) сюда не относится.
+ * Где хранится выбор. В `SharedPreferences` этого процесса: экраны читают тему
+ * только здесь. Службе `:vpn` из всей темы нужен один акцент — им красится
+ * заливка уведомления, — и его она берёт из файла-зеркала, который ведёт
+ * [NovaNotificationPalette] (I2).
  */
 object NovaTheme {
 
@@ -147,11 +148,11 @@ object NovaTheme {
     }
 
     fun store(context: Context, key: String) {
-        context.applicationContext
-            .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .putString(KEY, optionFor(key).key)
-            .apply()
+        val chosen = optionFor(key).key
+        val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val previous = prefs.getString(KEY, DEFAULT_KEY)
+        prefs.edit().putString(KEY, chosen).apply()
+        if (previous != chosen) NovaNotificationPalette.onThemeStored(context, chosen)
     }
 
     /**
@@ -160,6 +161,10 @@ object NovaTheme {
      * следующего запуска активности.
      */
     fun apply(activity: Activity) {
+        // Язык подключается здесь же: это первая строка каждого экрана, до
+        // `super.onCreate`, и тема и язык вместе решают, как экран выглядит.
+        NovaLanguage.install(activity)
+        NovaNotificationPalette.syncMirrorOnce(activity)
         activity.setTheme(optionFor(current(activity)).styleRes)
         applySurfaceOverlay(activity)
         applyEdgeToEdge(activity)

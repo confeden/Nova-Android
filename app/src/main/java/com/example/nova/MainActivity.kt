@@ -180,6 +180,12 @@ class MainActivity : AppCompatActivity() {
         /** Запас вокруг группы под неоновый ореол выбранной кнопки. */
         private const val SELECTION_GLOW_PAD_DP = 6f
 
+        /**
+         * Сильнее раскрытый адрес не сжимается: дальше буквы сливаются. Полный IPv6 в
+         * 39 знаков на экране 360dp укладывается примерно в 0,7.
+         */
+        private const val MIN_IP_TEXT_SCALE_X = 0.55f
+
         private const val STATE_PENDING_STATUS_TEXT = "pending_status_text"
         private const val STATE_START_FLOW_ACTIVE = "start_flow_active"
         private const val START_FLOW_TRANSIENT_PENDING_MS = 60_000L
@@ -644,6 +650,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Язык интерфейса — до `super.onCreate`: главный экран не зовёт
+        // `NovaTheme.apply` (его тема — из манифеста), а подключение обязано успеть
+        // до события «экран создан», иначе смена языка этот экран не увидит.
+        NovaLanguage.install(this)
         super.onCreate(savedInstanceState)
         // Диагностическая сборка уводит на экран самодиагностики: на устройстве,
         // где главный экран не открывается, дальше идти незачем. В обычных
@@ -931,7 +941,7 @@ class MainActivity : AppCompatActivity() {
                         }
                     )
                 } else {
-                    Toast.makeText(this, "Нет следующей WARP-конфигурации", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, NovaLanguage.tr(this, "Нет следующей WARP-конфигурации"), Toast.LENGTH_SHORT).show()
                 }
             } else {
                 Toast.makeText(
@@ -1055,7 +1065,7 @@ class MainActivity : AppCompatActivity() {
                 UpdateDownloadProgress.State.DOWNLOADING,
                 UpdateDownloadProgress.State.PAUSED -> {
                     if (AppUpdateManager.cancelUserDownload(this)) {
-                        Toast.makeText(this, "Загрузка обновления остановлена", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this, NovaLanguage.tr(this, "Загрузка обновления остановлена"), Toast.LENGTH_SHORT).show()
                     }
                 }
                 UpdateDownloadProgress.State.READY -> {
@@ -1077,9 +1087,9 @@ class MainActivity : AppCompatActivity() {
                 UpdateDownloadProgress.State.FAILED -> {
                     // Загрузку начинает это нажатие — и только оно.
                     if (AppUpdateManager.startUserRequestedDownload(this)) {
-                        Toast.makeText(this, "Скачиваем обновление", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this, NovaLanguage.tr(this, "Скачиваем обновление"), Toast.LENGTH_SHORT).show()
                     } else {
-                        Toast.makeText(this, "Не удалось начать загрузку обновления", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this, NovaLanguage.tr(this, "Не удалось начать загрузку обновления"), Toast.LENGTH_SHORT).show()
                     }
                 }
             }
@@ -1104,12 +1114,17 @@ class MainActivity : AppCompatActivity() {
         btnSettings.setOnClickListener {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
+        val btnLanguage = findViewById<TextView>(R.id.btn_language)
+        renderLanguageBadge()
+        btnLanguage.setOnClickListener { showLanguagePicker() }
+        NovaLanguage.addListener(languageListener)
         bindMainRegionSelector()
         TvFocusHelper.install(
             this,
             btnConnect,
             btnInstallUpdate,
             btnSettings,
+            btnLanguage,
         )
         // Кнопки селектора тоже обязаны попасть в обход фокуса: на телевизоре без
         // пульта до них иначе не добраться вовсе.
@@ -1365,6 +1380,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        NovaLanguage.removeListener(languageListener)
         releaseVpnNetwork()
         cancelDoomedProcessRestart("экран закрыт")
         statusHandler.removeCallbacks(deferredNotificationPermissionRunnable)
@@ -2027,6 +2043,53 @@ class MainActivity : AppCompatActivity() {
      * настроек Android; если производитель его прячет, открывается общий раздел
      * сети — молча не открыть ничего было бы хуже (I4).
      */
+    /**
+     * Смена языка уже перевела все виды экрана (у каждого в теге русский исходник).
+     * Здесь — только то, чего вид сам не знает: подпись кнопки языка.
+     */
+    private val languageListener = NovaLanguage.Listener { renderLanguageBadge() }
+
+    /** «🌍 RU» / «🌍 EN»: планета и код выбранного языка. */
+    private fun renderLanguageBadge() {
+        val badge = findViewById<TextView>(R.id.btn_language) ?: return
+        val language = NovaLanguage.current(this)
+        badge.text = "🌍 ${language.badge}"
+        badge.contentDescription = "Язык интерфейса: ${language.nativeName}"
+    }
+
+    /**
+     * Выбор языка — в диалоге, списком: языков станет больше, и строка кнопок
+     * перестала бы помещаться. Выбор применяется сразу, диалог закрывается сам.
+     *
+     * Названия языков — на самих этих языках и помечены как неизменяемые: человек,
+     * по ошибке включивший чужой язык, узнаёт свой в списке, даже не читая
+     * заголовка.
+     */
+    private fun showLanguagePicker() {
+        val languages = NovaLanguage.Language.values()
+        val current = NovaLanguage.current(this)
+        // Тема настроек, как у остальных диалогов главного экрана (см.
+        // showPrivateDnsExplanation): своих `nova*` у главного экрана нет.
+        val themed = android.view.ContextThemeWrapper(
+            this,
+            NovaTheme.optionFor(NovaTheme.current(this)).styleRes,
+        )
+        val dialog = android.app.AlertDialog.Builder(themed)
+            .setTitle("Язык интерфейса")
+            .setSingleChoiceItems(
+                languages.map { it.nativeName }.toTypedArray(),
+                languages.indexOf(current),
+            ) { picked, which ->
+                picked.dismiss()
+                languages.getOrNull(which)?.let { NovaLanguage.select(this, it) }
+            }
+            .setNegativeButton("Отмена", null)
+            .create()
+        NovaLanguage.verbatim(dialog.listView)
+        dialog.setOnShowListener { NovaDialogs.style(dialog) }
+        dialog.show()
+    }
+
     private fun showPrivateDnsExplanation() {
         val host = TorTransport.strictPrivateDnsHost(this)
         val message = "В настройках телефона включён «Частный DNS» в строгом режиме" +
@@ -2432,7 +2495,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 runOnUiThread {
                     if (isFinishing || isDestroyed) return@runOnUiThread
-                    Toast.makeText(this, outcome.message, Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, NovaLanguage.tr(this, outcome.message), Toast.LENGTH_LONG).show()
                     refreshProtonAvailableCountries()
                     if (reconnecting) {
                         updateUiByState(NovaVpnService.STATE_CONNECTING)
@@ -2464,11 +2527,11 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 })
-                Toast.makeText(this, "Выпуск профилей Proton уже идёт", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, NovaLanguage.tr(this, "Выпуск профилей Proton уже идёт"), Toast.LENGTH_SHORT).show()
                 refreshMainRegionSelector()
                 return
             }
-            Toast.makeText(this, "Готовим профили Proton...", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Готовим профили Proton..."), Toast.LENGTH_SHORT).show()
             refreshMainRegionSelector()
             return
         }
@@ -2485,7 +2548,7 @@ class MainActivity : AppCompatActivity() {
             .getOrNull(ConnectionSelectorPolicy.indexOf(value))
             .orEmpty()
         if (!hasLiveSessionToReapply()) {
-            Toast.makeText(this, "Выбрано: $label", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Выбрано: $label"), Toast.LENGTH_SHORT).show()
             refreshMainRegionSelector()
             return
         }
@@ -2497,7 +2560,7 @@ class MainActivity : AppCompatActivity() {
         // принимает [SessionReapply]: он один знает про exit(-1) в tun2proxy (G3).
         val started = SessionReapply.applyToLiveSession(this, clientData)
         if (started) {
-            Toast.makeText(this, "Переключаем VPN на $label...", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Переключаем VPN на $label..."), Toast.LENGTH_SHORT).show()
             updateUiByState(NovaVpnService.STATE_CONNECTING)
         } else {
             // Отказ запуска молчать не должен (I4): предпочтение уже записано, и
@@ -3245,7 +3308,7 @@ class MainActivity : AppCompatActivity() {
         // Кнопка скрыта, когда переключать нечего: туннель не поднят или профиль
         // один. Нажимать её в этом случае незачем — подсказка честнее молчания.
         if (btnNextProfile.visibility != View.VISIBLE) {
-            Toast.makeText(this, "Переключать профиль сейчас не на что", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Переключать профиль сейчас не на что"), Toast.LENGTH_SHORT).show()
             return
         }
         btnNextProfile.performClick()
@@ -3432,7 +3495,7 @@ class MainActivity : AppCompatActivity() {
             else -> step
         }
         LogManager.log("UI next-profile: ручной шаг цепочки — $caption.")
-        Toast.makeText(this, "Пробуем $caption", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, NovaLanguage.tr(this, "Пробуем $caption"), Toast.LENGTH_SHORT).show()
         currentAttemptOrdinal = 0
         currentAttemptTotal = 0
         displayedAttemptOrdinal = 0
@@ -3452,11 +3515,11 @@ class MainActivity : AppCompatActivity() {
     private fun switchToNextVlessProfile() {
         val profileCount = clientData.getVlessProfileLinks().size
         if (profileCount == 0) {
-            Toast.makeText(this, "Нет профилей VLESS", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Нет профилей VLESS"), Toast.LENGTH_SHORT).show()
             return
         }
         if (profileCount == 1) {
-            Toast.makeText(this, "Профиль VLESS всего один", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Профиль VLESS всего один"), Toast.LENGTH_SHORT).show()
             return
         }
         LogManager.log("UI VLESS next-profile: просим службу взять следующий профиль из $profileCount.")
@@ -3971,6 +4034,63 @@ class MainActivity : AppCompatActivity() {
             ipResetHandler.removeCallbacks(ipResetRunnable)
             if (isIpVisible) ipResetHandler.postDelayed(ipResetRunnable, 5000)
         }
+        // Место под адресом задаёт левый край подписи пинга, а он сдвигается, когда
+        // «84 ms» становится «270 ms». Пересчёт — по сдвигу, а не по тику: сжатие само
+        // меняет ширину строки, и слушатель вызовется ещё раз, уже впустую.
+        val refit = View.OnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
+            if (left != oldLeft || right != oldRight) fitIpAddressToPing()
+        }
+        findViewById<View>(R.id.tv_internet_label)?.addOnLayoutChangeListener(refit)
+        findViewById<View>(R.id.ll_ip_row)?.addOnLayoutChangeListener(refit)
+    }
+
+    /**
+     * Строка IPv6 не должна наезжать на значение пинга справа.
+     *
+     * Ширину строки уже ограничивает разметка: `ll_ip_row` кончается у левого края
+     * подписи «Ping». Здесь решается, что делать, когда адрес туда не помещается:
+     *
+     *  * адрес скрыт звёздочками (обычный вид) — обрезаем многоточием, это просто
+     *    подпись, и цифры пинга важнее её хвоста;
+     *  * адрес раскрыт нажатием — его и открывали, чтобы прочитать целиком, поэтому
+     *    ничего не обрезаем, а сжимаем текст по ширине (`textScaleX`) ровно настолько,
+     *    чтобы строка кончилась до пинга. Высота букв не меняется, строк остаётся две.
+     *
+     * Ширина меряется по самой длинной строке без текущего сжатия: иначе каждый
+     * пересчёт мерил бы уже сжатый текст и сжимал бы его снова.
+     */
+    private fun fitIpAddressToPing() {
+        if (!::tvIpAddress.isInitialized) return
+        val row = findViewById<View>(R.id.ll_ip_row) ?: return
+        val ping = findViewById<View>(R.id.tv_internet_label) ?: return
+        if (row.width == 0 || ping.width == 0) return
+        val gap = (row.layoutParams as? ViewGroup.MarginLayoutParams)?.marginEnd ?: 0
+        // Левый край берётся у графика, к которому строка привязана, а не у самой строки:
+        // от ширины строки он не зависит, и сжатие не может сдвинуть собственную меру.
+        val rowStart = findViewById<View>(R.id.graph_latency)?.left ?: row.left
+        val available = ping.left - gap - rowStart -
+            tvIpAddress.totalPaddingLeft - tvIpAddress.totalPaddingRight
+        if (available <= 0) return
+        if (isIpVisible) {
+            val paint = tvIpAddress.paint
+            val currentScale = paint.textScaleX.takeIf { it > 0f } ?: 1f
+            val widest = tvIpAddress.text.toString().split('\n')
+                .maxOfOrNull { paint.measureText(it) / currentScale } ?: 0f
+            // Запас в 2 %: без него округление ширины иногда переносило последний
+            // символ на третью строку, а её `maxLines` уже не показывает.
+            val wanted = if (widest > available) {
+                (available * 0.98f / widest).coerceIn(MIN_IP_TEXT_SCALE_X, 1f)
+            } else {
+                1f
+            }
+            if (tvIpAddress.ellipsize != null) tvIpAddress.ellipsize = null
+            if (kotlin.math.abs(tvIpAddress.textScaleX - wanted) > 0.005f) tvIpAddress.textScaleX = wanted
+        } else {
+            if (tvIpAddress.textScaleX != 1f) tvIpAddress.textScaleX = 1f
+            if (tvIpAddress.ellipsize != android.text.TextUtils.TruncateAt.END) {
+                tvIpAddress.ellipsize = android.text.TextUtils.TruncateAt.END
+            }
+        }
     }
 
     private fun updateIpDisplay() {
@@ -4028,6 +4148,8 @@ class MainActivity : AppCompatActivity() {
         val visibleV4 = if (unresolvedTunnel) "—" else if (isIpVisible) displayOrDots(displayIpv4Value) else maskIpForDisplay(displayIpv4Value)
         val visibleV6 = if (unresolvedTunnel) "—" else if (isIpVisible) displayOrDots(displayIpv6Value) else maskIpForDisplay(displayIpv6Value)
         tvIpAddress.text = "$visibleV4\n$visibleV6"
+        // Раскрытый адрес длиннее скрытого: сжатие пересчитывается по новому тексту.
+        fitIpAddressToPing()
         val tunnelConnected = isTunnelConnected()
         tvIpAddress.setTextColor(
             if (tunnelConnected && tunnelIpResolved) {
@@ -4633,7 +4755,7 @@ class MainActivity : AppCompatActivity() {
                 cancelStartFlow()
                 markServiceStoppedLocally()
                 renderVpnConsentUnavailableState()
-                Toast.makeText(this, VpnConsent.UNAVAILABLE_HINT, Toast.LENGTH_LONG).show()
+                Toast.makeText(this, NovaLanguage.tr(this, VpnConsent.UNAVAILABLE_HINT), Toast.LENGTH_LONG).show()
             }
         } else {
             registerAndStart(existingFlowGeneration)
@@ -4672,7 +4794,7 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread {
                     Toast.makeText(
                         this@MainActivity,
-                        "EU/US недоступны на этом устройстве: встроенный Opera runtime не поддерживается.",
+                        NovaLanguage.tr(this@MainActivity, "EU/US недоступны на этом устройстве: встроенный Opera runtime не поддерживается."),
                         Toast.LENGTH_LONG
                     ).show()
                     tvStatus.text = "ОШИБКА РЕГИОНА"
@@ -4862,7 +4984,7 @@ class MainActivity : AppCompatActivity() {
                                 )
                                 Toast.makeText(
                                     this@MainActivity,
-                                    "На этом устройстве доступен только WARP: встроенный Opera runtime недоступен.",
+                                    NovaLanguage.tr(this@MainActivity, "На этом устройстве доступен только WARP: встроенный Opera runtime недоступен."),
                                     Toast.LENGTH_LONG
                                 ).show()
                                 tvStatus.text = "ОШИБКА РЕГИСТРАЦИИ"

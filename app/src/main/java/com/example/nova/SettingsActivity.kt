@@ -574,7 +574,7 @@ class SettingsActivity : AppCompatActivity() {
 
                             this,
 
-                            "Не удалось открыть доп. настройки фона на этом устройстве.",
+                            NovaLanguage.tr(this, "Не удалось открыть доп. настройки фона на этом устройстве."),
 
                             Toast.LENGTH_SHORT
 
@@ -621,7 +621,7 @@ class SettingsActivity : AppCompatActivity() {
 
                     this,
 
-                    "Не удалось открыть экран автозапуска на этом устройстве.",
+                    NovaLanguage.tr(this, "Не удалось открыть экран автозапуска на этом устройстве."),
 
                     Toast.LENGTH_SHORT
 
@@ -748,7 +748,7 @@ class SettingsActivity : AppCompatActivity() {
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
 
-                    Toast.makeText(this, "Разрешите установку обновлений для Nova", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, NovaLanguage.tr(this, "Разрешите установку обновлений для Nova"), Toast.LENGTH_LONG).show()
 
                     startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
 
@@ -984,7 +984,19 @@ class SettingsActivity : AppCompatActivity() {
 
             val config = clientData.getDiagnosticLogSettingsConfig()
 
-            clientData.saveDiagnosticLogSettingsConfig(
+            // Выключение записываем до сохранения, включение — после: иначе обе
+
+            // строки не попали бы в журнал, а по ним видно, какой отрезок человек
+
+            // записал руками.
+
+            if (!isChecked) {
+
+                LogManager.log("Журнал выключен пользователем.")
+
+            }
+
+            val saved = clientData.saveDiagnosticLogSettingsConfig(
 
                 DiagnosticLogSettingsConfig(
 
@@ -998,6 +1010,18 @@ class SettingsActivity : AppCompatActivity() {
 
             LogManager.reloadSettings()
 
+            if (!saved) {
+
+                Toast.makeText(this, NovaLanguage.tr(this, "Не удалось сохранить настройку журнала"), Toast.LENGTH_SHORT).show()
+
+            }
+
+            if (isChecked) {
+
+                LogManager.log("Журнал включён пользователем.")
+
+            }
+
             setupSwitchColor(swLogs, isChecked)
 
             layoutLogsActions.visibility = if (isChecked) View.VISIBLE else View.GONE
@@ -1010,7 +1034,7 @@ class SettingsActivity : AppCompatActivity() {
 
             LogManager.clearCapturedLogs()
 
-            Toast.makeText(this, "Логи успешно стёрты", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Логи успешно стёрты"), Toast.LENGTH_SHORT).show()
 
         }
 
@@ -1702,139 +1726,79 @@ class SettingsActivity : AppCompatActivity() {
 
     
 
+    /**
+
+     * Отчёт собирается в фоне: весь журнал (до 2 МБ) плюс снимок настроек и сети —
+
+     * на главном потоке это было бы чтение файла и десяток вызовов в систему (I13).
+
+     */
+
     private fun exportDiagnosticsLog() {
 
-        runCatching {
+        val appContext = applicationContext
 
-            val moscowTz = TimeZone.getTimeZone("GMT+3")
+        scope.launch {
 
-            val fileFormat = SimpleDateFormat("yyyyMMddHHmmss", Locale.US).apply {
+            val exported = withContext(Dispatchers.IO) {
 
-                timeZone = moscowTz
+                runCatching {
 
-            }
+                    LogManager.log("Журнал выгружается для отправки.")
 
-            val headerFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss 'GMT+3'", Locale.US).apply {
+                    val moscowTz = TimeZone.getTimeZone("GMT+3")
 
-                timeZone = moscowTz
+                    val fileFormat = SimpleDateFormat("yyyyMMddHHmmss", Locale.US).apply {
 
-            }
+                        timeZone = moscowTz
 
-            val date = Date()
+                    }
 
-            val fileName = "NA_${fileFormat.format(date)}.log"
+                    val fileName = "NA_${fileFormat.format(Date())}.log"
 
-            val headerTimestamp = headerFormat.format(date)
+                    val report = DiagnosticSnapshot.buildReport(appContext)
 
-            
+                    val logsDir = File(cacheDir, "logs").apply { mkdirs() }
 
-            val packageInfo = packageManager.getPackageInfo(packageName, 0)
+                    logsDir.listFiles()?.forEach { it.delete() }
 
-            val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-
-                packageInfo.longVersionCode.toString()
-
-            } else {
-
-                @Suppress("DEPRECATION")
-
-                packageInfo.versionCode.toString()
-
-            }
-
-            val snapshot = clientData.getTunnelUiSnapshot()
-
-            val directSnapshot = clientData.getDirectUiSnapshot()
-
-            
-
-            val logsContent = LogManager.getPersistedLogs()
-
-            val sanitizedLogs = DiagnosticLogSanitizer.sanitize(logsContent)
-
-            
-
-            val report = buildString {
-
-                appendLine("Nova diagnostic log")
-
-                appendLine("generated_at=$headerTimestamp")
-
-                appendLine("app_version=${packageInfo.versionName ?: "unknown"} ($versionCode)")
-
-                appendLine("android=${Build.VERSION.RELEASE ?: "unknown"} sdk=${Build.VERSION.SDK_INT}")
-
-                appendLine("service_state=${clientData.getServiceState().ifBlank { "unknown" }}")
-
-                appendLine("backend=${clientData.getServiceBackend().ifBlank { "unknown" }}")
-
-                appendLine("exit_preference=${clientData.getExitRegionPreference()}")
-
-                appendLine("vpn_snapshot_backend=${snapshot?.backend?.ifBlank { "unknown" } ?: "unknown"}")
-
-                appendLine("vpn_snapshot_country=${snapshot?.country?.ifBlank { "unknown" } ?: "unknown"}")
-
-                appendLine("direct_snapshot_country=${directSnapshot?.country?.ifBlank { "unknown" } ?: "unknown"}")
-
-                appendLine("logging=${clientData.getDiagnosticLogSettingsSummary()}")
-
-                appendLine()
-
-                appendLine("--- logs ---")
-
-                if (sanitizedLogs.isBlank()) {
-
-                    appendLine("Логов пока нет")
-
-                } else {
-
-                    appendLine(sanitizedLogs)
+                    File(logsDir, fileName).apply { writeText(report, Charsets.UTF_8) }
 
                 }
 
             }
 
+            if (isFinishing || isDestroyed) return@launch
 
+            exported.mapCatching { exportFile ->
 
-            val logsDir = File(cacheDir, "logs").apply { mkdirs() }
+                val uri = FileProvider.getUriForFile(this@SettingsActivity, "com.brent.nova.provider", exportFile)
 
-            logsDir.listFiles()?.forEach { it.delete() }
+                val shareIntent = Intent(Intent.ACTION_SEND).apply {
 
-            
+                    type = "text/plain"
 
-            val exportFile = File(logsDir, fileName)
+                    putExtra(Intent.EXTRA_SUBJECT, "Nova diagnostic log")
 
-            exportFile.writeText(report, Charsets.UTF_8)
+                    putExtra(Intent.EXTRA_STREAM, uri)
 
-            
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
 
-            val uri = FileProvider.getUriForFile(this, "com.brent.nova.provider", exportFile)
+                }
 
-            
+                startActivity(Intent.createChooser(shareIntent, "Отправить лог"))
 
-            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            }.onFailure {
 
-                type = "text/plain"
+                LogManager.log("Выгрузка журнала не удалась: ${it.javaClass.simpleName}: ${it.message}")
 
-                putExtra(Intent.EXTRA_SUBJECT, "Nova diagnostic log")
-
-                putExtra(Intent.EXTRA_STREAM, uri)
-
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                Toast.makeText(this@SettingsActivity, NovaLanguage.tr(this@SettingsActivity, "Ошибка экспорта лога: ${it.localizedMessage}"), Toast.LENGTH_SHORT).show()
 
             }
-
-            startActivity(Intent.createChooser(shareIntent, "Отправить лог"))
-
-        }.onFailure {
-
-            Toast.makeText(this, "Ошибка экспорта лога: ${it.localizedMessage}", Toast.LENGTH_SHORT).show()
 
         }
 
     }
-
-
 
     override fun finish() {
 
@@ -2058,7 +2022,7 @@ class SettingsActivity : AppCompatActivity() {
 
         if (SessionReapply.launchDirect(this, clientData)) {
 
-            Toast.makeText(this, toastMessage, Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, NovaLanguage.tr(this, toastMessage), Toast.LENGTH_SHORT).show()
 
         }
 
@@ -2078,7 +2042,7 @@ class SettingsActivity : AppCompatActivity() {
 
         if (SessionReapply.launchControlledTunRestart(this, clientData)) {
 
-            Toast.makeText(this, toastMessage, Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, NovaLanguage.tr(this, toastMessage), Toast.LENGTH_SHORT).show()
 
         }
 
@@ -2519,13 +2483,13 @@ class SettingsActivity : AppCompatActivity() {
 
         if (runCatching { startActivity(list) }.isSuccess) {
 
-            Toast.makeText(this, "Найдите Nova в списке и выберите «Не оптимизировать»", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Найдите Nova в списке и выберите «Не оптимизировать»"), Toast.LENGTH_LONG).show()
 
             return
 
         }
 
-        Toast.makeText(this, "Экран ограничений батареи недоступен на этой прошивке", Toast.LENGTH_LONG).show()
+        Toast.makeText(this, NovaLanguage.tr(this, "Экран ограничений батареи недоступен на этой прошивке"), Toast.LENGTH_LONG).show()
 
     }
 
@@ -2572,9 +2536,12 @@ class SettingsActivity : AppCompatActivity() {
 
         }
 
-        val fullText = "Nova v$versionName - создана с ❤️ Telegram чат"
+        // Подпись со ссылкой — оформленный текст, а такой перевод на экране не трогает:
+        // спаны пришлось бы переносить. Поэтому обе строки переводятся до разметки,
+        // и ссылка ищется уже в переведённой подписи.
+        val fullText = NovaLanguage.tr(this, "Nova v$versionName - создана с ❤️ Telegram чат")
 
-        val linkText = "Telegram чат"
+        val linkText = NovaLanguage.tr(this, "Telegram чат")
 
         val spannableString = android.text.SpannableString(fullText)
 
@@ -2807,7 +2774,7 @@ class SettingsActivity : AppCompatActivity() {
 
                 }
 
-                Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, NovaLanguage.tr(this, message), Toast.LENGTH_SHORT).show()
 
             }
 
@@ -2863,7 +2830,7 @@ class SettingsActivity : AppCompatActivity() {
 
             this,
 
-            "Открой системный экран и отключи работу Nova без ограничений.",
+            NovaLanguage.tr(this, "Открой системный экран и отключи работу Nova без ограничений."),
 
             Toast.LENGTH_LONG
 
@@ -3197,7 +3164,7 @@ class SettingsActivity : AppCompatActivity() {
 
                                 }
 
-                                Toast.makeText(this@SettingsActivity, "Подбор сброшен", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(this@SettingsActivity, NovaLanguage.tr(this@SettingsActivity, "Подбор сброшен"), Toast.LENGTH_SHORT).show()
 
                             }
 
@@ -3285,7 +3252,7 @@ class SettingsActivity : AppCompatActivity() {
 
                     this,
 
-                    "Не удалось открыть доп. настройки фона на этом устройстве.",
+                    NovaLanguage.tr(this, "Не удалось открыть доп. настройки фона на этом устройстве."),
 
                     Toast.LENGTH_SHORT
 
@@ -3452,7 +3419,7 @@ class SettingsActivity : AppCompatActivity() {
 
         summaryView.text = message
 
-        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+        Toast.makeText(this, NovaLanguage.tr(this, message), Toast.LENGTH_LONG).show()
 
     }
 
@@ -3672,7 +3639,7 @@ class SettingsActivity : AppCompatActivity() {
 
                 runCatching {
 
-                    Toast.makeText(this, "Профили Proton готовы. Нажмите подключение на главном экране.", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, NovaLanguage.tr(this, "Профили Proton готовы. Нажмите подключение на главном экране."), Toast.LENGTH_LONG).show()
 
                 }
 
@@ -3839,7 +3806,7 @@ class SettingsActivity : AppCompatActivity() {
         availability.rewriteStoredTo?.let { fallback ->
             clientData.setExitRegionPreference(fallback)
             initialExitRegionPreference = fallback
-            Toast.makeText(this, ConnectionSelectorPolicy.OPERA_UNSUPPORTED_TOAST, Toast.LENGTH_LONG).show()
+            Toast.makeText(this, NovaLanguage.tr(this, ConnectionSelectorPolicy.OPERA_UNSUPPORTED_TOAST), Toast.LENGTH_LONG).show()
         }
 
 
@@ -4162,7 +4129,7 @@ class SettingsActivity : AppCompatActivity() {
 
             LogManager.log("Proton: обновление не начали — выпуск уже идёт.")
 
-            Toast.makeText(this, "Выпуск профилей Proton уже идёт", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Выпуск профилей Proton уже идёт"), Toast.LENGTH_SHORT).show()
 
             return
 
@@ -4229,7 +4196,7 @@ class SettingsActivity : AppCompatActivity() {
 
                 summaryView.text = outcome.message
 
-                Toast.makeText(this, outcome.message, Toast.LENGTH_LONG).show()
+                Toast.makeText(this, NovaLanguage.tr(this, outcome.message), Toast.LENGTH_LONG).show()
 
             }
 
@@ -4309,7 +4276,7 @@ class SettingsActivity : AppCompatActivity() {
 
             LogManager.log("WARP-генератор: службу не удалось разбудить — ${error.message}")
 
-            Toast.makeText(this, "Не удалось начать выпуск профилей WARP", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Не удалось начать выпуск профилей WARP"), Toast.LENGTH_LONG).show()
 
             return
 
@@ -4710,7 +4677,7 @@ class SettingsActivity : AppCompatActivity() {
 
             LogManager.log("Настройки: страницу загрузки открыть не удалось — ${e.message}")
 
-            Toast.makeText(this, "Не удалось открыть $link", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Не удалось открыть $link"), Toast.LENGTH_LONG).show()
 
         }
 
@@ -4748,7 +4715,7 @@ class SettingsActivity : AppCompatActivity() {
 
             }
 
-            Toast.makeText(this@SettingsActivity, message, Toast.LENGTH_SHORT).show()
+            Toast.makeText(this@SettingsActivity, NovaLanguage.tr(this@SettingsActivity, message), Toast.LENGTH_SHORT).show()
 
         }
 
@@ -5205,7 +5172,7 @@ class SettingsActivity : AppCompatActivity() {
                 clientData.setWarpPlusLicense("")
                 clientData.setWarpAccountType("")
                 updateWarpLicenseNote()
-                Toast.makeText(this, "Лицензия убрана", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, NovaLanguage.tr(this, "Лицензия убрана"), Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Отмена", null)
             .showNova()
@@ -5270,7 +5237,7 @@ class SettingsActivity : AppCompatActivity() {
         // «ключ сохранён, аккаунт ещё не проверен» на экране было неотличимо от
         // отказа Cloudflare, отказа сети и неверного ключа (I4).
         LogManager.log("Лицензия WARP+: привязываем ключ к устройству $deviceId.")
-        Toast.makeText(this, "Привязываем лицензию…", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, NovaLanguage.tr(this, "Привязываем лицензию…"), Toast.LENGTH_SHORT).show()
         Thread {
             val result = runCatching { nova.Nova.setWarpLicense(token, deviceId, license) }
             runOnUiThread {

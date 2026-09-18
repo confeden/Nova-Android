@@ -15,8 +15,8 @@
     `TextAppearance.Material.Notification.*` — ровно тех, которыми система красит
     свои собственные строки. `?android:attr/textColorPrimary` здесь не годится:
     замерено на Pixel 4a, с ним строка приезжала заметно тусклее соседних
-    уведомлений. У кнопки заливка сплошная и своя пара цветов — почему, написано
-    в `bg_notification_disconnect.xml`.
+    уведомлений. У кнопки заливка сплошная, а цвета приходят из кода по акценту
+    темы — почему так, написано в `bg_notification_disconnect.xml`.
 
     Высота держится под ~48dp: свёрнутый шаблон `DecoratedCustomViewStyle` отдаёт
     своему макету примерно две строки текста, всё, что выше, обрезается. Замерено
@@ -63,17 +63,43 @@
             android:textAppearance="@android:style/TextAppearance.Material.Notification" />
     </LinearLayout>
 
-    <TextView
-        android:id="@+id/btn_vpn_notification_disconnect"
+    <!--
+        Кнопка — три слоя: заливка, обводка, подпись. Размер задаёт подпись, слои
+        растягиваются под неё. Все три цвета код ставит по акценту темы
+        (`NovaNotificationPalette`); литералы в слоях и у подписи — прежний вид
+        Aurora mint на случай, если перекраска не дошла.
+    -->
+    <FrameLayout
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginStart="8dp"
-        android:background="@drawable/bg_notification_disconnect"
-        android:paddingStart="10dp"
-        android:paddingTop="6dp"
-        android:paddingEnd="10dp"
-        android:paddingBottom="6dp"
-        android:text="Отключить"
-        android:textColor="#FFE6FFF0"
-        android:textSize="12sp" />
+        android:layout_marginStart="8dp">
+
+        <ImageView
+            android:id="@+id/iv_vpn_notification_disconnect_fill"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:importantForAccessibility="no"
+            android:scaleType="fitXY"
+            android:src="@drawable/bg_notification_disconnect" />
+
+        <ImageView
+            android:id="@+id/iv_vpn_notification_disconnect_stroke"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:importantForAccessibility="no"
+            android:scaleType="fitXY"
+            android:src="@drawable/bg_notification_disconnect_stroke" />
+
+        <TextView
+            android:id="@+id/btn_vpn_notification_disconnect"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingStart="10dp"
+            android:paddingTop="6dp"
+            android:paddingEnd="10dp"
+            android:paddingBottom="6dp"
+            android:text="Отключить"
+            android:textColor="#FFE6FFF0"
+            android:textSize="12sp" />
+    </FrameLayout>
 </LinearLayout>

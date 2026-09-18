@@ -37,6 +37,8 @@ object NovaDialogs {
      * кнопки лежат под теми же идентификаторами фреймворка.
      */
     fun style(dialog: Dialog) {
+        // Перевод — первым: ширину кнопок ниже считают по уже переведённым подписям.
+        NovaLanguage.watchWindow(dialog.window)
         apply(dialog.findViewById(android.R.id.button1), primary = true)
         apply(dialog.findViewById(android.R.id.button2), primary = false)
         apply(dialog.findViewById(android.R.id.button3), primary = false)

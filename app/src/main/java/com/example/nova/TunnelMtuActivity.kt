@@ -179,7 +179,7 @@ class TunnelMtuActivity : AppCompatActivity() {
     private fun applyManualEntry() {
         val raw = etManual.text?.toString()?.trim().orEmpty()
         if (raw.isEmpty()) {
-            Toast.makeText(this, "Введите число от ${NovaVpnService.TUNNEL_MTU_MIN} до ${NovaVpnService.TUNNEL_MTU_MAX}", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Введите число от ${NovaVpnService.TUNNEL_MTU_MIN} до ${NovaVpnService.TUNNEL_MTU_MAX}"), Toast.LENGTH_SHORT).show()
             return
         }
         val parsed = raw.toIntOrNull()
@@ -237,7 +237,7 @@ class TunnelMtuActivity : AppCompatActivity() {
                 SessionReapply.launchDirect(this, clientData)
             }
             if (started) {
-                Toast.makeText(this, "Пересобираем туннель с MTU $mtu...", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, NovaLanguage.tr(this, "Пересобираем туннель с MTU $mtu..."), Toast.LENGTH_SHORT).show()
             }
         }.onFailure { error ->
             LogManager.log("Не удалось сразу применить MTU туннеля: ${error.message}")

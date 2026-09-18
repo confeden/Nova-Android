@@ -768,7 +768,7 @@ class DnsSettingsActivity : AppCompatActivity() {
             .setPositiveButton("Сбросить") { _, _ ->
                 dnsRuleAdapter.submit(DnsRulesStore.defaults())
                 persistDnsRules("сброс к умолчаниям")
-                Toast.makeText(this, "Список резолверов сброшен.", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, NovaLanguage.tr(this, "Список резолверов сброшен."), Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Отмена", null)
             .showNova()
@@ -791,11 +791,11 @@ class DnsSettingsActivity : AppCompatActivity() {
 
     private fun applyExclusiveDnsAppMode() {
         if (!swAppOverride.isChecked) {
-            Toast.makeText(this, "Сначала включите DNS для приложения.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Сначала включите DNS для приложения."), Toast.LENGTH_SHORT).show()
             return
         }
         if (selectedOverridePackage.isBlank()) {
-            Toast.makeText(this, "Сначала выберите приложение.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Сначала выберите приложение."), Toast.LENGTH_SHORT).show()
             return
         }
         val currentMode = clientData.getSplitMode()
@@ -836,7 +836,7 @@ class DnsSettingsActivity : AppCompatActivity() {
         renderSelectedApp()
         persistConfig()
         updateSummary()
-        Toast.makeText(this, "Правило DNS для приложения отменено.", Toast.LENGTH_LONG).show()
+        Toast.makeText(this, NovaLanguage.tr(this, "Правило DNS для приложения отменено."), Toast.LENGTH_LONG).show()
         reapplyActiveSession()
     }
 

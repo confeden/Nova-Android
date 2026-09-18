@@ -24,15 +24,15 @@ import java.io.File
  *
  * ## Ключ на выпуск
  *
- * У каждого выпуска Nova — свой ключ релея, и сервер принимает **два** ключа на
- * платформу: текущего выпуска и предыдущего. Логин имеет вид
+ * У каждого выпуска Nova — свой ключ релея, и сервер принимает **три** ключа на
+ * платформу: текущего выпуска и двух предыдущих. Логин имеет вид
  * `nova-<платформа>-<версия>`, версия Android — это `versionCode`.
  *
- * Два, а не один, потому что выпуск — не мгновение: APK доезжает до людей
+ * Больше одного, потому что выпуск — не мгновение: APK доезжает до людей
  * днями (F-Droid пересобирает и публикует по своему расписанию), и тот, кто ещё
  * не обновился, должен уметь зарегистрироваться, а не получать «обновитесь» до
- * того, как обновление вышло. Два, а не больше, потому что смысл правила —
- * чтобы утёкший ключ протухал вместе со своим выпуском.
+ * того, как обновление вышло. Не больше трёх, потому что смысл правила —
+ * чтобы утёкший ключ протухал через известное число выпусков.
  *
  * Ключи Android и ПК живут в разных пространствах имён: выпуск Android не
  * должен отключать установленные копии для ПК, они обновляются в свой день.
@@ -45,7 +45,8 @@ import java.io.File
  *
  * Если сервер ответил `407` с заголовком `X-Nova-Relay-Reason: outdated-client`,
  * ключ этой копии уже погашен — это ровно «приложение устарело», и говорить об
- * этом надо словами, а не сетевой ошибкой (I4).
+ * этом надо словами, а не сетевой ошибкой (I4). После такого ответа релей молчит
+ * паузу ([OutdatedVerdict]): повторять запрос раньше незачем.
  */
 object NovaRelay {
 
@@ -67,9 +68,9 @@ object NovaRelay {
             "обновите его и повторите попытку"
 
     /** Заголовок, которым сервер отличает «ключ погашен» от «пароль неверен». */
-    private const val REASON_HEADER = "X-Nova-Relay-Reason"
+    internal const val REASON_HEADER = "X-Nova-Relay-Reason"
     private const val REASON_OUTDATED = "outdated-client"
-    private const val CURRENT_HEADER = "X-Nova-Relay-Current"
+    internal const val CURRENT_HEADER = "X-Nova-Relay-Current"
 
     private const val STATE_FILE = "relay_state.json"
 
@@ -121,28 +122,45 @@ object NovaRelay {
             response.header(REASON_HEADER)?.trim()?.equals(REASON_OUTDATED, ignoreCase = true) == true
 
     /**
-     * Запоминает и объявляет, что ключ этой сборки погашен.
+     * Запоминает и объявляет, что ключ этой сборки погашен, и назначает паузу.
      *
      * Пишется файлом, а не в `SharedPreferences`: признак рождается в `:vpn`, а
      * показывает его экран, и кэш настроек на процесс разводит их по разным
      * значениям (I2).
      */
     fun noteOutdated(source: String, currentVersion: String = "") {
-        val known = readState()
-        val already = known?.optBoolean("outdated") == true
-        writeState(
-            JSONObject()
-                .put("outdated", true)
-                .put("key_id", keyId())
-                .put("server_current", currentVersion)
-                .put("source", source)
-                .put("at", System.currentTimeMillis())
-        )
+        val now = System.currentTimeMillis()
+        val outcome = synchronized(writeLock) {
+            val known = readState()
+            val previous = known?.let(::verdictOf)
+            val already = previous?.keyId == keyId()
+            val verdict = OutdatedVerdict.next(previous, keyId(), now)
+            if (verdict != previous) {
+                writeState(
+                    JSONObject()
+                        .put("outdated", true)
+                        .put("key_id", verdict.keyId)
+                        .put("server_current", currentVersion.ifEmpty { known?.optString("server_current").orEmpty() })
+                        .put("source", source)
+                        .put("at", now)
+                        .put("strikes", verdict.strikes)
+                        .put("paused_until", verdict.pausedUntil)
+                )
+            }
+            Triple(already, verdict, verdict != previous)
+        }
+        val (already, verdict, escalated) = outcome
         if (!already) {
             LogManager.log(
                 "Релей: ключ этой сборки погашен сервером ($source, ключ ${keyId()}" +
                     (if (currentVersion.isNotEmpty()) ", актуальная версия $currentVersion" else "") +
                     "). $OUTDATED_MESSAGE."
+            )
+        }
+        if (escalated) {
+            LogManager.log(
+                "Релей: отказ №${verdict.strikes} по ключу ${verdict.keyId} ($source) — " +
+                    "к релею не обращаемся ${describeDuration(verdict.pausedUntil - now)}."
             )
         }
     }
@@ -154,8 +172,67 @@ object NovaRelay {
         LogManager.log("Релей: ключ снова принят, сообщение об устаревшей версии снято.")
     }
 
-    /** Показывать ли пользователю, что версия устарела. */
-    fun isOutdated(): Boolean = readState()?.optBoolean("outdated") == true
+    /**
+     * Показывать ли пользователю, что версия устарела.
+     *
+     * Только для ключа этой сборки: вердикт, записанный прошлой версией, после
+     * обновления ничего не значит — у новой версии свой ключ. Раньше признак не
+     * был привязан к ключу и переживал обновление, а снимался лишь удачным
+     * обращением к релею, которое сам же и запрещал.
+     */
+    fun isOutdated(): Boolean = readState()?.let(::verdictOf)?.keyId == keyId()
+
+    /**
+     * До какого момента к релею не обращаться; 0 — можно сейчас.
+     *
+     * Потребители спрашивают это перед каждым заходом. Когда пауза истекла,
+     * проходит одна проверка: ключ однажды уже возвращали на сервер (156), и
+     * приложение должно это заметить без обновления.
+     */
+    fun pausedUntil(): Long =
+        readState()?.let(::verdictOf)?.pauseEndFor(keyId(), System.currentTimeMillis()) ?: 0L
+
+    /** Релей на паузе после «ключ погашен». */
+    fun isPaused(): Boolean = pausedUntil() > 0L
+
+    /** Сколько ещё длится пауза — для журнала: «25 мин», «2 ч 5 мин». */
+    fun describePause(): String =
+        describeDuration((pausedUntil() - System.currentTimeMillis()).coerceAtLeast(0L))
+
+    /**
+     * Вердикт по заголовку ответа на `CONNECT`, как его видит мост Opera.
+     *
+     * Opera ходит в релей не через OkHttp, а процессом `opera-proxy`, и
+     * аутентификатора, который прочёл бы заголовок, у неё нет. Зато TLS до релея
+     * разворачивает наш мост, и ответ на `CONNECT` проходит через него открытым
+     * текстом ещё до шифрованного потока к API.
+     */
+    fun noteFromConnectHead(head: ByteArray, source: String) {
+        val parsed = RelayConnectHead.parse(head) ?: return
+        when {
+            parsed.code == 407 && parsed.reason.equals(REASON_OUTDATED, ignoreCase = true) ->
+                noteOutdated(source, parsed.current)
+            parsed.code in 200..299 -> clearOutdated()
+        }
+    }
+
+    private fun verdictOf(state: JSONObject): OutdatedVerdict? {
+        if (!state.optBoolean("outdated")) return null
+        return OutdatedVerdict(
+            keyId = state.optString("key_id"),
+            strikes = state.optInt("strikes", 0),
+            pausedUntil = state.optLong("paused_until", 0L),
+        )
+    }
+
+    private fun describeDuration(ms: Long): String {
+        val minutes = (ms + 59_999L) / 60_000L
+        return when {
+            minutes < 60 -> "$minutes мин"
+            minutes % 60 == 0L -> "${minutes / 60} ч"
+            else -> "${minutes / 60} ч ${minutes % 60} мин"
+        }
+    }
 
     /** Версия, которую сервер называет актуальной. Пусто — он её не назвал. */
     fun serverCurrentVersion(): String = readState()?.optString("server_current").orEmpty()
@@ -208,6 +285,78 @@ object NovaRelay {
                 if (stream != null) runCatching { file.failWrite(stream) }
                 LogManager.log("Релей: состояние не записалось — ${e.message}")
             }
+        }
+    }
+}
+
+/**
+ * Вердикт «ключ погашен» и пауза после него — без файлов и часов, ради тестов.
+ *
+ * Вердикт окончательный до обновления приложения, и повторять запрос раньше
+ * незачем. По погашенному ключу 155 журнал релея насчитал около 90 тысяч попыток с
+ * ~440 адресов за пять часов — примерно 40 в час с одного адреса (P53). Пауза
+ * растёт с каждым отказом, пришедшим после её конца, до потолка в 12 часов — две
+ * проверки в сутки.
+ *
+ * Отказы одного залпа (Opera перебирает планы подряд, Proton идёт в оба порта)
+ * приходят, когда пауза уже идёт, и не удлиняют её: иначе одна неудачная попытка
+ * подключения сразу загоняла бы паузу под потолок.
+ */
+internal data class OutdatedVerdict(
+    val keyId: String,
+    val strikes: Int,
+    val pausedUntil: Long,
+) {
+    /** До какого момента не обращаться к релею с ключом [currentKeyId]; 0 — можно сейчас. */
+    fun pauseEndFor(currentKeyId: String, now: Long): Long = when {
+        keyId != currentKeyId -> 0L
+        now >= pausedUntil -> 0L
+        // Часы перевели назад: такая пауза тянулась бы дольше любой назначаемой.
+        pausedUntil - now > PAUSES_MS.last() -> 0L
+        else -> pausedUntil
+    }
+
+    companion object {
+        val PAUSES_MS: LongArray = longArrayOf(
+            30L * 60_000,
+            60L * 60_000,
+            2L * 3_600_000,
+            4L * 3_600_000,
+            8L * 3_600_000,
+            12L * 3_600_000,
+        )
+
+        /** Вердикт после очередного отказа релея. */
+        fun next(previous: OutdatedVerdict?, keyId: String, now: Long): OutdatedVerdict {
+            val same = previous?.takeIf { it.keyId == keyId }
+            if (same != null && same.pauseEndFor(keyId, now) > 0L) return same
+            val strikes = (same?.strikes ?: 0) + 1
+            return OutdatedVerdict(keyId, strikes, now + PAUSES_MS[minOf(strikes, PAUSES_MS.size) - 1])
+        }
+    }
+}
+
+/** Заголовок ответа релея на `CONNECT`: код и оба заголовка вердикта. */
+internal data class RelayConnectHead(val code: Int, val reason: String, val current: String) {
+    companion object {
+        /** Сколько байт ответа копить: заголовок релея — сотня байт, дальше идёт TLS. */
+        const val LIMIT_BYTES = 8 * 1024
+
+        /** Разобранный заголовок; null — ответ не HTTP или ещё не дочитан до пустой строки. */
+        fun parse(bytes: ByteArray): RelayConnectHead? {
+            val text = String(bytes, Charsets.ISO_8859_1)
+            val end = text.indexOf("\r\n\r\n")
+            if (end < 0) return null
+            val lines = text.substring(0, end).split("\r\n")
+            val status = lines.first().split(' ')
+            if (status.size < 2 || !status[0].startsWith("HTTP/")) return null
+            val code = status[1].toIntOrNull() ?: return null
+            fun header(name: String): String = lines.drop(1)
+                .firstOrNull { it.substringBefore(':').trim().equals(name, ignoreCase = true) }
+                ?.substringAfter(':')
+                ?.trim()
+                .orEmpty()
+            return RelayConnectHead(code, header(NovaRelay.REASON_HEADER), header(NovaRelay.CURRENT_HEADER))
         }
     }
 }

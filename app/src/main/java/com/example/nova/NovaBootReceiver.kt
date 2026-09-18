@@ -21,6 +21,7 @@ class NovaBootReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context?, intent: Intent?) {
         val appContext = context?.applicationContext ?: return
+        LogManager.setAppContext(appContext)
         val action = intent?.action.orEmpty()
         if (action !in HANDLED_ACTIONS) return
 

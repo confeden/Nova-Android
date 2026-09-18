@@ -17,6 +17,7 @@ class VlessSubscriptionWorker(
 ) : Worker(appContext, workerParams) {
 
     override fun doWork(): Result {
+        LogManager.setAppContext(applicationContext)
         val url = ClientData(applicationContext).getVlessSubscription()?.url.orEmpty()
         if (url.isBlank()) return Result.success()
         return when (VlessSubscriptionManager.refresh(applicationContext, url)) {

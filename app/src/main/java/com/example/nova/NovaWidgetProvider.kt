@@ -44,6 +44,7 @@ class NovaWidgetProvider : AppWidgetProvider() {
     }
 
     override fun onReceive(context: Context, intent: Intent) {
+        LogManager.setAppContext(context)
         super.onReceive(context, intent)
         when (intent.action) {
             ACTION_TOGGLE -> {
@@ -69,6 +70,13 @@ class NovaWidgetProvider : AppWidgetProvider() {
                 if (connected) R.drawable.widget_btn_power_on else R.drawable.widget_btn_power_off,
             )
             setOnClickPendingIntent(R.id.widget_btn_power, buildSelfPendingIntent(context, ACTION_TOGGLE, 7101))
+            // Описания для TalkBack в макете — русские заглушки: макет раздувает лаунчер,
+            // и перевод интерфейса до него не доходит.
+            setContentDescription(
+                R.id.widget_btn_power,
+                NovaLanguage.tr(context, "Подключить или отключить Nova"),
+            )
+            setContentDescription(R.id.widget_btn_next, NovaLanguage.tr(context, "Следующий профиль"))
             setOnClickPendingIntent(
                 R.id.widget_btn_next,
                 buildSelfPendingIntent(context, ACTION_NEXT_PROFILE, 7102),
@@ -173,7 +181,9 @@ class NovaWidgetProvider : AppWidgetProvider() {
         return state == NovaVpnService.STATE_CONNECTED || state == NovaVpnService.STATE_CONNECTING
     }
 
-    private fun refresh(context: Context) {
+    private fun refresh(context: Context) = refreshAll(context)
+
+    private fun refreshAllInternal(context: Context) {
         val manager = AppWidgetManager.getInstance(context) ?: return
         val ids = manager.getAppWidgetIds(ComponentName(context, NovaWidgetProvider::class.java))
         if (ids.isEmpty()) return
@@ -183,6 +193,9 @@ class NovaWidgetProvider : AppWidgetProvider() {
 
     companion object {
         const val ACTION_TOGGLE = "com.example.nova.widget.TOGGLE"
+
+        /** Перерисовать все виджеты: например, после смены языка интерфейса. */
+        fun refreshAll(context: Context) = NovaWidgetProvider().refreshAllInternal(context)
         const val ACTION_NEXT_PROFILE = "com.example.nova.widget.NEXT_PROFILE"
 
         /**

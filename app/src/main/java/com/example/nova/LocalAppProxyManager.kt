@@ -578,7 +578,7 @@ object LocalAppProxyManager {
     }
 
     private fun writeTunnelUnavailable(output: OutputStream) {
-        val body = """
+        val body = NovaLanguage.tr("""
             <!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
             <title>VPN не подключён</title></head>
             <body style="font-family:sans-serif;padding:24px;max-width:520px">
@@ -589,7 +589,7 @@ object LocalAppProxyManager {
             <p>Подключите VPN в приложении Nova — страницы начнут открываться сами,
             перенастраивать ничего не нужно.</p>
             </body></html>
-        """.trimIndent().toByteArray(StandardCharsets.UTF_8)
+        """.trimIndent()).toByteArray(StandardCharsets.UTF_8)
         output.write(
             (
                 "HTTP/1.1 503 Service Unavailable\r\n" +

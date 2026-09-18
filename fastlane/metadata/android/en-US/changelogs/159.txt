@@ -1,0 +1,7 @@
+- Interface language: Russian or English, switched instantly with the 🌍 button next to Settings.
+- Proton: the node check works again, so a live node is found faster.
+- WARP: a node that stops passing traffic is replaced automatically.
+- After a network change (Wi-Fi ↔ mobile) the tunnel recovers on your own profiles too.
+- Direct flow: banks bypass the VPN wherever they were installed from; the list was checked and extended.
+- The notification follows the colours of the chosen theme.
+- The diagnostic log records session state, network and why the service stopped.

@@ -21,6 +21,7 @@ class UpdateRepairWorker(
 ) : Worker(appContext, workerParams) {
 
     override fun doWork(): Result {
+        LogManager.setAppContext(applicationContext)
         val version = inputData.getString(AppUpdateManager.EXTRA_VERSION).orEmpty()
         val url = inputData.getString(AppUpdateManager.EXTRA_URL).orEmpty()
         if (version.isBlank() || url.isBlank()) {

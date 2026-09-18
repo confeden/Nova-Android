@@ -13,7 +13,7 @@ class GlowPillButton @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
     defStyleAttr: Int = android.R.attr.buttonStyle
-) : AppCompatButton(context, attrs, defStyleAttr) {
+) : AppCompatButton(context, attrs, defStyleAttr), NovaLanguage.LocalizedText {
 
     private val blurPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -83,4 +83,9 @@ class GlowPillButton @JvmOverloads constructor(
     }
 
     private fun dp(value: Float): Float = value * resources.displayMetrics.density
+
+    // Текст переводится в момент показа: код ставит русский исходник (см. NovaLanguage).
+    override fun setText(text: CharSequence?, type: BufferType?) = NovaLanguage.onSetText(this, text, type)
+
+    override fun setTextDirect(text: CharSequence?, type: BufferType?) = super.setText(text, type)
 }

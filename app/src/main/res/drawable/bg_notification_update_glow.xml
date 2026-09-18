@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Диагональная полоса над основой `bg_notification_update.xml`: к середине
+    карточки проступает цвет заливки, к углам уходит в основу. Цвет задаёт код,
+    от слоя нужна только прозрачность, поэтому у всех трёх стопов один RGB.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+
+    <gradient
+        android:angle="315"
+        android:startColor="#0010664A"
+        android:centerColor="#FF10664A"
+        android:endColor="#0010664A"
+        android:type="linear" />
+
+    <corners android:radius="14dp" />
+</shape>

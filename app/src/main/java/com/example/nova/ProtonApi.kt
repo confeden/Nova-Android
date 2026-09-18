@@ -195,9 +195,10 @@ object ProtonApi {
         label: String,
         elapsedMs: () -> Long,
     ): JSONObject? {
-        if (NovaRelay.isOutdated()) {
-            // Ключ этой сборки погашен сервером: следующая попытка получит тот же
-            // `407` и потратит ещё один таймаут, чтобы узнать то же самое.
+        if (NovaRelay.isPaused()) {
+            // Ключ этой сборки погашен сервером и пауза после отказа ещё идёт:
+            // следующая попытка получит тот же `407` и потратит ещё один таймаут,
+            // чтобы узнать то же самое.
             if (shouldLogRelayAbsence("outdated")) {
                 LogManager.log("Proton: релей не примет эту сборку. ${NovaRelay.OUTDATED_MESSAGE}.")
             }

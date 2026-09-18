@@ -18,10 +18,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.TimeZone
 
 class LogsActivity : AppCompatActivity() {
 
@@ -72,6 +68,9 @@ class LogsActivity : AppCompatActivity() {
         rgLevel = findViewById(R.id.rg_logs_level)
         tvSummary = findViewById(R.id.tv_logs_summary)
         tvPreview = findViewById(R.id.tv_logs_preview)
+        // Журнал показывается как есть: его строки — ключи поиска (I14), а перевод
+        // по строкам превратил бы его в смесь языков. Подписи-заглушки переводятся явно.
+        NovaLanguage.verbatim(tvPreview)
         btnPreview = findViewById(R.id.btn_preview_log)
         btnCopy = findViewById(R.id.btn_copy_log)
         btnShare = findViewById(R.id.btn_share_log)
@@ -134,7 +133,7 @@ class LogsActivity : AppCompatActivity() {
 
     private fun refreshPreview() {
         previewJob?.cancel()
-        tvPreview.text = "Готовим предпросмотр..."
+        tvPreview.text = NovaLanguage.tr(this, "Готовим предпросмотр...")
         previewJob = scope.launch {
             val report = withContext(Dispatchers.IO) {
                 buildPreviewReport()
@@ -145,14 +144,22 @@ class LogsActivity : AppCompatActivity() {
     }
 
     private fun copyPreview() {
-        val payload = latestPreview.ifBlank { buildPreviewReport() }
+        // Отчёт зовёт десяток системных служб и читает файл под блокировкой — не на
+        // главном потоке. Пока предпросмотра нет, просто собираем его.
+        val payload = latestPreview.ifBlank {
+            refreshPreview()
+            return
+        }
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
         clipboard.setPrimaryClip(ClipData.newPlainText("Nova diagnostics log", payload))
-        Toast.makeText(this, "Лог скопирован", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, NovaLanguage.tr(this, "Лог скопирован"), Toast.LENGTH_SHORT).show()
     }
 
     private fun sharePreview() {
-        val payload = latestPreview.ifBlank { buildPreviewReport() }
+        val payload = latestPreview.ifBlank {
+            refreshPreview()
+            return
+        }
         startActivity(
             Intent.createChooser(
                 Intent(Intent.ACTION_SEND).apply {
@@ -165,42 +172,8 @@ class LogsActivity : AppCompatActivity() {
         )
     }
 
-    private fun buildPreviewReport(): String {
-        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss 'UTC'", Locale.US).apply {
-            timeZone = TimeZone.getTimeZone("UTC")
-        }.format(Date())
-        val packageInfo = packageManager.getPackageInfo(packageName, 0)
-        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            packageInfo.longVersionCode.toString()
-        } else {
-            @Suppress("DEPRECATION")
-            packageInfo.versionCode.toString()
-        }
-        val snapshot = clientData.getTunnelUiSnapshot()
-        val directSnapshot = clientData.getDirectUiSnapshot()
-        val lines = buildList {
-            add("Nova diagnostic log")
-            add("generated_at=$timestamp")
-            add("app_version=${packageInfo.versionName ?: "unknown"} ($versionCode)")
-            add("android=${Build.VERSION.RELEASE ?: "unknown"} sdk=${Build.VERSION.SDK_INT}")
-            add("service_state=${clientData.getServiceState().ifBlank { "unknown" }}")
-            add("backend=${clientData.getServiceBackend().ifBlank { "unknown" }}")
-            add("exit_preference=${clientData.getExitRegionPreference()}")
-            add("vpn_snapshot_backend=${snapshot?.backend?.ifBlank { "unknown" } ?: "unknown"}")
-            add("vpn_snapshot_country=${snapshot?.country?.ifBlank { "unknown" } ?: "unknown"}")
-            add("direct_snapshot_country=${directSnapshot?.country?.ifBlank { "unknown" } ?: "unknown"}")
-            add("logging=${clientData.getDiagnosticLogSettingsSummary()}")
-            add("")
-            add("--- logs ---")
-            val persisted = LogManager.getPersistedLogs()
-            if (persisted.isBlank()) {
-                add("Логов пока нет")
-            } else {
-                add(DiagnosticLogSanitizer.sanitize(persisted))
-            }
-        }
-        return lines.joinToString("\n")
-    }
+    private fun buildPreviewReport(): String =
+        DiagnosticSnapshot.buildReport(this, maxLogChars = 160_000)
 
     private fun applyZeroTransitionOpen() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {

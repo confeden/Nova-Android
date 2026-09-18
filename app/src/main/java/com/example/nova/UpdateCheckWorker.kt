@@ -10,6 +10,7 @@ class UpdateCheckWorker(
 ) : Worker(appContext, workerParams) {
 
     override fun doWork(): Result {
+        LogManager.setAppContext(applicationContext)
         return try {
             AppUpdateManager.performUpdateCheck(applicationContext)
             Result.success()

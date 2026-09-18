@@ -43,7 +43,7 @@ class WarpConfigCardAdapter(
         holder.copy.setOnClickListener {
             val clipboard = holder.itemView.context.getSystemService(ClipboardManager::class.java)
             clipboard?.setPrimaryClip(ClipData.newPlainText("warp-config", item.body))
-            Toast.makeText(holder.itemView.context, "Конфигурация скопирована", Toast.LENGTH_SHORT).show()
+            Toast.makeText(holder.itemView.context, NovaLanguage.tr(holder.itemView.context, "Конфигурация скопирована"), Toast.LENGTH_SHORT).show()
         }
         holder.delete.setOnClickListener {
             onDelete(item.id)
@@ -56,7 +56,10 @@ class WarpConfigCardAdapter(
         val title: TextView = view.findViewById(R.id.tv_config_title)
         val current: TextView = view.findViewById(R.id.tv_config_current)
         val meta: TextView = view.findViewById(R.id.tv_config_meta)
-        val body: TextView = view.findViewById(R.id.tv_config_body)
+        val body: TextView = view.findViewById<TextView>(R.id.tv_config_body).also {
+            // Тело конфигурации — чужой текст: имена узлов из подписки не переводятся.
+            NovaLanguage.verbatim(it)
+        }
         val delete: TextView = view.findViewById(R.id.btn_delete_config)
         val copy: TextView = view.findViewById(R.id.btn_copy_config)
     }

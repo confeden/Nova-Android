@@ -610,7 +610,7 @@ class WarpConfigsActivity : AppCompatActivity() {
             ordinal = 0,
             total = 0,
         )
-        Toast.makeText(this, VpnConsent.UNAVAILABLE_HINT, Toast.LENGTH_LONG).show()
+        Toast.makeText(this, NovaLanguage.tr(this, VpnConsent.UNAVAILABLE_HINT), Toast.LENGTH_LONG).show()
         return false
     }
 
@@ -960,7 +960,7 @@ class WarpConfigsActivity : AppCompatActivity() {
     private fun showClearImportedDialog() {
         val total = clientData.countImportedConfigs()
         if (total <= 0) {
-            Toast.makeText(this, "Импортированных конфигураций нет", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Импортированных конфигураций нет"), Toast.LENGTH_SHORT).show()
             return
         }
         val subscription = clientData.getVlessSubscription()
@@ -976,7 +976,7 @@ class WarpConfigsActivity : AppCompatActivity() {
             .setPositiveButton("Удалить") { _, _ ->
                 val removed = clientData.clearImportedConfigs()
                 renderConfigs()
-                Toast.makeText(this, "Удалено записей: $removed", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, NovaLanguage.tr(this, "Удалено записей: $removed"), Toast.LENGTH_LONG).show()
             }
             .setNegativeButton("Отмена", null)
             .showNova()
@@ -991,7 +991,7 @@ class WarpConfigsActivity : AppCompatActivity() {
             "Скопировать адрес" to {
                 getSystemService(ClipboardManager::class.java)
                     ?.setPrimaryClip(ClipData.newPlainText("nova-subscription", subscription.url))
-                Toast.makeText(this, "Адрес подписки скопирован", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, NovaLanguage.tr(this, "Адрес подписки скопирован"), Toast.LENGTH_SHORT).show()
             },
             "Удалить подписку" to { showDeleteSubscriptionDialog(subscription) },
         )
@@ -1025,7 +1025,7 @@ class WarpConfigsActivity : AppCompatActivity() {
                 clientData.saveVlessSubscription(subscription.copy(updateIntervalHours = hours))
                 VlessSubscriptionManager.syncSchedule(this)
                 dialog.dismiss()
-                Toast.makeText(this, "Интервал обновления: ${options[which].second}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, NovaLanguage.tr(this, "Интервал обновления: ${options[which].second}"), Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Отмена", null)
             .showNova()
@@ -1044,13 +1044,13 @@ class WarpConfigsActivity : AppCompatActivity() {
                 clientData.clearVlessProfileLinks()
                 VlessSubscriptionManager.syncSchedule(this)
                 renderConfigs()
-                Toast.makeText(this, "Подписка и её профили удалены", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, NovaLanguage.tr(this, "Подписка и её профили удалены"), Toast.LENGTH_LONG).show()
             }
             .setNeutralButton("Оставить профили") { _, _ ->
                 clientData.clearVlessSubscription()
                 VlessSubscriptionManager.syncSchedule(this)
                 renderConfigs()
-                Toast.makeText(this, "Подписка удалена, профили остались", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, NovaLanguage.tr(this, "Подписка удалена, профили остались"), Toast.LENGTH_LONG).show()
             }
             .setNegativeButton("Отмена", null)
             .showNova()
@@ -1256,7 +1256,7 @@ class WarpConfigsActivity : AppCompatActivity() {
                         Toast.LENGTH_LONG,
                     ).show()
                 } else if (!result.warning.isNullOrBlank()) {
-                    Toast.makeText(this, result.warning, Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, NovaLanguage.tr(this, result.warning), Toast.LENGTH_LONG).show()
                 }
             }
             .setNegativeButton("Отмена", null)
@@ -1272,14 +1272,14 @@ class WarpConfigsActivity : AppCompatActivity() {
                 clientData.setImportedWarpOnlyModeEnabled(true)
                 updateImportedOnlyUi()
                 renderConfigs()
-                Toast.makeText(this, "Импортировано: ${result.imported}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, NovaLanguage.tr(this, "Импортировано: ${result.imported}"), Toast.LENGTH_SHORT).show()
             } else if (!result.warning.isNullOrBlank()) {
-                Toast.makeText(this, result.warning, Toast.LENGTH_LONG).show()
+                Toast.makeText(this, NovaLanguage.tr(this, result.warning), Toast.LENGTH_LONG).show()
             } else {
-                Toast.makeText(this, "Подходящих конфигураций не найдено", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, NovaLanguage.tr(this, "Подходящих конфигураций не найдено"), Toast.LENGTH_SHORT).show()
             }
         }.onFailure {
-            Toast.makeText(this, "Не удалось прочитать файл", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Не удалось прочитать файл"), Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -1313,11 +1313,11 @@ class WarpConfigsActivity : AppCompatActivity() {
                     clientData.setImportedWarpOnlyModeEnabled(true)
                     updateImportedOnlyUi()
                     renderConfigs()
-                    Toast.makeText(this@WarpConfigsActivity, "Импортировано из архива: ${result.imported}", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@WarpConfigsActivity, NovaLanguage.tr(this@WarpConfigsActivity, "Импортировано из архива: ${result.imported}"), Toast.LENGTH_SHORT).show()
                 } else if (!result.warning.isNullOrBlank()) {
-                    Toast.makeText(this@WarpConfigsActivity, result.warning, Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@WarpConfigsActivity, NovaLanguage.tr(this@WarpConfigsActivity, result.warning), Toast.LENGTH_LONG).show()
                 } else {
-                    Toast.makeText(this@WarpConfigsActivity, "Подходящих конфигураций не найдено", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@WarpConfigsActivity, NovaLanguage.tr(this@WarpConfigsActivity, "Подходящих конфигураций не найдено"), Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -1366,7 +1366,7 @@ class WarpConfigsActivity : AppCompatActivity() {
                 clientData.setImportedWarpOnlyModeEnabled(true)
                 updateImportedOnlyUi()
                 renderConfigs()
-                Toast.makeText(this, describeSubscriptionOutcome(outcome, sourceHost), Toast.LENGTH_LONG).show()
+                Toast.makeText(this, NovaLanguage.tr(this, describeSubscriptionOutcome(outcome, sourceHost)), Toast.LENGTH_LONG).show()
             }
         }.start()
     }
@@ -1383,9 +1383,9 @@ class WarpConfigsActivity : AppCompatActivity() {
                 Toast.LENGTH_LONG,
             ).show()
         } else if (!result.warning.isNullOrBlank()) {
-            Toast.makeText(this, result.warning, Toast.LENGTH_LONG).show()
+            Toast.makeText(this, NovaLanguage.tr(this, result.warning), Toast.LENGTH_LONG).show()
         } else {
-            Toast.makeText(this, "Подходящих конфигураций не найдено", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Подходящих конфигураций не найдено"), Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -1521,9 +1521,9 @@ class WarpConfigsActivity : AppCompatActivity() {
             clientData.setImportedWarpOnlyModeEnabled(true)
             updateImportedOnlyUi()
             renderConfigs()
-            Toast.makeText(this, "Импортировано локально: $importedTotal", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Импортировано локально: $importedTotal"), Toast.LENGTH_SHORT).show()
         } else if (!warning.isNullOrBlank()) {
-            Toast.makeText(this, warning, Toast.LENGTH_LONG).show()
+            Toast.makeText(this, NovaLanguage.tr(this, warning), Toast.LENGTH_LONG).show()
         }
     }
 
@@ -2455,7 +2455,7 @@ class WarpConfigsActivity : AppCompatActivity() {
     private fun shareCurrentConfig() {
         val current = clientData.getWarpVerifiedMergedConfigs().firstOrNull { isCurrentConfigPublic(it) }
         if (current == null) {
-            Toast.makeText(this, "Текущая конфигурация не найдена", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Текущая конфигурация не найдена"), Toast.LENGTH_SHORT).show()
             return
         }
         shareText(renderConfigForDisplay(current), "Nova WARP config")
@@ -2464,7 +2464,7 @@ class WarpConfigsActivity : AppCompatActivity() {
     private fun shareAllConfigs() {
         val items = clientData.getWarpVerifiedMergedConfigs()
         if (items.isEmpty()) {
-            Toast.makeText(this, "Список конфигураций пуст", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Список конфигураций пуст"), Toast.LENGTH_SHORT).show()
             return
         }
         val payload = items.joinToString("\n\n") { renderConfigForDisplay(it) }
@@ -2646,7 +2646,7 @@ class WarpConfigsActivity : AppCompatActivity() {
      */
     fun showEditConfigDialog(item: WarpVerifiedConfig) {
         if (clientData.isBundledSeed(item)) {
-            Toast.makeText(this, "Встроенный профиль не редактируется", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, NovaLanguage.tr(this, "Встроенный профиль не редактируется"), Toast.LENGTH_SHORT).show()
             return
         }
         val fromSubscription = item.id.startsWith(ClientData.VLESS_CONFIG_ID_PREFIX) &&
@@ -2683,7 +2683,7 @@ class WarpConfigsActivity : AppCompatActivity() {
                 }
                 val newId = clientData.updateImportedConfigRaw(item.id, text, derived)
                 if (newId == null) {
-                    Toast.makeText(this, "Не удалось сохранить: текст не разобрался", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, NovaLanguage.tr(this, "Не удалось сохранить: текст не разобрался"), Toast.LENGTH_LONG).show()
                     return@setPositiveButton
                 }
                 if (fromSubscription) {
@@ -2698,7 +2698,7 @@ class WarpConfigsActivity : AppCompatActivity() {
                     "Профиль $newId изменён вручную" +
                         if (fromSubscription && pin.isChecked) " и закреплён от обновления подписки." else "."
                 )
-                Toast.makeText(this, "Профиль сохранён", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, NovaLanguage.tr(this, "Профиль сохранён"), Toast.LENGTH_SHORT).show()
                 renderConfigs()
             }
             .setNegativeButton("Отмена", null)

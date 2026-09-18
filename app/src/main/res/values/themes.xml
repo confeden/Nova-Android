@@ -2,6 +2,8 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
     <!-- Base application theme. -->
     <style name="Theme.Nova" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <!-- Виды разметки переводят свой текст при показе (NovaLanguage, NovaViewInflater). -->
+        <item name="viewInflaterClass">com.example.nova.NovaViewInflater</item>
         <!-- Primary brand color. -->
         <item name="colorPrimary">#04070D</item>
         <item name="colorPrimaryVariant">#04070D</item>
@@ -27,6 +29,8 @@
     
     <!-- Settings Dialog Theme - Liquid Glass Aesthetic -->
     <style name="Theme.Nova.Settings" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <!-- Виды разметки переводят свой текст при показе (NovaLanguage, NovaViewInflater). -->
+        <item name="viewInflaterClass">com.example.nova.NovaViewInflater</item>
         <item name="android:windowIsFloating">false</item>
         <item name="android:windowAnimationStyle">@null</item>
         <item name="android:windowContentTransitions">false</item>

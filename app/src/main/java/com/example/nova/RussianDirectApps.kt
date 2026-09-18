@@ -9,9 +9,13 @@ package com.example.nova
  * затащила бы произвольные и потенциально нежелательные пакеты в исключения. Здесь перечислены
  * только конкретные, проверенные пакеты.
  *
- * Проверку источника установки (install source) для банковских приложений намеренно **не делаем
- * здесь** — это обязанность вызывающей стороны ([isBanking] лишь сообщает, является ли пакет
- * банковским по имени).
+ * **Как проверено.** Имя сверяется строкой целиком, и опечатка не падает — она тихо ни с чем
+ * не совпадает. 2026-09-15 каждое имя сверено с каталогом RuStore: страница
+ * `rustore.ru/catalog/app/<пакет>` существует, а разработчик в ней — сама организация.
+ * Так нашлись два десятка мёртвых имён из 82 (у Райффайзена, ПСБ, Совкомбанка, РСХБ, МКБ, МТС
+ * Банка, VK Видео, Яндекс Еды, Навигатора, РЖД, Почты России и других): при зарубежном выходе
+ * эти приложения шли через туннель, хотя числились в списке. Источник установки (Play, RuStore,
+ * APK) значения не имеет — см. [DirectAppsPolicy].
  */
 object RussianDirectApps {
 
@@ -19,47 +23,103 @@ object RussianDirectApps {
     // Банковские приложения
     // -------------------------------------------------------------------------
 
+    /**
+     * Банки: частные клиенты, бизнес и инвестиции.
+     *
+     * Владелец 2026-09-15: «любые банковские приложения из Play Market для русских банков —
+     * тоже пускай идут напрямую», и следом — «инвестиционные приложения банков тоже». Бизнес
+     * и инвестиции входят по той же причине: банк или его брокер один, и с зарубежного адреса
+     * он так же требует подтверждений или не пускает. Инвестиционные сервисы без банка в
+     * группе (Финуслуги Московской биржи и подобные) не внесены.
+     */
     private val BANKING: Set<String> = setOf(
-        // Сбербанк
-        "ru.sberbankmobile",
-        // ВТБ
-        "ru.vtb24.mobilebanking.android",
-        // Альфа-Банк
-        "ru.alfabank.mobile.android",
-        // Тинькофф / Т-Банк
-        "com.idamob.tinkoff.android",
-        // Газпромбанк
-        "ru.gazprombank.android.mobilebank.app",
-        // Райффайзен Банк (Россия)
-        "ru.raiffeisen.mobile",
-        // Банк Открытие
-        "ru.openbank.app",
-        // Росбанк
-        "ru.rosbank.android",
-        // ПСБ (Промсвязьбанк)
-        "ru.psbank.mobile",
-        // Совкомбанк
-        "ru.sovcombank.sovcombank",
-        // Россельхозбанк (РСХБ)
-        "ru.rshb.mobilebank",
-        // МКБ (Московский Кредитный Банк)
-        "ru.mkb.mobilniy_bank",
-        // Уралсиб
-        "ru.bankuralsib.mb.android",
-        // Почта Банк
-        "ru.pochtabank.android",
-        // Хоум Банк (Home Credit)
-        "ru.homecredit.mobilebank",
-        // Озон Банк
-        "ru.ozon.app.android",
-        // Яндекс Пэй / Яндекс Банк
-        "com.yandex.bank",
-        // МТС Банк
-        "ru.mtsbank.mtsbank",
-        // СБПэй (НСПК / Система быстрых платежей)
-        "ru.nspk.sbpay",
-        // Mir Pay
-        "ru.nspk.mirpay",
+        // --- Частные клиенты ---
+        "ru.sberbankmobile",                      // СберБанк Онлайн
+        "ru.vtb24.mobilebanking.android",         // ВТБ Онлайн
+        "ru.alfabank.mobile.android",             // Альфа-Банк
+        "com.idamob.tinkoff.android",             // Т-Банк (проверено на устройстве)
+        "ru.gazprombank.android.mobilebank.app",  // Газпромбанк
+        "ru.raiffeisennews",                      // Райффайзен Онлайн (было ru.raiffeisen.mobile — нет такого)
+        "logo.com.mbanking",                      // ПСБ (было ru.psbank.mobile — нет такого)
+        "ru.sovcomcard.halva.v1",                 // Халва — Совкомбанк (было ru.sovcombank.sovcombank)
+        "ru.rshb.dbo",                            // Россельхозбанк (было ru.rshb.mobilebank)
+        "ru.mkb.mobile",                          // МКБ Онлайн (было ru.mkb.mobilniy_bank)
+        "ru.bankuralsib.mb.android",              // Уралсиб Онлайн
+        "ru.lewis.dbo",                           // МТС Деньги — МТС Банк (было ru.mtsbank.mtsbank)
+        "ru.ozon.app.android",                    // Ozon — и магазин, и банк
+        "ru.ozon.fintech.finance",                // Ozon Банк
+        "com.yandex.bank",                        // Яндекс Пэй / Яндекс Банк
+        "ru.wildberries.bank",                    // WB Банк
+        "ru.akbars.mobile",                       // Ак Барс Онлайн
+        "ru.bspb",                                // Банк Санкт-Петербург
+        "ru.simpls.brs2.mobbank",                 // Русский Стандарт
+        "cz.bsc.rc",                              // Ренессанс Банк
+        "ru.otpbank.mobile",                      // ОТП Банк
+        "com.bank.domrf.v2",                      // Банк ДОМ.РФ
+        "com.bssys.novikomretail",                // Новикомбанк
+        "com.idamobile.android.crediteuropa",     // Кредит Европа Банк
+        "ru.ftc.faktura.absolutbank",             // Абсолют Банк
+        "ru.zenitonline.android",                 // Банк Зенит
+        "ru.skbbank.ib",                          // Синара Банк
+        "com.svoi.bank",                          // Свой Банк
+        "ru.avangard",                            // Банк Авангард
+        "ru.centrinvest.mobilebanking2018",       // Центр-инвест
+        "cb.ibank",                               // УБРиР
+        "com.bankffin.portfolio",                 // Цифра банк
+        "ru.bcs.bcsbank",                         // БКС Банк
+        "ru.nspk.sbpay",                          // СБПэй (НСПК)
+        "ru.nspk.mirpay",                         // Mir Pay (НСПК)
+
+        // --- Бизнес ---
+        "ru.sberbank_sbbol",                      // СберБизнес
+        "ru.vtb.smb",                             // Бизнес Платформа ВТБ
+        "ru.alfabank.oavdo.amc",                  // Альфа-Бизнес
+        "ru.tinkoff.sme",                         // Т-Бизнес
+        "ru.zhuck.webapp",                        // Точка
+        "modulbank.ru.app",                       // Модульбанк
+        "ru.psbank.msb.dev.psb_appstore",         // ПСБ Бизнес
+        "ru.gazprombank.mobile.gpbbusiness",      // Газпромбанк Бизнес
+        "ru.raiffeisen.android.rbo",              // Райффайзен Бизнес
+        "ru.rb.business",                         // Росбанк Бизнес
+        "ru.rshb.dboul",                          // Россельхозбанк Бизнес-Онлайн
+        "ru.uralsib.business",                    // Уралсиб Бизнес
+        "ru.diftechsvc",                          // Совкомбанк Бизнес
+        "ru.ozon.fintech.sme",                    // Ozon Банк для бизнеса
+        "wildberries.business",                   // WB Банк Бизнес
+        "ru.bspb.b2b",                            // БСПБ Бизнес
+
+        // --- Инвестиции: брокеры и управляющие компании банков ---
+        //
+        // Разработчик в RuStore — сам банк или его брокер/УК; у Газпромбанка это «Ньютон
+        // Инвестиции», купленный банком, у Синары — её ИТ-компания «СКБ ЛАБ».
+        "ru.sberbank.investor",                   // СберИнвестиции
+        "ru.vtb.invest",                          // ВТБ Мои Инвестиции
+        "ru.tinkoff.investing",                   // Т-Инвестиции
+        "ru.alfadirect.app",                      // Альфа-Инвестиции
+        "ru.alfacapital.lk",                      // Альфа-Капитал (УК)
+        "ru.gazprombank.invest",                  // Газпромбанк Инвестиции
+        "ru.gazprombank.broker",                  // ГПБ Брокер
+        "ru.psbank.invest",                       // ПСБ Инвестиции
+        "ru.sovcombank.investor",                 // Совкомбанк Инвестиции
+        "ru.region.finance",                      // МКБ Инвестиции
+        "ru.sinara_finance.invest",               // Синара Инвестиции
+        "ru.raiffeisen.capitalapp",               // УК Райффайзен Капитал
+        "rshbma.invest.mapp",                     // РСХБ Управление Активами
+        "ru.kode.dominvest.mobile",               // ДОМ.Инвест (Банк ДОМ.РФ)
+        "ru.akbars.akbf",                         // АКБФ Трейд (Ак Барс)
+        "com.arqa.absolut",                       // Абсолют Инвест
+        "ru.broker.my",                           // БКС Мир инвестиций (группа с БКС Банком)
+        "ru.finam.terminal",                      // FinamTrade (группа с Банком Финам)
+        "ru.tradernet.terminal",                  // Цифра брокер (группа с Цифра банком)
+
+        // --- В RuStore не нашлись ---
+        //
+        // Приложений для частных клиентов Росбанка, Почта Банка и Хоум Банка в каталоге нет, и
+        // проверить эти имена нечем. Оставлены: неточное имя ничего не ломает, только не
+        // срабатывает. Банк «Открытие» (ru.openbank.app) убран — он влит в ВТБ.
+        "ru.rosbank.android",                     // Росбанк
+        "ru.pochtabank.android",                  // Почта Банк
+        "ru.homecredit.mobilebank",               // Хоум Банк
     )
 
     // -------------------------------------------------------------------------
@@ -88,19 +148,15 @@ object RussianDirectApps {
 
     private val OTHER: Set<String> = setOf(
         // --- Маркетплейсы ---
-        // Ozon здесь намеренно нет: его единственное приложение
-        // `ru.ozon.app.android` уже лежит в [BANKING] (это и магазин, и банк), а
-        // [all] объединяет оба набора. Дубль ничего не добавил бы, кроме повода
-        // однажды удалить «лишнюю» строку не из того набора.
+        // Ozon — в [BANKING]: это и магазин, и банк, а [all] объединяет оба набора.
         "com.wildberries.ru",              // Wildberries (проверено на устройстве)
 
         // --- Аптеки ---
         "ru.apteka",                       // Аптека.ру (проверено на устройстве)
-        "ru.uteka.app",                    // Утека
+        "ru.uteka.app",                    // Ютека
         "ru.medicine_it.medonline",        // Медицина онлайн
-        "com.apteka.sklad",                // Аптечная сеть (проверено на устройстве)
+        "com.apteka.sklad",                // Аптека Апрель (проверено на устройстве)
         "ru.apteka.aptekaonline",          // Аптека.ру, прежнее имя пакета
-        "ru.aptekaaprel.android",          // Аптека Апрель
 
         // --- Госуслуги и государственные сервисы ---
         "ru.gosuslugi.goskey",             // Госключ (ЭП)
@@ -111,18 +167,19 @@ object RussianDirectApps {
         "ru.rostel",                       // Госуслуги
         "ru.crptech.mark",                 // Честный знак
         "com.gnivts.selfemployed",         // Мой налог (ФНС, самозанятые)
-        "ru.nalog.nalogru",                // ФНС — Налоги ФЛ
-        "ru.mfc.mfcmain",                  // Мои документы (МФЦ)
-        "ru.mos.emias.app",                // ЕМИАС (Москва)
-        "ru.dnevnik.android",              // Дневник / МЭШ
-        "ru.rzd.rzd",                      // РЖД
-        "ru.russianpost.digitaloffice",    // Почта России
+        "ru.fns.lkfl",                     // Налоги ФЛ (было ru.nalog.nalogru — нет такого)
+        "ru.mfc.mfcmain",                  // Мои документы (МФЦ) — в RuStore не нашлось
+        "com.programmisty.emiasapp",       // ЕМИАС.ИНФО, Москва (было ru.mos.emias.app)
+        "ru.dnevnik.app",                  // Дневник.ру (было ru.dnevnik.android)
+        "ru.mes.dnevnik",                  // Дневник МЭШ
+        "ru.rzd.pass",                     // РЖД Пассажирам (было ru.rzd.rzd)
+        "com.octopod.russianpost.client.android", // Почта России (было ru.russianpost.digitaloffice)
 
         // --- Яндекс (кроме Браузера и главного приложения — см. EXCLUDED) ---
         "ru.yandex.yandexmaps",            // Яндекс Карты
-        "ru.yandex.mobile.navigator",      // Яндекс Навигатор
+        "ru.yandex.yandexnavi",            // Яндекс Навигатор (было ru.yandex.mobile.navigator)
         "ru.yandex.taxi",                  // Яндекс Go / Такси
-        "ru.yandex.eda",                   // Яндекс Еда
+        "ru.foodfox.client",               // Яндекс Еда (было ru.yandex.eda)
         "ru.yandex.market",                // Яндекс Маркет, прежнее имя пакета
         "ru.beru.android",                 // Яндекс Маркет (проверено на устройстве)
         "ru.yandex.translate",             // Яндекс Переводчик
@@ -130,10 +187,10 @@ object RussianDirectApps {
         "ru.yandex.disk",                  // Яндекс Диск
         "ru.yandex.mail",                  // Яндекс Почта
         "com.yandex.bank",                 // Яндекс Пэй / Яндекс Банк (также в BANKING)
-        "ru.yandex.drive",                 // Яндекс Драйв (каршеринг)
+        "com.yandex.mobile.drive",         // Яндекс Драйв (было ru.yandex.drive)
         "ru.yandex.metro",                 // Яндекс Метро
-        "ru.yandex.lavka",                 // Яндекс Лавка
-        "ru.yandex.superapp",              // Яндекс (суперапп без Алисы)
+        "com.yandex.lavka",                // Яндекс Лавка (было ru.yandex.lavka)
+        "ru.yandex.superapp",              // Яндекс (суперапп без Алисы) — в RuStore не нашлось
         "ru.yandex.telemost",              // Яндекс Телемост (конференции)
         "ru.yandex.weatherplugin",         // Яндекс Погода
         "com.yandex.browser",              // Яндекс Браузер
@@ -144,7 +201,7 @@ object RussianDirectApps {
 
         // --- VK ---
         "com.vkontakte.android",           // ВКонтакте
-        "com.vk.video",                    // VK Видео
+        "com.vk.vkvideo",                  // VK Видео (было com.vk.video — нет такого)
         "com.vk.im",                       // VK Мессенджер
         "ru.vk.store",                     // RuStore (магазин приложений VK)
 
@@ -155,12 +212,12 @@ object RussianDirectApps {
         "ru.rutube.app",                   // Rutube
 
         // --- Мессенджеры ---
-        "ru.oneme.app",                    // МАКС (MAX) — российский мессенджер
+        "ru.oneme.app",                    // МАКС (MAX) — проверено на Pixel 4a
 
         // --- Такси ---
-        "ru.citymobil.driver",             // Ситимобил
-        "ru.taxovichkof.client",           // Таксовичкоф
-        "taxi.maxim.driver",               // Maxim (такси), приложение водителя
+        "ru.citymobil.driver",             // Ситистарт (бывший Ситимобил), приложение водителя
+        "ru.taxovichkof.android",          // Таксовичкоф (было ru.taxovichkof.client)
+        "com.taxsee.driver",               // Maxim, приложение водителя (было taxi.maxim.driver)
         "com.taxsee.taxsee",               // Такси Максим (проверено на устройстве)
 
         // --- Карты и навигация ---
@@ -182,11 +239,12 @@ object RussianDirectApps {
 
         // --- Названы владельцем отдельно ---
         //
-        // Эти четыре не попадают ни в одну из прежних категорий, но нужны по той
+        // Эти не попадают ни в одну из прежних категорий, но нужны по той
         // же причине: сервис привязан к российскому адресу и с зарубежного либо
         // не открывается, либо требует лишних подтверждений. Имена проверены на
-        // Pixel 4a через `pm list packages -3`.
+        // Pixel 4a через `pm list packages -3`; основной «Литрес» — по каталогу RuStore.
         "ru.litres.android.international", // Литрес: Книги
+        "ru.litres.android",               // Литрес: Книги и аудиокниги
         "com.dartit.RTcabinet",            // Мой Ростелеком
         "ru.pyaterochka.app.browser",      // Пятёрочка
         "ru.yandex.uber",                  // Uber Russia (движок Яндекс Go)
@@ -201,36 +259,12 @@ object RussianDirectApps {
         "ru.beeline.services",             // Билайн
         "ru.mts.mymts",                    // МТС
         "ru.tinkoff.mvno",                 // Т-Мобайл
-        // Название дал владелец: «Миранда» — MVNO Ростелекома. Ни на одном из
-        // подключённых устройств пакет не стоит, так что на устройстве имя не
-        // сверялось, в отличие от пяти строк выше.
-        "com.mm.rk",                       // Миранда (MVNO Ростелекома)
-
-        // --- Имена, названные владельцем и на устройстве не сверенные ---
-        //
-        // Восемь пакетов, добавленных по просьбе владельца, на подключённых
-        // Pixel 4a и Mi A1 не стоят ни один, поэтому `pm list packages` их не
-        // подтвердил — как и у «Миранды» выше. Имена взяты в том виде, в каком
-        // их дал владелец; если какое-то окажется неточным, оно просто ни с чем
-        // не совпадёт и ничего не сломает, но и работать не будет: `contains`
-        // сверяет строку целиком. Сверить их стоит на телефоне, где эти
-        // приложения есть:
-        //   ru.yandex.telemost · ru.yandex.weatherplugin · ru.vk.store ·
-        //   ru.rutube.app · ru.urentbike.app · com.punicapp.whoosh ·
-        //   com.ustasapp · com.dlilb.profplus
+        "com.mm.rk",                       // Миранда (MVNO Ростелекома), сверено по RuStore
     )
 
     // -------------------------------------------------------------------------
     // Публичный API
     // -------------------------------------------------------------------------
-
-    /**
-     * Возвращает `true`, если [packageName] является банковским приложением из закрытого списка.
-     *
-     * Проверка источника установки (например, RuStore / Google Play) остаётся **за вызывающей
-     * стороной** — этот метод только сверяет имя пакета.
-     */
-    fun isBanking(packageName: String): Boolean = packageName in BANKING
 
     /**
      * Возвращает `true`, если [packageName] присутствует в закрытом списке прямых (non-VPN)

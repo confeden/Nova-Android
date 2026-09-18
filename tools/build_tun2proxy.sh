@@ -27,7 +27,7 @@ API="${TUN2PROXY_API:-24}"
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work_dir="${TUN2PROXY_SRC:-$root_dir/build/deps/tun2proxy}"
-out_dir="$root_dir/app/src/main/jniLibs"
+out_dir="${TUN2PROXY_OUT:-$root_dir/app/src/main/jniLibs}"
 
 if [ -z "${ANDROID_NDK_HOME:-}" ]; then
     echo "ANDROID_NDK_HOME не задан" >&2
@@ -89,12 +89,37 @@ for flag in "${rust_flags[@]}"; do
 done
 export CARGO_ENCODED_RUSTFLAGS="$encoded"
 
+# target/ от прошлых сборок.
+#
+# Сам cargo старых артефактов не удаляет никогда. Смена тулчейна, флагов
+# компилятора, Cargo.toml (профиль выпуска приезжает патчем, D24) или Cargo.lock
+# меняет хеши юнитов, и рядом с прежним комплектом ложится новый, а прежний лежит
+# вечно: три такие смены довели target/ до 2,6 ГБ, из которых живой была треть.
+#
+# Поэтому target/ помнит, из каких входов собран. Не совпало — прежний target/
+# целиком от другой сборки: cargo всё равно собрал бы всё заново, так что удалить
+# его ничего не стоит. Совпало — не трогаем, и повторная сборка остаётся быстрой.
+# Разобрать target/ поштучно по отчёту cargo нельзя: cargo-ndk забирает его
+# JSON-сообщения себе и наружу не отдаёт.
+target_dir="$work_dir/target"
+build_inputs="$(
+    cd "$work_dir"
+    { rustc -vV; cargo -V; printf '%s\n' "$CARGO_ENCODED_RUSTFLAGS"; cat Cargo.toml Cargo.lock; } \
+        | git hash-object --stdin
+)"
+if [ -d "$target_dir" ] && [ "$(cat "$target_dir/.nova-build-inputs" 2>/dev/null)" != "$build_inputs" ]; then
+    echo "==> target/ собран из других входов (тулчейн, флаги, Cargo.toml или Cargo.lock) — удаляем"
+    rm -rf "$target_dir"
+fi
+
 echo "==> cargo ndk (arm64-v8a, armeabi-v7a)"
 (
     cd "$work_dir"
     cargo ndk -t arm64-v8a -t armeabi-v7a --platform "$API" build --release --locked
 )
+printf '%s\n' "$build_inputs" >"$target_dir/.nova-build-inputs"
 
+mkdir -p "$out_dir/arm64-v8a" "$out_dir/armeabi-v7a"
 cp "$work_dir/target/aarch64-linux-android/release/libtun2proxy.so" "$out_dir/arm64-v8a/libtun2proxy.so"
 cp "$work_dir/target/armv7-linux-androideabi/release/libtun2proxy.so" "$out_dir/armeabi-v7a/libtun2proxy.so"
 ls -l "$out_dir/arm64-v8a/libtun2proxy.so" "$out_dir/armeabi-v7a/libtun2proxy.so"

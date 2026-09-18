@@ -1,25 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Подложка уведомления об обновлении.
+    Подложка уведомления об обновлении — нижний слой из трёх: сплошная тёмная
+    основа. Над ней `bg_notification_update_glow.xml` (диагональная полоса) и
+    `bg_notification_update_stroke.xml` (обводка).
 
-    Градиент по диагонали, а не сплошная заливка: уведомление стоит в общей ленте
-    рядом с системными, и единственное, чем оно может отличаться, — фон. Углы
-    скруглены под скругление самой карточки уведомления, чтобы подложка не
-    выпирала из неё прямыми углами.
+    Цвета здесь только запасные: код красит каждый слой под акцент темы
+    (`ImageView.setColorFilter`, `NovaNotificationPalette`), а режим SRC_ATOP
+    меняет цвет и сохраняет альфу слоя — поэтому градиент полосы выражен
+    прозрачностью, а не цветом. Литералы — прежний вид Aurora mint.
+
+    Фон, а не сплошная заливка карточки: уведомление стоит в общей ленте рядом с
+    системными, и единственное, чем оно может отличаться, — фон. Углы скруглены
+    под скругление самой карточки уведомления. `<size>` нет намеренно — см.
+    `bg_notification_disconnect.xml`.
 -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
 
-    <gradient
-        android:angle="315"
-        android:startColor="#FF0F3D2E"
-        android:centerColor="#FF10664A"
-        android:endColor="#FF0B2A4A"
-        android:type="linear" />
+    <solid android:color="#FF0F3D2E" />
 
     <corners android:radius="14dp" />
-
-    <stroke
-        android:width="1dp"
-        android:color="#4D5AE282" />
 </shape>

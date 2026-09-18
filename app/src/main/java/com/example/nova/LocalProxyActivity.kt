@@ -417,7 +417,7 @@ class LocalProxyActivity : AppCompatActivity() {
     private fun copyToClipboard(label: String, value: String) {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
         clipboard.setPrimaryClip(ClipData.newPlainText(label, value))
-        Toast.makeText(this, "$label скопирован", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, NovaLanguage.tr(this, "$label скопирован"), Toast.LENGTH_SHORT).show()
     }
 
     private fun resolveDisplayHost(): String {

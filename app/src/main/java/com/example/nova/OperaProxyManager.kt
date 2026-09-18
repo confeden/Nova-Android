@@ -534,7 +534,12 @@ object OperaProxyManager {
             val cachedEndpoints = pinnedEndpoints
                 .filterNot { clientData.isOperaPinnedEndpointCoolingDown(requestedCountry, it) }
                 .take(2)
-            val apiRelays = apiRelays()
+            // После «ключ погашен» свой релей молчит паузу (P53). Opera была
+            // единственным потребителем, который о признаке не знал: запуск и discovery
+            // шли в релей на каждой попытке. Отказ она теперь узнаёт сама — ответ
+            // релея на `CONNECT` читает мост [OperaApiRelayBridge].
+            val relayPaused = NovaRelay.isPaused()
+            val apiRelays = if (relayPaused) emptyList() else apiRelays()
             val customApiProxy = resolveCustomApiProxy(clientData, launchLogger)
             val launchPlans = buildList {
                 val seenPlans = linkedSetOf<String>()
@@ -599,6 +604,11 @@ object OperaProxyManager {
                     launchLogger(
                         "Вызовы API SurfEasy для $requestedCountry сначала пробуем через свои релеи " +
                             "(${apiRelays.size}): туннель при этом набирается напрямую."
+                    )
+                } else if (relayPaused) {
+                    launchLogger(
+                        "Свои релеи API SurfEasy на паузе ещё ${NovaRelay.describePause()}: ключ этой сборки " +
+                            "погашен сервером, discover идёт без них. ${NovaRelay.OUTDATED_MESSAGE}."
                     )
                 } else {
                     launchLogger(
@@ -719,6 +729,12 @@ object OperaProxyManager {
                     !allApiProfilesCoolingDown &&
                     clientData.isOperaApiProfileCoolingDown(requestedCountry, apiProfile.id)
                 ) {
+                    continue
+                }
+                if (plan.apiRelay.isNotEmpty() && NovaRelay.isPaused()) {
+                    // Отказ «ключ погашен» пришёл по ходу этого же запуска: остальные
+                    // планы через релей получили бы тот же `407`.
+                    launchLogger("Свой релей API на паузе: ключ этой сборки погашен сервером, попытку через него пропускаем.")
                     continue
                 }
                 val planStartedAt = System.currentTimeMillis()
@@ -1276,7 +1292,15 @@ object OperaProxyManager {
             // Пара «наш релей (через мост)» — «прокси пользователя (напрямую)»;
             // обе пустые означают прямой путь.
             if (customApiProxy.isNotEmpty()) add("" to customApiProxy)
-            apiRelays().forEach { relay -> add(relay to "") }
+            // Пауза после «ключ погашен» — та же, что и при запуске туннеля (P53).
+            if (NovaRelay.isPaused()) {
+                logger(
+                    "Свои релеи API SurfEasy на паузе ещё ${NovaRelay.describePause()}: ключ этой сборки " +
+                        "погашен сервером, discovery идёт без них."
+                )
+            } else {
+                apiRelays().forEach { relay -> add(relay to "") }
+            }
             add("" to "")
         }
         val discoveryPasses = apiRoutes.flatMap { route ->
@@ -1319,6 +1343,10 @@ object OperaProxyManager {
                 appendOperaApiProfileArgs(args, apiProfile)
                 if (fakeSni.isNotBlank()) {
                     args += listOf("-fake-SNI", fakeSni)
+                }
+                if (apiRelay.isNotEmpty() && NovaRelay.isPaused()) {
+                    logger("Свой релей API на паузе: ключ этой сборки погашен сервером, discovery через него пропускаем.")
+                    continue
                 }
                 if (apiRelay.isNotEmpty()) {
                     val bridged = OperaApiRelayBridge.start(apiRelay, logger)

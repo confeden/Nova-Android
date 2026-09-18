@@ -36,6 +36,7 @@ class NovaTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
+        LogManager.setAppContext(this)
         val clientData = ClientData(this)
         val currentState = resolveEffectiveState(clientData)
 

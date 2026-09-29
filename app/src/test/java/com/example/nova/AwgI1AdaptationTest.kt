@@ -249,4 +249,63 @@ class AwgI1AdaptationTest {
         // в минус. Это защита от испорченного файла подбора, а не от нормального хода.
         assertTrue(AwgI1Adaptation.nextSniForProfile(pool, "", -3) in pool)
     }
+
+    // Начала настоящих `I1` из `warp_verified_seeds.json`: у SIP-семени — ASCII
+    // «INVITE sip:bob@biloxi.com SIP/2.» (пример из RFC 3261), у QUIC-семени — 0xce и
+    // версия 00000001.
+    private val sipSeedI1 = "<b 0x494e56495445207369703a626f624062696c6f78692e636f6d205349502f322e>"
+    private val quicSeedI1 = "<b 0xce000000010897a297ecc34cd6dd000044d0ec2e>"
+    private val quicC7SeedI1 = "<b 0xc7000000010809a1ed4edbbe7615000044d017a6>"
+
+    @Test
+    fun `на сотовой сети QUIC-прикрытие идёт раньше SIP и профиля без I1`() {
+        // P62: на МегаФоне SIP-звонок не прошёл ни разу из 72, QUIC — 53 из 60.
+        assertEquals(0, AwgI1Adaptation.cellularMaskRank(true, "I1 = $quicSeedI1", "188.114.97.3"))
+        assertEquals(1, AwgI1Adaptation.cellularMaskRank(true, "I1 = $sipSeedI1", "8.34.146.3"))
+        // Без `I1` на МегаФоне тоже 0 из 24 — это не «нейтрально», а хвост.
+        assertEquals(1, AwgI1Adaptation.cellularMaskRank(true, null, "8.47.69.6"))
+    }
+
+    @Test
+    fun `на сотовой сети точка входа по имени уходит в хвост даже с QUIC`() {
+        // Такие семена — `engage.cloudflareclient.com` на портах 2408 и 7103: имя на
+        // МегаФоне однажды не разрешилось, и первая попытка съела 83 с.
+        assertEquals(1, AwgI1Adaptation.cellularMaskRank(true, quicSeedI1, "engage.cloudflareclient.com"))
+        assertEquals(0, AwgI1Adaptation.cellularMaskRank(true, quicSeedI1, "[2606:4700:d0::a29f:c001]"))
+    }
+
+    @Test
+    fun `второе семейство QUIC-семян тоже идёт вперёд, а случайный I1 — нет`() {
+        // 17 из 33 QUIC-семян начинаются с 0xc7, а не с 0xce.
+        assertEquals(0, AwgI1Adaptation.cellularMaskRank(true, "I1 = $quicC7SeedI1", "8.39.125.9"))
+        // Случайные байты вместо пакета — не QUIC, как бы длинны они ни были.
+        assertEquals(1, AwgI1Adaptation.cellularMaskRank(true, "I1 = <r 1250>", "8.39.125.9"))
+    }
+
+    @Test
+    fun `вне сотовой сети прикрытие порядок не меняет`() {
+        // На домашнем Ростелекоме проходят оба прикрытия: очередь там решают замеры.
+        assertEquals(0, AwgI1Adaptation.cellularMaskRank(false, sipSeedI1, "8.34.146.3"))
+        assertEquals(0, AwgI1Adaptation.cellularMaskRank(false, quicSeedI1, "engage.cloudflareclient.com"))
+        assertEquals(0, AwgI1Adaptation.cellularMaskRank(false, null, "8.47.69.6"))
+    }
+
+    @Test
+    fun `адрес отличается от имени`() {
+        assertTrue(AwgI1Adaptation.isIpLiteralHost("162.159.192.1"))
+        assertTrue(AwgI1Adaptation.isIpLiteralHost("2606:4700:d0::a29f:c001"))
+        assertFalse(AwgI1Adaptation.isIpLiteralHost("engage.cloudflareclient.com"))
+        assertFalse(AwgI1Adaptation.isIpLiteralHost("162.159.192"))
+        assertFalse(AwgI1Adaptation.isIpLiteralHost("162.159.192.256"))
+    }
+
+    @Test
+    fun `общее прикрытие берётся QUIC, даже если первым идёт SIP-семя`() {
+        // Первые пять семян — SIP; раньше запасным `I1` становилось первое по списку.
+        assertEquals(quicSeedI1, AwgI1Adaptation.preferredSharedMask(listOf(sipSeedI1, " $quicSeedI1 ")))
+        // Без единого QUIC — лучше SIP, чем ничего: без `I1` не прошло ни на одной из
+        // двух измеренных сетей.
+        assertEquals(sipSeedI1, AwgI1Adaptation.preferredSharedMask(listOf("", sipSeedI1)))
+        assertEquals("", AwgI1Adaptation.preferredSharedMask(listOf("", "  ")))
+    }
 }

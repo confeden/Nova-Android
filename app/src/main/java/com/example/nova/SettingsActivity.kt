@@ -437,6 +437,8 @@ class SettingsActivity : AppCompatActivity() {
 
         val rbExitTor = findViewById<RadioButton>(R.id.rb_exit_tor)
 
+        val rbExitDns = findViewById<RadioButton>(R.id.rb_exit_dns)
+
         val rbExitMasque = findViewById<RadioButton>(R.id.rb_exit_masque)
 
         val rbExitProton = findViewById<RadioButton>(R.id.rb_exit_proton)
@@ -689,6 +691,8 @@ class SettingsActivity : AppCompatActivity() {
 
             rbExitTor,
 
+            rbExitDns,
+
             swTrafficMask,
 
             rbMaskAuto,
@@ -831,6 +835,13 @@ class SettingsActivity : AppCompatActivity() {
         // мостам Tor, и её достаточно позвать напрямую.
 
         refreshTorBridgeStatus()
+
+        applySettingsFrost()
+        refreshDnsProfilesNote()
+
+        findViewById<LinearLayout>(R.id.row_dns_endpoint)?.setOnClickListener {
+            showDnsProfilesDialog()
+        }
 
         rowWarpConfigs.setOnClickListener {
 
@@ -2821,6 +2832,413 @@ class SettingsActivity : AppCompatActivity() {
     }
 
 
+
+    /**
+     * Профили для DNS: список, импорт, порядок, удаление.
+     *
+     * ## Почему список, а не поля
+     *
+     * Прежний диалог просил зону, открытый ключ, тип записи и предел QNAME. Всё
+     * это правда нужно туннелю — и ровно ничего из этого человек не знает: он
+     * получает **ссылку** в канале и вставляет её. Поэтому ввод здесь один,
+     * ссылкой, а разобранное показывается уже готовым профилем.
+     *
+     * ## Почему порядок видимый
+     *
+     * Подключаемся первым сверху, который готов. Значит порядок — это приоритет,
+     * и двигать его человек должен сам, а не угадывать, какой из трёх сработает.
+     */
+    /**
+     * Куда вернуть текст файла, выбранного в системном выборе.
+     *
+     * Поле, а не параметр: `registerForActivityResult` обязан быть зарегистрирован
+     * до `onStart`, то есть в конструкторе, а диалог с профилями рождается много
+     * позже. Между ними и лежит этот обработчик. Он одноразовый — снимается
+     * сразу, иначе повторный выбор ушёл бы в закрытый диалог.
+     */
+    private var pendingDnsListImport: ((String) -> Unit)? = null
+
+    /** Потолок файла со списком адресов: 256 КБ — это десятки тысяч строк. */
+    private val DNS_LIST_FILE_LIMIT = 256 * 1024
+
+    private val dnsListFileLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        val sink = pendingDnsListImport
+        pendingDnsListImport = null
+        if (uri == null || sink == null) return@registerForActivityResult
+        // Чтение в фоне (I13): файл лежит у чужого провайдера, и ответ он может
+        // отдавать сколько угодно.
+        lifecycleScope.launch(Dispatchers.IO) {
+            val text = runCatching {
+                contentResolver.openInputStream(uri)?.use { stream ->
+                    // Подборка адресов — это килобайты. Всё, что больше, либо не
+                    // список, либо попытка накормить разбор мегабайтами.
+                    val limited = ByteArray(DNS_LIST_FILE_LIMIT + 1)
+                    var read = 0
+                    while (read < limited.size) {
+                        val n = stream.read(limited, read, limited.size - read)
+                        if (n <= 0) break
+                        read += n
+                    }
+                    if (read > DNS_LIST_FILE_LIMIT) null
+                    else String(limited, 0, read, Charsets.UTF_8)
+                }
+            }.getOrNull()
+            withContext(Dispatchers.Main) {
+                if (isFinishing || isDestroyed) return@withContext
+                if (text.isNullOrBlank()) {
+                    Toast.makeText(
+                        this@SettingsActivity,
+                        "Не удалось прочитать файл: он пуст, недоступен или слишком велик",
+                        Toast.LENGTH_LONG
+                    ).show()
+                } else {
+                    sink(text)
+                }
+            }
+        }
+    }
+
+    /** Открывает системный выбор файла и отдаёт его содержимое в [onText]. */
+    private fun pickDnsListFile(onText: (String) -> Unit) {
+        pendingDnsListImport = onText
+        // `*/*`, а не `text/*`: файл со списком приходит из мессенджера, и его
+        // MIME там сплошь и рядом `application/octet-stream` — по маске `text/*`
+        // человек просто не увидел бы собственный файл. Содержимое всё равно
+        // проверяет разбор.
+        val opened = runCatching { dnsListFileLauncher.launch(arrayOf("*/*")) }.isSuccess
+        if (!opened) {
+            pendingDnsListImport = null
+            Toast.makeText(this, "На устройстве нет выбора файлов", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun showDnsProfilesDialog() {
+        val density = resources.displayMetrics.density
+        val pad = (16 * density).toInt()
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad, pad, 0)
+        }
+        val scroll = android.widget.ScrollView(this).apply { addView(container) }
+
+        var state = DnsProfileStore.read(this)
+
+        fun persist() {
+            if (!DnsProfileStore.write(this, state)) {
+                Toast.makeText(this, "Не удалось сохранить список профилей", Toast.LENGTH_LONG).show()
+            }
+            refreshDnsProfilesNote()
+        }
+
+        fun hint(text: String, top: Int = 8) = TextView(this).apply {
+            this.text = text
+            textSize = 12f
+            setTextColor(NovaTheme.color(this@SettingsActivity, R.attr.novaTextHint))
+            setPadding(0, (top * density).toInt(), 0, 0)
+        }
+
+        fun title(text: String) = TextView(this).apply {
+            this.text = text
+            textSize = 14f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setTextColor(NovaTheme.color(this@SettingsActivity, R.attr.novaTextTitle))
+            setPadding(0, (16 * density).toInt(), 0, (4 * density).toInt())
+        }
+
+        fun squareButton(label: String, onClick: () -> Unit) = android.widget.TextView(this).apply {
+            text = label
+            textSize = 17f
+            gravity = android.view.Gravity.CENTER
+            val side = (34 * density).toInt()
+            minWidth = side
+            minHeight = side
+            setTextColor(NovaTheme.color(this@SettingsActivity, R.attr.novaTextTitle))
+            setOnClickListener { onClick() }
+        }
+
+        lateinit var render: () -> Unit
+
+        fun profileRow(profile: DnsProfile): View {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(0, (6 * density).toInt(), 0, (6 * density).toInt())
+            }
+            val selectable = state.selectable(profile)
+            val active = state.active()?.id == profile.id
+            val texts = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            }
+            texts.addView(TextView(this@SettingsActivity).apply {
+                text = (if (active) "● " else "") + profile.name
+                textSize = 14f
+                setTextColor(NovaTheme.color(this@SettingsActivity, R.attr.novaTextTitle))
+                alpha = if (selectable && profile.usable) 1f else 0.5f
+            })
+            // Причина всегда названа: выключенный пункт без объяснения — это
+            // тупик, из которого человеку некуда идти (I4).
+            val note = when {
+                !selectable -> "выключен, пока есть свои профили"
+                profile.blockedReason.isNotEmpty() -> profile.blockedReason
+                profile.resolvers.isNotEmpty() -> "${profile.domain}, своих адресов ${profile.resolvers.size}"
+                else -> profile.domain
+            }
+            texts.addView(hint(note, top = 1))
+            row.addView(texts)
+
+            row.addView(squareButton("↑") {
+                state = state.withProfileMoved(profile.id, -1); persist(); render()
+            })
+            row.addView(squareButton("↓") {
+                state = state.withProfileMoved(profile.id, 1); persist(); render()
+            })
+            if (!profile.builtIn) {
+                row.addView(squareButton("✕") {
+                    state = state.withProfileRemoved(profile.id); persist(); render()
+                })
+            }
+            return row
+        }
+
+        fun listRow(list: DnsResolverList): View {
+            val chosen = state.resolverListId == list.id
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(0, (5 * density).toInt(), 0, (5 * density).toInt())
+                setOnClickListener {
+                    state = state.copy(resolverListId = if (chosen) "" else list.id)
+                    persist(); render()
+                }
+            }
+            row.addView(TextView(this@SettingsActivity).apply {
+                text = (if (chosen) "● " else "○ ") + list.name + "  (${list.addresses.size})"
+                textSize = 14f
+                setTextColor(NovaTheme.color(this@SettingsActivity, R.attr.novaTextTitle))
+                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            })
+            if (!list.builtIn) {
+                row.addView(squareButton("✕") {
+                    state = state.copy(
+                        importedLists = state.importedLists.filterNot { it.id == list.id },
+                        resolverListId = if (chosen) "" else state.resolverListId,
+                    )
+                    persist(); render()
+                })
+            }
+            return row
+        }
+
+        val status = hint("")
+        val linkField = android.widget.EditText(this).apply {
+            setSingleLine(false)
+            setLines(2)
+            textSize = 13f
+            setTextColor(NovaTheme.color(this@SettingsActivity, R.attr.novaTextTitle))
+        }
+
+        /**
+         * Принимает вставленный или прочитанный из файла текст.
+         *
+         * Один вход на оба источника намеренно: файл и буфер обмена приносят
+         * ровно одно и то же — либо ссылку профиля, либо подборку адресов, — и
+         * два разных разбора разошлись бы на первой же правке.
+         *
+         * @param quiet при разборе по мере ввода неудача — обычное дело (человек
+         *        ещё не дописал), и в этом случае её показывают строкой, а не
+         *        всплывающим окном.
+         */
+        fun absorb(raw: String, quiet: Boolean) {
+            when (val parsed = DnsProfileImport.parse(raw)) {
+                is DnsProfileImport.Result.Imported -> {
+                    val id = "p" + System.currentTimeMillis().toString(36)
+                    val profile = DnsProfileList.fromImport(parsed.profile, id)
+                    state = state.withProfileAdded(profile)
+                    persist()
+                    linkField.setText("")
+                    status.text = "Добавлен профиль: ${profile.name}"
+                    render()
+                }
+
+                is DnsProfileImport.Result.Resolvers -> {
+                    val id = "l" + System.currentTimeMillis().toString(36)
+                    val before = state.importedLists.size
+                    val name = state.nextImportedListName("Свой список")
+                    state = state.withListAdded(DnsResolverList(id, name, parsed.addresses))
+                    persist()
+                    linkField.setText("")
+                    status.text = if (state.importedLists.size == before) {
+                        // Такие же адреса уже лежали: выбрали их, а не завели двойник.
+                        "Такой список уже есть — он и выбран"
+                    } else {
+                        "Добавлен список адресов: $name, ${parsed.addresses.size} шт."
+                    }
+                    render()
+                }
+
+                is DnsProfileImport.Result.Failure -> {
+                    status.text = parsed.reason
+                    if (!quiet) {
+                        Toast.makeText(this@SettingsActivity, parsed.reason, Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+
+        val fileButton = TextView(this).apply {
+            text = "Импорт списка из файла"
+            textSize = 13f
+            setPadding(0, (10 * density).toInt(), 0, (10 * density).toInt())
+            setTextColor(NovaTheme.color(this@SettingsActivity, R.attr.novaAccent))
+            setOnClickListener { pickDnsListFile { text -> absorb(text, quiet = false) } }
+        }
+
+        render = {
+            container.removeAllViews()
+            container.addView(hint("Вставьте ссылку профиля (slipnet://, stormdns://, cottendns://) или список адресов DNS", top = 0))
+            container.addView(linkField)
+            container.addView(status)
+            container.addView(title("Профили"))
+            state.profiles.forEach { container.addView(profileRow(it)) }
+            container.addView(title("Список адресов DNS"))
+            container.addView(hint("Через них идут запросы туннеля. Адреса самой сети и национальный резолвер добавляются всегда.", top = 0))
+            state.allLists().forEach { container.addView(listRow(it)) }
+            // Кнопка под списками: свой список — это продолжение того, что над
+            // ней, а не отдельное действие где-то сверху.
+            container.addView(fileButton)
+            container.addView(hint("Текстовый файл: по одному адресу в строке или через запятую. Порт можно не указывать.", top = 0))
+        }
+
+        // Разбор по мере ввода: человек вставляет ссылку и сразу видит, что
+        // именно приложение в ней узнало.
+        linkField.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(edited: android.text.Editable?) {
+                val raw = edited?.toString().orEmpty()
+                if (raw.isBlank()) {
+                    status.text = ""
+                    return
+                }
+                absorb(raw, quiet = true)
+            }
+        })
+
+        render()
+
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("Профили для DNS")
+            .setView(scroll)
+            .setPositiveButton("Готово", null)
+            .showNova()
+        frostDialogPanel(dialog)
+    }
+
+    /**
+     * Лёд на экране настроек.
+     *
+     * Тот же слой и то же правило, что на главном: промерзает интерфейс, а не
+     * одна его половина. Анимации здесь нет намеренно — на настройки приходят
+     * уже с выбранным режимом, и пятисекундное намерзание при каждом открытии
+     * читалось бы как задержка отрисовки.
+     */
+    /**
+     * Лёд на одном пункте настроек — том, который про DNS.
+     *
+     * Не на всём экране: мёрзнет то, что относится к режиму, а не интерфейс
+     * целиком. Анимации здесь нет намеренно — на настройки приходят уже с
+     * выбранным режимом, и намерзание при каждом открытии читалось бы как
+     * задержка отрисовки.
+     */
+    private fun applySettingsFrost() {
+        val overlay = findViewById<FrostOverlayView>(R.id.frost_dns_row) ?: return
+        val region = RegionTransportPolicy.normalizeKnown(clientData.getExitRegionPreference())
+        if (region != ConnectionSelectorPolicy.CHIP_DNS) {
+            overlay.clearFrost()
+            return
+        }
+        // Лёд подрезается по форме самой карточки: слой прямоугольный, а строка
+        // скруглена, и без этого иней торчал бы углами за её края.
+        val radius = 16f * resources.displayMetrics.density
+        overlay.outlineProvider = object : android.view.ViewOutlineProvider() {
+            override fun getOutline(view: View, outline: android.graphics.Outline) {
+                outline.setRoundRect(0, 0, view.width, view.height, radius)
+            }
+        }
+        overlay.clipToOutline = true
+        // Строка низкая, а подпись под ней — 12sp: полной плотностью лёд её
+        // закрывал. Поэтому здесь он реже и прозрачнее (READABLE_*).
+        overlay.setIntensity(
+            FrostOverlayView.READABLE_FLAKE_DENSITY,
+            FrostOverlayView.READABLE_OPACITY,
+        )
+        overlay.post {
+            overlay.setClearZones(emptyList())
+            overlay.freezeFrom(overlay.width / 2f, overlay.height / 2f, durationMs = 1L)
+        }
+    }
+
+    /**
+     * Лёд в самом диалоге профилей — намерзает, пока диалог открывается.
+     *
+     * Слой кладётся последним ребёнком содержимого окна, а не в разметку
+     * диалога: разметку здесь пересобирает [render] на каждый импорт, и лёд в
+     * ней пришлось бы каждый раз заново класть и заново запускать. Окно живёт
+     * дольше содержимого, поэтому лёд лежит на окне.
+     *
+     * Плотность та же, что у строки настроек: в диалоге мелкого текста ещё
+     * больше — подписи профилей, причины, по которым профиль не выбран, — и
+     * полная плотность превратила бы их в шум.
+     */
+    private fun frostDialogPanel(dialog: android.app.AlertDialog) {
+        val content = dialog.window?.findViewById<View>(android.R.id.content) as? FrameLayout ?: return
+        val overlay = FrostOverlayView(this)
+        content.addView(
+            overlay,
+            FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        // Тот же радиус, что у фона диалога (`bg_nova_dialog_*`): без подрезки
+        // иней торчал бы углами за скруглённую панель.
+        val radius = 16f * resources.displayMetrics.density
+        overlay.outlineProvider = object : android.view.ViewOutlineProvider() {
+            override fun getOutline(view: View, outline: android.graphics.Outline) {
+                outline.setRoundRect(0, 0, view.width, view.height, radius)
+            }
+        }
+        overlay.clipToOutline = true
+        overlay.setIntensity(
+            FrostOverlayView.READABLE_FLAKE_DENSITY,
+            FrostOverlayView.READABLE_OPACITY,
+        )
+        // Холод идёт сверху вниз: диалог открылся из строки, которая уже во
+        // льду, и продолжение движения читается как одно целое.
+        overlay.post {
+            overlay.freezeFrom(
+                overlay.width / 2f,
+                0f,
+                durationMs = FrostOverlayView.DIALOG_FREEZE_MS,
+            )
+        }
+    }
+
+    /** Подпись под строкой настройки: сколько профилей и какой сейчас работает. */
+    private fun refreshDnsProfilesNote() {
+        val note = findViewById<TextView>(R.id.tv_dns_endpoint_note) ?: return
+        val state = DnsProfileStore.read(this)
+        val own = state.profiles.count { !it.builtIn }
+        val active = state.active()
+        note.text = when {
+            active != null -> "Работает: ${active.name}" + if (own > 0) ", всего профилей ${own + 1}" else ""
+            own > 0 -> "Профилей $own, ни один пока не подключается"
+            else -> "Импорт профилей по ссылке и списки адресов DNS"
+        }
+    }
 
     private fun requestDisableBatteryOptimization() {
 

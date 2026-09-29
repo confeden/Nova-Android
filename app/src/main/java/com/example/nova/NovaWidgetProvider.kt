@@ -8,17 +8,14 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.widget.RemoteViews
-import androidx.core.content.ContextCompat
 
 /**
  * Виджет рабочего стола: две круглые кнопки, одно касание на действие.
  *
- * Левая кнопка включает и выключает туннель **не открывая приложение** — тем же
- * набором намерений, что и плитка в шторке ([NovaTileService]). Повторять их
- * пришлось буквально: намерение подключения несёт с собой весь срез настроек,
- * потому что служба применяет его через `commit()`, и урезанное намерение стёрло
- * бы выбор человека (режим импортированных профилей, маскировка, раздельное
- * туннелирование).
+ * Левая кнопка включает и выключает туннель **не открывая приложение** — через
+ * [NovaTunnelControl], общий с плиткой в шторке ([NovaTileService]) и кнопкой в
+ * уведомлении. Там же объяснено, почему намерение подключения несёт с собой весь
+ * срез настроек, а останов — пять обязательных шагов.
  *
  * Правая кнопка открывает экран и нажимает там «следующий профиль». Перебор
  * профилей живёт в [MainActivity] и знает про VLESS, MASQUE, Opera и Proton
@@ -100,60 +97,7 @@ class NovaWidgetProvider : AppWidgetProvider() {
             NovaTunnelControl.stop(context, "Виджет")
             return
         }
-        val intent = Intent(context, NovaVpnService::class.java).apply {
-            action = NovaVpnService.ACTION_CONNECT_SMART
-            putExtra(NovaVpnService.EXTRA_EXIT_REGION, clientData.getExitRegionPreference())
-            putExtra(
-                NovaVpnService.EXTRA_IMPORTED_CONFIG_SOURCE_ENABLED,
-                clientData.isImportedWarpOnlyModeEnabled(),
-            )
-            putExtra(
-                NovaVpnService.EXTRA_IMPORTED_PROTOCOL_PREFERENCE,
-                clientData.getImportedProtocolPreference(),
-            )
-            putExtra(NovaVpnService.EXTRA_REAPPLY_SPLIT_MODE, clientData.getSplitMode())
-            putStringArrayListExtra(
-                NovaVpnService.EXTRA_REAPPLY_SPLIT_APPS,
-                ArrayList(clientData.getSplitApps()),
-            )
-            // «Прямой поток» едет тем же путём: настройки процесса `:vpn` своей
-            // копией не обновляются, и без этих extras выбор человека до службы
-            // просто не доезжает.
-            putStringArrayListExtra(
-                NovaVpnService.EXTRA_REAPPLY_DIRECT_APPS,
-                ArrayList(clientData.getDirectApps()),
-            )
-            putStringArrayListExtra(
-                NovaVpnService.EXTRA_REAPPLY_DIRECT_EXCLUDED,
-                ArrayList(clientData.getDirectAppsExcluded()),
-            )
-            putExtra(
-                NovaVpnService.EXTRA_REAPPLY_RUSSIAN_DIRECT_ENABLED,
-                clientData.isRussianDirectAppsEnabled(),
-            )
-            putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_ENABLED, clientData.getTrafficMaskEnabled())
-            putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_MODE, clientData.getTrafficMaskMode())
-            putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_HOST, clientData.getTrafficMaskHost())
-            putExtra(NovaVpnService.EXTRA_REAPPLY_SNI_MASK_MODE, clientData.getSniMaskMode())
-            putExtra(NovaVpnService.EXTRA_REAPPLY_SNI_MASK_LIST, clientData.getSniCustomListRaw())
-            putExtra(NovaVpnService.EXTRA_REAPPLY_TUNNEL_MTU, clientData.getTunnelMtu())
-            // «Обход по доменам» — по той же причине: список, записанный экраном, в
-            // процессе `:vpn` не виден, и без extras он бы сохранялся и не действовал.
-            putExtra(
-                NovaVpnService.EXTRA_REAPPLY_DOMAIN_BYPASS_ENABLED,
-                clientData.isDomainBypassEnabled(),
-            )
-            putExtra(
-                NovaVpnService.EXTRA_REAPPLY_DOMAIN_BYPASS_ZONES,
-                clientData.getDomainBypassZonesRaw(),
-            )
-            putExtra(
-                NovaVpnService.EXTRA_REAPPLY_DOMAIN_BYPASS_CUSTOM,
-                clientData.getDomainBypassCustomRaw(),
-            )
-        }
-        ContextCompat.startForegroundService(context, intent)
-        LogManager.log("Виджет: запуск туннеля.")
+        NovaTunnelControl.start(context, "Виджет")
     }
 
     private fun openNextProfile(context: Context) {

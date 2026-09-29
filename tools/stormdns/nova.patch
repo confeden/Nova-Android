@@ -1,0 +1,897 @@
+diff --git a/cmd/server/main.go b/cmd/server/main.go
+index 56cfeec..bcab537 100644
+--- a/cmd/server/main.go
++++ b/cmd/server/main.go
+@@ -1,4 +1,4 @@
+-﻿// ==============================================================================
++// ==============================================================================
+ // StormDNS
+ // Author: nullroute1970
+ // Github: https://github.com/nullroute1970/StormDNS
+@@ -18,6 +18,7 @@ import (
+ 	"syscall"
+ 
+ 	"stormdns-go/internal/config"
++	dnsparser "stormdns-go/internal/dnsparser"
+ 	"stormdns-go/internal/logger"
+ 	"stormdns-go/internal/runtimepath"
+ 	"stormdns-go/internal/security"
+@@ -32,6 +33,7 @@ func waitForExitInput() {
+ }
+ 
+ func main() {
++	dnsparser.AuthoritativeAnswers = true
+ 	configPath := flag.String("config", "server_config.toml", "Path to server configuration file")
+ 	logPath := flag.String("log", "", "Path to log file (optional)")
+ 	versionFlag := flag.Bool("version", false, "Print version and exit")
+diff --git a/internal/client/mtu.go b/internal/client/mtu.go
+index 4e10999..0dc0767 100644
+--- a/internal/client/mtu.go
++++ b/internal/client/mtu.go
+@@ -93,6 +93,7 @@ func (c *Client) runFullMTUTests(ctx context.Context) error {
+ 	c.runAllMTUProbeWorkers(ctx, uploadCaps, workerCount, counters, nil)
+ 
+ 	c.balancer.RefreshValidConnections()
++	c.novaApplyResolverSelection()
+ 	validConns, minUpload, minDownload, minUploadChars := summarizeValidMTUConnections(c.connections)
+ 	if len(validConns) == 0 {
+ 		if c.log != nil {
+diff --git a/internal/client/nova_resolver_select.go b/internal/client/nova_resolver_select.go
+new file mode 100644
+index 0000000..434ce0c
+--- /dev/null
++++ b/internal/client/nova_resolver_select.go
+@@ -0,0 +1,97 @@
++// Nova resolver selection after MTU testing.
++//
++// The engine runs every stream with ONE download and ONE upload payload size:
++// the minimum over all accepted resolvers. One weak resolver therefore shrinks
++// every query of every other one. Measured on MegaFon LTE (2026-09-29): with 11
++// resolvers the synced download MTU fell to 650 B while most gave 880-1200 B.
++//
++// So a resolver whose MTU is far below the best is dropped — but only while at
++// least novaMinKeptResolvers remain, because on the same network each path is
++// also capped at ~6.4 KB/s by the operator and parallel paths add up. Dropping
++// is cheap to undo: the recheck loop may bring a resolver back later.
++package client
++
++import "sort"
++
++const (
++	novaDownloadKeepRatio = 0.70
++	novaUploadKeepRatio   = 0.80
++	novaMinKeptResolvers  = 2
++	// The download reference is capped at the common safe EDNS size: a direct
++	// carrier (4000 B) or Yandex (3603 B) must not raise the bar so high that
++	// every ~880-1047 B resolver is dropped — on Wi-Fi that threw out Quad9,
++	// the fastest path on MegaFon LTE (2026-09-29).
++	novaDownloadRefCap = 1232
++)
++
++// novaSelectResolvers returns the keys of valid connections to switch off.
++// Pure: it only reads the slice, so it is unit-testable.
++func novaSelectResolvers(connections []Connection) []string {
++	type cand struct {
++		key      string
++		up, down int
++	}
++	var valid []cand
++	maxUp, maxDown := 0, 0
++	for _, c := range connections {
++		if !c.IsValid {
++			continue
++		}
++		valid = append(valid, cand{c.Key, c.UploadMTUBytes, c.DownloadMTUBytes})
++		maxUp = max(maxUp, c.UploadMTUBytes)
++		maxDown = max(maxDown, c.DownloadMTUBytes)
++	}
++	if len(valid) <= novaMinKeptResolvers {
++		return nil
++	}
++	refDown := min(maxDown, novaDownloadRefCap)
++	weak := func(v cand) bool {
++		return float64(v.down) < novaDownloadKeepRatio*float64(refDown) ||
++			float64(v.up) < novaUploadKeepRatio*float64(maxUp)
++	}
++	// Weakest first, so if the floor stops us we have removed the worst ones.
++	sort.SliceStable(valid, func(i, j int) bool {
++		return valid[i].down*valid[i].up < valid[j].down*valid[j].up
++	})
++	var drop []string
++	kept := len(valid)
++	for _, v := range valid {
++		if kept <= novaMinKeptResolvers {
++			break
++		}
++		if weak(v) {
++			drop = append(drop, v.key)
++			kept--
++		}
++	}
++	return drop
++}
++
++// novaApplyResolverSelection switches the weak resolvers off in both the
++// connection list (which the MTU summary reads) and the balancer.
++func (c *Client) novaApplyResolverSelection() {
++	drop := novaSelectResolvers(c.connections)
++	if len(drop) == 0 {
++		return
++	}
++	dropSet := make(map[string]struct{}, len(drop))
++	for _, k := range drop {
++		dropSet[k] = struct{}{}
++	}
++	for i := range c.connections {
++		if _, ok := dropSet[c.connections[i].Key]; ok {
++			c.connections[i].IsValid = false
++			if c.balancer != nil {
++				c.balancer.SetConnectionValidity(c.connections[i].Key, false)
++			}
++			if c.log != nil {
++				c.log.Infof(
++					"Nova: resolver %s dropped as weak (upload=%d download=%d)",
++					c.connections[i].Key,
++					c.connections[i].UploadMTUBytes,
++					c.connections[i].DownloadMTUBytes,
++				)
++			}
++		}
++	}
++}
+diff --git a/internal/client/nova_resolver_select_test.go b/internal/client/nova_resolver_select_test.go
+new file mode 100644
+index 0000000..35f741e
+--- /dev/null
++++ b/internal/client/nova_resolver_select_test.go
+@@ -0,0 +1,55 @@
++package client
++
++import (
++	"sort"
++	"testing"
++)
++
++func conns(specs ...[3]int) []Connection {
++	out := make([]Connection, 0, len(specs))
++	for i, s := range specs {
++		out = append(out, Connection{Key: string(rune('a' + i)), IsValid: s[2] == 1, UploadMTUBytes: s[0], DownloadMTUBytes: s[1]})
++	}
++	return out
++}
++
++func TestNovaSelectDropsWeakKeepsFloor(t *testing.T) {
++	// MegaFon, 2026-09-29: op 84/936, op 106/896, NSDI 111/893, NSDI 111/657, Yandex 111/1200 x3.
++	got := novaSelectResolvers(conns(
++		[3]int{84, 936, 1}, [3]int{106, 896, 1}, [3]int{111, 893, 1}, [3]int{111, 657, 1},
++		[3]int{111, 1200, 1}, [3]int{111, 1200, 1}, [3]int{111, 1200, 1},
++	))
++	sort.Strings(got)
++	// 657 < 0.7*1200 and 84 < 0.8*111 are weak; the rest stay.
++	if len(got) != 2 || got[0] != "a" || got[1] != "d" {
++		t.Fatalf("dropped %v", got)
++	}
++}
++
++func TestNovaSelectNeverGoesBelowTwo(t *testing.T) {
++	got := novaSelectResolvers(conns([3]int{111, 1200, 1}, [3]int{60, 300, 1}, [3]int{60, 250, 1}))
++	if len(got) != 1 || got[0] != "c" {
++		t.Fatalf("dropped %v", got)
++	}
++	if got := novaSelectResolvers(conns([3]int{111, 1200, 1}, [3]int{60, 300, 1})); got != nil {
++		t.Fatalf("two resolvers must both stay, dropped %v", got)
++	}
++}
++
++func TestNovaSelectIgnoresInvalid(t *testing.T) {
++	got := novaSelectResolvers(conns([3]int{111, 1200, 1}, [3]int{111, 1100, 1}, [3]int{111, 100, 0}))
++	if got != nil {
++		t.Fatalf("dropped %v", got)
++	}
++}
++
++func TestNovaSelectJumboDoesNotEvictNormalResolvers(t *testing.T) {
++	// Mi A1 Wi-Fi 2026-09-29: direct 4000, Yandex 3603, Quad9 885, Google 1047, CF 882, router 879.
++	got := novaSelectResolvers(conns(
++		[3]int{111, 4000, 1}, [3]int{111, 3603, 1}, [3]int{111, 885, 1},
++		[3]int{111, 1047, 1}, [3]int{111, 882, 1}, [3]int{111, 879, 1}, [3]int{111, 650, 1},
++	))
++	if len(got) != 1 || got[0] != "g" {
++		t.Fatalf("only the 650 B resolver should go, dropped %v", got)
++	}
++}
+diff --git a/internal/config/client_resolvers.go b/internal/config/client_resolvers.go
+index 86c83fa..ce3fae3 100644
+--- a/internal/config/client_resolvers.go
++++ b/internal/config/client_resolvers.go
+@@ -1,4 +1,4 @@
+-﻿// ==============================================================================
++// ==============================================================================
+ // StormDNS
+ // Author: nullroute1970
+ // Github: https://github.com/nullroute1970/StormDNS
+@@ -95,10 +95,16 @@ func LoadClientResolvers(filename string) ([]ResolverAddress, map[string]int, er
+ }
+ 
+ func addResolver(endpoints *[]ResolverAddress, resolverMap map[string]int, seenIPs map[string]struct{}, ip string, port int) {
+-	if _, exists := seenIPs[ip]; exists {
++	// Nova: the same IP on two ports is two carriers, not a duplicate. Upstream
++	// keyed this set by IP alone, so a second entry for our own tunnel server
++	// (53 plus a fallback port that walks past an operator's udp/53 DNAT) was
++	// dropped in silence. resolverMap stays keyed by IP: it only answers "which
++	// port did we first see for this IP".
++	dedupKey := ip + "|" + strconv.Itoa(port)
++	if _, exists := seenIPs[dedupKey]; exists {
+ 		return
+ 	}
+-	seenIPs[ip] = struct{}{}
++	seenIPs[dedupKey] = struct{}{}
+ 	if _, exists := resolverMap[ip]; !exists {
+ 		resolverMap[ip] = port
+ 	}
+diff --git a/internal/config/client_resolvers_test.go b/internal/config/client_resolvers_test.go
+index c17407e..99737a5 100644
+--- a/internal/config/client_resolvers_test.go
++++ b/internal/config/client_resolvers_test.go
+@@ -62,7 +62,9 @@ func TestLoadClientResolversRejectsHugeCIDR(t *testing.T) {
+ 	}
+ }
+ 
+-func TestLoadClientResolversDropsDuplicateIPsEvenWithDifferentPorts(t *testing.T) {
++// Nova: one IP on two ports is two carriers (the tunnel server is reachable on
++// 53 and on a fallback port); only an exact ip:port repeat collapses.
++func TestLoadClientResolversKeepsSameIPOnDifferentPorts(t *testing.T) {
+ 	dir := t.TempDir()
+ 	path := filepath.Join(dir, "client_resolvers.txt")
+ 
+@@ -80,11 +82,18 @@ func TestLoadClientResolversDropsDuplicateIPsEvenWithDifferentPorts(t *testing.T
+ 		t.Fatalf("LoadClientResolvers returned error: %v", err)
+ 	}
+ 
+-	if len(resolvers) != 1 {
+-		t.Fatalf("unexpected resolver count: got=%d want=%d", len(resolvers), 1)
++	if len(resolvers) != 2 {
++		t.Fatalf("unexpected resolver count: got=%d want=%d", len(resolvers), 2)
++	}
++	ports := map[int]bool{}
++	for _, r := range resolvers {
++		if r.IP != "8.8.8.8" {
++			t.Fatalf("unexpected resolver entry: %+v", r)
++		}
++		ports[r.Port] = true
+ 	}
+-	if resolvers[0].IP != "8.8.8.8" || resolvers[0].Port != 53 {
+-		t.Fatalf("unexpected resolver entry: %+v", resolvers[0])
++	if !ports[53] || !ports[5353] {
++		t.Fatalf("both ports must survive, got %v", ports)
+ 	}
+ 	if resolverMap["8.8.8.8"] != 53 {
+ 		t.Fatalf("unexpected resolver map port: got=%d want=%d", resolverMap["8.8.8.8"], 53)
+@@ -111,8 +120,9 @@ bad ip
+ 		t.Fatalf("LoadClientResolvers returned error: %v", err)
+ 	}
+ 
+-	if len(resolvers) != 2 {
+-		t.Fatalf("unexpected resolver count: got=%d want=%d", len(resolvers), 2)
++	// 8.8.8.8 twice (53 and 9999) plus 1.1.1.1:5353 — three carriers now.
++	if len(resolvers) != 3 {
++		t.Fatalf("unexpected resolver count: got=%d want=%d", len(resolvers), 3)
+ 	}
+ 	if resolverMap["8.8.8.8"] != 53 {
+ 		t.Fatalf("unexpected port for 8.8.8.8: got=%d want=%d", resolverMap["8.8.8.8"], 53)
+diff --git a/internal/dnsparser/response.go b/internal/dnsparser/response.go
+index 27f9e88..b536083 100644
+--- a/internal/dnsparser/response.go
++++ b/internal/dnsparser/response.go
+@@ -188,9 +188,22 @@ func buildResponseFlags(requestFlags uint16, rcode uint8) uint16 {
+ 	// AA/TC are intentionally cleared unless we are relaying an upstream answer
+ 	// verbatim, in which case those bits come from the upstream packet itself.
+ 	flags &^= flagAA | flagTC
++	if AuthoritativeAnswers {
++		// Nova: the tunnel server IS the authoritative server of its zone.
++		// Strict recursors (Unbound/BIND at Russian operators and NSDI) treat a
++		// delegated server that answers without AA as lame and throw its
++		// answers away, which killed the tunnel through every Russian resolver
++		// while Google and Yandex, being lenient, worked.
++		flags |= flagAA
++		flags &^= flagRA
++	}
+ 	return flags
+ }
+ 
++// AuthoritativeAnswers is set by the server binary only: its answers are
++// authoritative for the tunnel zone. The client's local answers stay recursive.
++var AuthoritativeAnswers bool
++
+ func extractQuestionSection(request []byte, header Header) ([]byte, uint16, int) {
+ 	if header.QDCount == 0 {
+ 		return nil, 0, dnsHeaderSize
+diff --git a/internal/security/codec.go b/internal/security/codec.go
+index b3c0295..2645f15 100644
+--- a/internal/security/codec.go
++++ b/internal/security/codec.go
+@@ -367,6 +367,9 @@ func newAESGCM(key []byte) (cipher.AEAD, error) {
+ func deriveKey(method int, rawKey string) []byte {
+ 	bKey := []byte(rawKey)
+ 	targetLen := requiredDerivedKeyLength(method)
++	if key, ok := novaDialectKey(rawKey, targetLen); ok {
++		return key
++	}
+ 
+ 	switch method {
+ 	case 2, 5:
+diff --git a/internal/security/encryption_key.go b/internal/security/encryption_key.go
+index a174bb6..8f32892 100644
+--- a/internal/security/encryption_key.go
++++ b/internal/security/encryption_key.go
+@@ -37,7 +37,7 @@ func EnsureServerEncryptionKey(cfg config.ServerConfig) (EncryptionKeyInfo, erro
+ 	raw, err := os.ReadFile(info.Path)
+ 	if err == nil {
+ 		key := strings.TrimSpace(string(raw))
+-		if len(key) == requiredLength {
++		if len(strings.TrimPrefix(key, NovaDialectPrefix)) == requiredLength {
+ 			info.Key = key
+ 			info.Loaded = true
+ 			return info, nil
+diff --git a/internal/security/nova_dialect.go b/internal/security/nova_dialect.go
+new file mode 100644
+index 0000000..2443a77
+--- /dev/null
++++ b/internal/security/nova_dialect.go
+@@ -0,0 +1,39 @@
++// Nova dialect of the key derivation.
++//
++// A raw key that starts with NovaDialectPrefix is not hashed the stock way
++// (SHA-256 of the whole string) but through HMAC-SHA256 keyed by a Nova-only
++// constant. Stock StormDNS / MasterDnsVPN / CottenDNS / WhiteDNS clients that
++// were handed the same key string derive a different AES key, their packets
++// fail authentication and the server drops them without an answer — to them
++// the endpoint simply looks dead.
++//
++// Keys without the prefix derive exactly as upstream, so the same client binary
++// keeps working with third-party servers from user-imported links.
++//
++// This is not a secret against someone who reads Nova's source; it raises the
++// cost of reuse from "paste a link into any client" to "fork and keep up with
++// Nova's engine".
++package security
++
++import (
++	"crypto/hmac"
++	"crypto/sha256"
++	"strings"
++)
++
++const NovaDialectPrefix = "nova1:"
++
++var novaDialectSalt = []byte("Nova/stormdns-dialect/v1/c3a9f1e27b5d4086")
++
++func novaDialectKey(rawKey string, targetLen int) ([]byte, bool) {
++	if !strings.HasPrefix(rawKey, NovaDialectPrefix) {
++		return nil, false
++	}
++	mac := hmac.New(sha256.New, novaDialectSalt)
++	mac.Write([]byte(rawKey[len(NovaDialectPrefix):]))
++	sum := mac.Sum(nil)
++	if targetLen <= 0 || targetLen > len(sum) {
++		targetLen = len(sum)
++	}
++	return sum[:targetLen], true
++}
+diff --git a/internal/security/nova_dialect_test.go b/internal/security/nova_dialect_test.go
+new file mode 100644
+index 0000000..445c554
+--- /dev/null
++++ b/internal/security/nova_dialect_test.go
+@@ -0,0 +1,34 @@
++package security
++
++import (
++	"bytes"
++	"testing"
++)
++
++func TestNovaDialectDiffersFromStock(t *testing.T) {
++	raw := NovaDialectPrefix + "0123456789abcdef0123456789abcdef"
++	nova := deriveKey(5, raw)
++	stock, _ := novaDialectKey("x", 32) // no prefix -> not applied
++	if stock != nil {
++		t.Fatal("dialect applied without prefix")
++	}
++	a, _ := NewCodec(5, raw)
++	enc, err := a.Encrypt([]byte("hello"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	// A stock client handed the same string hashes it with SHA-256 of the whole key.
++	b := &Codec{method: 5}
++	stockKey := deriveKey(5, "stock:"+raw[len(NovaDialectPrefix):])
++	if bytes.Equal(nova, stockKey) || len(nova) != 32 {
++		t.Fatal("dialect key collides with stock derivation")
++	}
++	_ = b
++	if out, err := a.Decrypt(enc); err != nil || string(out) != "hello" {
++		t.Fatal("dialect roundtrip failed")
++	}
++	c, _ := NewCodec(5, raw[len(NovaDialectPrefix):])
++	if _, err := c.Decrypt(enc); err == nil {
++		t.Fatal("unprefixed key must not decrypt dialect traffic")
++	}
++}
+diff --git a/internal/udpserver/nova_egress.go b/internal/udpserver/nova_egress.go
+new file mode 100644
+index 0000000..ed969f4
+--- /dev/null
++++ b/internal/udpserver/nova_egress.go
+@@ -0,0 +1,256 @@
++// Nova egress policy: what the tunnel refuses to carry.
++//
++// Every stream the server opens to the internet passes through dialTCPTargetContext,
++// and that is the only outbound path for client data (the server never relays UDP
++// except its own DNS lookups), so BitTorrent DHT/uTP are impossible by construction.
++// This file closes the TCP side:
++//
++//   - destinations resolve here, once, and every resolved address is checked, so a
++//     hostname cannot smuggle a private or blocked IP past validateSOCKSTargetHost;
++//   - IPs listed in NOVA_EGRESS_BLOCKLIST (Tor relays, refreshed by a timer outside
++//     the process) and a fixed set of ports (SMTP, BitTorrent defaults, Tor ORPort
++//     defaults) are refused;
++//   - the first bytes the client sends are sniffed: a BitTorrent peer handshake or
++//     an HTTP tracker announce closes the stream.
++//
++// Refusals are reported to the client as an ordinary blocked target — no reason.
++package udpserver
++
++import (
++	"bufio"
++	"bytes"
++	"context"
++	"errors"
++	"net"
++	"net/netip"
++	"os"
++	"strconv"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"time"
++)
++
++const (
++	novaBlocklistEnv      = "NOVA_EGRESS_BLOCKLIST"
++	novaBlocklistDefault  = "/etc/stormdns/egress_block.txt"
++	novaBlocklistRecheck  = 60 * time.Second
++	novaSniffWindow       = 1024
++	novaResolveTimeoutCap = 5 * time.Second
++)
++
++var novaBlockedPorts = map[int]bool{
++	25: true, 465: true, 587: true, 2525: true, // SMTP
++	6881: true, 6882: true, 6883: true, 6884: true, 6885: true,
++	6886: true, 6887: true, 6888: true, 6889: true, 6969: true, 51413: true, // BitTorrent
++	9001: true, 9030: true, 9050: true, 9051: true, 9150: true, // Tor
++}
++
++type novaBlocklist struct {
++	mu      sync.RWMutex
++	set     map[netip.Addr]struct{}
++	path    string
++	modTime time.Time
++	checked atomic.Int64
++}
++
++var novaEgressBlocklist = &novaBlocklist{}
++
++func (b *novaBlocklist) contains(ip netip.Addr) bool {
++	b.maybeReload()
++	b.mu.RLock()
++	defer b.mu.RUnlock()
++	_, ok := b.set[ip.Unmap()]
++	return ok
++}
++
++func (b *novaBlocklist) maybeReload() {
++	now := time.Now().UnixNano()
++	last := b.checked.Load()
++	if last != 0 && now-last < int64(novaBlocklistRecheck) {
++		return
++	}
++	if !b.checked.CompareAndSwap(last, now) {
++		return
++	}
++	path := os.Getenv(novaBlocklistEnv)
++	if path == "" {
++		path = novaBlocklistDefault
++	}
++	st, err := os.Stat(path)
++	if err != nil {
++		return
++	}
++	b.mu.RLock()
++	same := b.path == path && b.modTime.Equal(st.ModTime())
++	b.mu.RUnlock()
++	if same {
++		return
++	}
++	f, err := os.Open(path)
++	if err != nil {
++		return
++	}
++	defer f.Close()
++	set := make(map[netip.Addr]struct{}, 16384)
++	sc := bufio.NewScanner(f)
++	for sc.Scan() {
++		line := strings.TrimSpace(sc.Text())
++		if line == "" || line[0] == '#' {
++			continue
++		}
++		if ip, err := netip.ParseAddr(line); err == nil {
++			set[ip.Unmap()] = struct{}{}
++		}
++	}
++	// A truncated or empty file mid-write must not wipe a good list.
++	if sc.Err() != nil || len(set) == 0 {
++		return
++	}
++	b.mu.Lock()
++	b.set, b.path, b.modTime = set, path, st.ModTime()
++	b.mu.Unlock()
++}
++
++func novaAddrAllowed(ip netip.Addr) bool {
++	ip = ip.Unmap()
++	if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsMulticast() ||
++		ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
++		return false
++	}
++	if ip.Is4() {
++		b := ip.As4()
++		if b[0] == 100 && b[1] >= 64 && b[1] <= 127 { // CGNAT
++			return false
++		}
++		if b[0] == 198 && (b[1] == 18 || b[1] == 19) { // benchmarking
++			return false
++		}
++		if b[0] == 0 || b[0] >= 240 {
++			return false
++		}
++	}
++	return !novaEgressBlocklist.contains(ip)
++}
++
++// novaResolveTarget turns host:port into a list of permitted ip:port strings.
++// An empty list with a nil error never happens: either addresses or a block.
++func novaResolveTarget(ctx context.Context, address string, timeout time.Duration) ([]string, error) {
++	host, portStr, err := net.SplitHostPort(address)
++	if err != nil {
++		return nil, err
++	}
++	port, err := strconv.Atoi(portStr)
++	if err != nil || port <= 0 || port > 65535 || novaBlockedPorts[port] {
++		return nil, &blockedSOCKSTargetError{host: host}
++	}
++	var addrs []netip.Addr
++	if ip, err := netip.ParseAddr(host); err == nil {
++		addrs = []netip.Addr{ip}
++	} else {
++		if timeout <= 0 || timeout > novaResolveTimeoutCap {
++			timeout = novaResolveTimeoutCap
++		}
++		rctx, cancel := context.WithTimeout(ctx, timeout)
++		defer cancel()
++		addrs, err = net.DefaultResolver.LookupNetIP(rctx, "ip", host)
++		if err != nil {
++			return nil, err
++		}
++	}
++	out := make([]string, 0, len(addrs))
++	for _, ip := range addrs {
++		if !novaAddrAllowed(ip) {
++			// One blocked answer taints the name: a relay that also resolves
++			// to a clean address is still a relay.
++			return nil, &blockedSOCKSTargetError{host: host}
++		}
++		out = append(out, net.JoinHostPort(ip.Unmap().String(), portStr))
++	}
++	if len(out) == 0 {
++		return nil, &blockedSOCKSTargetError{host: host}
++	}
++	return out, nil
++}
++
++func novaDial(ctx context.Context, address string, timeout time.Duration) (net.Conn, error) {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	targets, err := novaResolveTarget(ctx, address, timeout)
++	if err != nil {
++		return nil, err
++	}
++	dialer := net.Dialer{Timeout: timeout}
++	var lastErr error
++	for _, t := range targets {
++		conn, err := dialer.DialContext(ctx, "tcp", t)
++		if err == nil {
++			return &novaSniffConn{Conn: conn}, nil
++		}
++		lastErr = err
++		if ctx.Err() != nil {
++			break
++		}
++	}
++	return nil, lastErr
++}
++
++var errNovaBlockedPayload = errors.New("connection closed")
++
++var (
++	novaBTHandshake = append([]byte{19}, []byte("BitTorrent protocol")...)
++	novaAnnounceMarks = [][]byte{[]byte("info_hash="), []byte("/announce"), []byte("/scrape?")}
++)
++
++// novaSniffConn inspects what the client writes until novaSniffWindow bytes
++// have gone out; after that it is a plain net.Conn.
++type novaSniffConn struct {
++	net.Conn
++	mu   sync.Mutex
++	seen []byte
++	done bool
++}
++
++func (c *novaSniffConn) Write(p []byte) (int, error) {
++	c.mu.Lock()
++	if !c.done {
++		room := novaSniffWindow - len(c.seen)
++		if room > len(p) {
++			room = len(p)
++		}
++		c.seen = append(c.seen, p[:room]...)
++		if novaPayloadBlocked(c.seen) {
++			c.done = true
++			c.seen = nil
++			c.mu.Unlock()
++			_ = c.Conn.Close()
++			return 0, errNovaBlockedPayload
++		}
++		if len(c.seen) >= novaSniffWindow {
++			c.done = true
++			c.seen = nil
++		}
++	}
++	c.mu.Unlock()
++	return c.Conn.Write(p)
++}
++
++func novaPayloadBlocked(b []byte) bool {
++	if bytes.HasPrefix(b, novaBTHandshake) {
++		return true
++	}
++	// Tracker announces are plain HTTP requests; the request line is enough.
++	if bytes.HasPrefix(b, []byte("GET ")) {
++		line := b
++		if i := bytes.IndexByte(b, '\n'); i >= 0 {
++			line = b[:i]
++		}
++		for _, m := range novaAnnounceMarks {
++			if bytes.Contains(line, m) && bytes.Contains(line, []byte("info_hash")) {
++				return true
++			}
++		}
++	}
++	return false
++}
+diff --git a/internal/udpserver/nova_egress_test.go b/internal/udpserver/nova_egress_test.go
+new file mode 100644
+index 0000000..05e474a
+--- /dev/null
++++ b/internal/udpserver/nova_egress_test.go
+@@ -0,0 +1,51 @@
++package udpserver
++
++import (
++	"context"
++	"net/netip"
++	"testing"
++	"time"
++)
++
++func TestNovaPayloadBlocked(t *testing.T) {
++	cases := map[string]bool{
++		"\x13BitTorrent protocol\x00\x00":                       true,
++		"GET /announce?info_hash=%12%34&peer_id=x HTTP/1.1\r\n": true,
++		"GET /scrape?info_hash=abc HTTP/1.1\r\n":                true,
++		"GET / HTTP/1.1\r\nHost: example.com\r\n":               false,
++		"\x16\x03\x01\x02\x00\x01":                              false,
++		"GET /search?q=info HTTP/1.1\r\n":                       false,
++	}
++	for in, want := range cases {
++		if got := novaPayloadBlocked([]byte(in)); got != want {
++			t.Errorf("%q: got %v want %v", in, got, want)
++		}
++	}
++}
++
++func TestNovaResolveTargetRefusals(t *testing.T) {
++	for _, a := range []string{"10.0.0.1:443", "127.0.0.1:80", "100.64.1.1:443", "1.1.1.1:25", "1.1.1.1:6881", "1.1.1.1:9001", "[::1]:443", "localhost:443"} {
++		if _, err := novaResolveTarget(context.Background(), a, 0); err == nil {
++			t.Errorf("%s: expected refusal", a)
++		}
++	}
++	if out, err := novaResolveTarget(context.Background(), "1.1.1.1:443", 0); err != nil || len(out) != 1 {
++		t.Errorf("1.1.1.1:443 refused: %v", err)
++	}
++	novaEgressBlocklist.mu.Lock()
++	novaEgressBlocklist.set = map[netip.Addr]struct{}{netip.MustParseAddr("1.0.0.1"): {}}
++	novaEgressBlocklist.mu.Unlock()
++	novaEgressBlocklist.checked.Store(1 << 62) // skip reload
++	if _, err := novaResolveTarget(context.Background(), "1.0.0.1:443", 0); err == nil {
++		t.Error("blocklisted address allowed")
++	}
++}
++
++func TestNovaSessionCeiling(t *testing.T) {
++	b := &novaBucket{tokens: 0, last: time.Now()}
++	start := time.Now()
++	b.take(novaSessionRateBytes / 4) // a quarter second of budget
++	if d := time.Since(start); d < 200*time.Millisecond || d > 400*time.Millisecond {
++		t.Fatalf("expected ~250ms wait, got %v", d)
++	}
++}
+diff --git a/internal/udpserver/nova_ratelimit.go b/internal/udpserver/nova_ratelimit.go
+new file mode 100644
+index 0000000..2fc5882
+--- /dev/null
++++ b/internal/udpserver/nova_ratelimit.go
+@@ -0,0 +1,107 @@
++// Nova per-session speed ceiling.
++//
++// Every stream of one client session shares one token bucket, so a person gets at
++// most novaSessionRateBytes per second in total, however many connections the
++// phone opens. The number is the measured ceiling of the tunnel itself (5-7 Mbit/s
++// on the direct carrier from an EU host, 2026-09-29): nobody is slowed below what
++// the channel could give them alone, but one heavy user cannot take the whole box
++// from the others.
++//
++// Both directions draw from the same bucket; upload is ~0.3 Mbit/s at most over
++// DNS, so in practice this caps download.
++package udpserver
++
++import (
++	"net"
++	"sync"
++	"time"
++)
++
++const (
++	novaSessionRateBytes = 5_000_000 / 8 // 5 Mbit/s
++	novaSessionBurst     = 256 * 1024
++	novaBucketIdle       = 5 * time.Minute
++)
++
++type novaBucket struct {
++	mu     sync.Mutex
++	tokens float64
++	last   time.Time
++}
++
++var (
++	novaBucketsMu    sync.Mutex
++	novaBuckets      = map[uint8]*novaBucket{}
++	novaBucketsSwept time.Time
++)
++
++func novaBucketFor(session uint8) *novaBucket {
++	novaBucketsMu.Lock()
++	defer novaBucketsMu.Unlock()
++	now := time.Now()
++	if now.Sub(novaBucketsSwept) > time.Minute {
++		for id, b := range novaBuckets {
++			b.mu.Lock()
++			idle := now.Sub(b.last) > novaBucketIdle
++			b.mu.Unlock()
++			if idle {
++				delete(novaBuckets, id)
++			}
++		}
++		novaBucketsSwept = now
++	}
++	b := novaBuckets[session]
++	if b == nil {
++		b = &novaBucket{tokens: novaSessionBurst, last: now}
++		novaBuckets[session] = b
++	}
++	return b
++}
++
++// take blocks until n bytes fit under the ceiling. Debt is allowed (tokens may go
++// negative) so a read larger than the burst never waits forever; the wait is the
++// time the debt takes to refill.
++func (b *novaBucket) take(n int) {
++	if n <= 0 {
++		return
++	}
++	b.mu.Lock()
++	now := time.Now()
++	b.tokens += now.Sub(b.last).Seconds() * novaSessionRateBytes
++	if b.tokens > novaSessionBurst {
++		b.tokens = novaSessionBurst
++	}
++	b.last = now
++	b.tokens -= float64(n)
++	var wait time.Duration
++	if b.tokens < 0 {
++		wait = time.Duration(-b.tokens / novaSessionRateBytes * float64(time.Second))
++	}
++	b.mu.Unlock()
++	if wait > 0 {
++		time.Sleep(wait)
++	}
++}
++
++type novaRateConn struct {
++	net.Conn
++	bucket *novaBucket
++}
++
++func novaLimitSession(conn net.Conn, session uint8) net.Conn {
++	if conn == nil {
++		return nil
++	}
++	return &novaRateConn{Conn: conn, bucket: novaBucketFor(session)}
++}
++
++func (c *novaRateConn) Read(p []byte) (int, error) {
++	n, err := c.Conn.Read(p)
++	c.bucket.take(n)
++	return n, err
++}
++
++func (c *novaRateConn) Write(p []byte) (int, error) {
++	c.bucket.take(len(p))
++	return c.Conn.Write(p)
++}
+diff --git a/internal/udpserver/server.go b/internal/udpserver/server.go
+index c2c7b39..e701b89 100644
+--- a/internal/udpserver/server.go
++++ b/internal/udpserver/server.go
+@@ -188,7 +188,10 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
+ 			},
+ 		},
+ 		dialStreamUpstreamFn: func(network string, address string, timeout time.Duration) (net.Conn, error) {
+-			return net.DialTimeout(network, address, timeout)
++			if network != "tcp" {
++				return nil, &blockedSOCKSTargetError{host: address}
++			}
++			return novaDial(context.Background(), address, timeout)
+ 		},
+ 		uploadCompressionMask:    buildCompressionMask(cfg.SupportedUploadCompressionTypes),
+ 		downloadCompressionMask:  buildCompressionMask(cfg.SupportedDownloadCompressionTypes),
+diff --git a/internal/udpserver/server_deferred.go b/internal/udpserver/server_deferred.go
+index c9bf0bd..7884ac9 100644
+--- a/internal/udpserver/server_deferred.go
++++ b/internal/udpserver/server_deferred.go
+@@ -349,6 +349,9 @@ func (s *Server) processDeferredSOCKS5Syn(ctx context.Context, vpnPacket VpnProt
+ 	defer cancelAttempt()
+ 
+ 	upstreamConn, err := s.dialSOCKSStreamTargetContext(attemptCtx, target.Host, target.Port, assembledTarget)
++	if err == nil {
++		upstreamConn = novaLimitSession(upstreamConn, vpnPacket.SessionID)
++	}
+ 
+ 	if err != nil {
+ 		timedOut := errors.Is(attemptCtx.Err(), context.DeadlineExceeded)
+diff --git a/internal/udpserver/socks5_upstream.go b/internal/udpserver/socks5_upstream.go
+index 1f08037..c6fc1dc 100644
+--- a/internal/udpserver/socks5_upstream.go
++++ b/internal/udpserver/socks5_upstream.go
+@@ -141,9 +141,7 @@ func (s *Server) dialTCPTargetContext(ctx context.Context, address string) (net.
+ 	startedAt := logger.NowUnixNano()
+ 
+ 	if dialFn == nil {
+-		dialer := net.Dialer{Timeout: timeout}
+-		conn, err := dialer.DialContext(ctx, "tcp", address)
+-		return conn, err
++		return novaDial(ctx, address, timeout)
+ 	}
+ 	if ctx == nil {
+ 		conn, err := dialFn("tcp", address, timeout)

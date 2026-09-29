@@ -249,6 +249,10 @@ Builds:
       - bash tools/build_opera_proxy.sh
       # 4. tun2proxy: тег закреплён на последней версии с нужным нам C-API.
       - PATH=$HOME/.cargo/bin:$PATH bash tools/build_tun2proxy.sh
+      # 5. Клиент DNS-туннеля семейства StormDNS/CottenDNS (libstormdns.so):
+      # коммит закреплён, лицензия MIT. Это исполняемый файл, а не библиотека, —
+      # Nova запускает его процессом, как opera-proxy.
+      - bash tools/build_stormdns_client.sh
 
     # Секрет подписи WSS есть только у владельца; стороннему сборщику запрет не
     # нужен и снимается явным флагом. Работают при этом все транспорты, кроме

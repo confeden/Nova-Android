@@ -18,15 +18,15 @@ class ConnectionSelectorPolicyTest {
     @Test
     fun `order and labels stay in step`() {
         assertEquals(ConnectionSelectorPolicy.ORDER.size, ConnectionSelectorPolicy.LABELS.size)
-        assertEquals(6, ConnectionSelectorPolicy.SIZE)
+        assertEquals(7, ConnectionSelectorPolicy.SIZE)
         // Порядок кода, а не разметки: masque третий. Разъедется — сломается и
         // главный экран, и настройки, каждый по-своему.
         assertEquals(
-            listOf("auto", "ru", "masque", "opera", "proton", "tor"),
+            listOf("auto", "ru", "masque", "opera", "proton", "tor", "dns"),
             ConnectionSelectorPolicy.ORDER,
         )
         assertEquals(
-            listOf("AUTO", "WARP", "MASQUE", "OPERA", "PROTON", "TOR"),
+            listOf("AUTO", "WARP", "MASQUE", "OPERA", "PROTON", "TOR", "DNS"),
             ConnectionSelectorPolicy.LABELS,
         )
     }
@@ -280,5 +280,58 @@ class ConnectionSelectorPolicyTest {
         val a = ConnectionSelectorPolicy.availability(true, false, "auto")
         assertTrue(a.enabled.all { it })
         assertFalse(a.lockReason.isNotBlank())
+    }
+
+    // ------------------------------------------------ режим DNS
+
+    @Test
+    fun `a dead session is never dns mode`() {
+        // Выключенный VPN — обычный канал: глушить в нём пинг и обновления не за что,
+        // как бы ни стоял чип и что бы ни осталось в последней записи службы.
+        assertFalse(
+            ConnectionSelectorPolicy.isDnsSessionActive(
+                exitPreference = "dns",
+                serviceTransport = "DNS",
+                sessionLive = false,
+            )
+        )
+    }
+
+    @Test
+    fun `the chip alone is enough on a live session`() {
+        // Фаза только началась, транспорт служба ещё не опубликовала.
+        assertTrue(
+            ConnectionSelectorPolicy.isDnsSessionActive(
+                exitPreference = "DNS",
+                serviceTransport = "",
+                sessionLive = true,
+            )
+        )
+    }
+
+    @Test
+    fun `a published dns transport is enough by itself`() {
+        // Обратный случай: чип уже переставили, а сеанс всё ещё идёт по DNS.
+        assertTrue(
+            ConnectionSelectorPolicy.isDnsSessionActive(
+                exitPreference = "auto",
+                serviceTransport = " dns ",
+                sessionLive = true,
+            )
+        )
+    }
+
+    @Test
+    fun `other transports are not dns mode`() {
+        for (transport in listOf("WARP", "MASQUE", "TOR", "VLESS", "AWG Proton", "OPERA")) {
+            assertFalse(
+                transport,
+                ConnectionSelectorPolicy.isDnsSessionActive(
+                    exitPreference = "auto",
+                    serviceTransport = transport,
+                    sessionLive = true,
+                )
+            )
+        }
     }
 }

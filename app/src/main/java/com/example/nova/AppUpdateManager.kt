@@ -228,6 +228,67 @@ object AppUpdateManager {
     )
 
     /**
+     * Чем один проверенный файл отличается от другого.
+     *
+     * Путь, длина и отметка времени — всё, что меняется при подмене или дозагрузке
+     * файла на диске; ожидаемые версия и хеш — всё, что меняется на нашей стороне.
+     */
+    private data class ApkValidationFingerprint(
+        val path: String,
+        val length: Long,
+        val lastModified: Long,
+        val expectedVersion: String,
+        val expectedSha256: String,
+    )
+
+    /**
+     * Итог последней полной проверки APK — чтобы не считать её заново на каждый
+     * вопрос «есть ли готовое обновление».
+     *
+     * Зачем. Полная проверка разбирает APK системным разборщиком **дважды** (версия
+     * и подпись) и считает SHA-256 по всем сорока с лишним мегабайтам. А спрашивают
+     * её постоянно и с главного потока: плашка на главном экране, строка настроек,
+     * уведомление службы `:vpn` — и, что хуже всего, тикер состояния «идёт
+     * установка» раз в секунду, пока APK **одновременно** читает установщик. Отсюда
+     * и наблюдавшаяся картина: обновление ползёт, экран не отвечает, «будто что-то
+     * пересчитывается по байтам». Оно и пересчитывалось.
+     *
+     * Что кэш **не** ослабляет: перед самой установкой проверка идёт заново и мимо
+     * кэша ([launchInstaller] зовёт её с `allowCached = false`) — именно там окно
+     * подмены и закрывается. Кэш отвечает только на вопрос «что показать на экране».
+     */
+    @Volatile
+    private var apkValidationCache: Pair<ApkValidationFingerprint, DownloadedApkValidationResult>? = null
+
+    /**
+     * Когда APK ушёл системному установщику. Ноль — не уходил.
+     *
+     * Живёт в памяти: передача не переживает перезапуск процесса, а после успешной
+     * установки процесс и так убивают.
+     */
+    @Volatile
+    private var installerHandoffAt = 0L
+
+    /** Сколько плашка показывает «открываем установщик», если человек не вернулся. */
+    private const val INSTALLER_HANDOFF_WINDOW_MS = 15_000L
+
+    /**
+     * Сколько раз подряд одну и ту же версию отдавали системному установщику.
+     *
+     * Обычный путь `ACTION_VIEW` не приносит обратно ни успеха, ни отказа: экран
+     * «Приложение установлено» показывает система, и наш процесс к тому моменту
+     * уже убит заменой пакета. Значит, «поставилось» и «система отказалась» здесь
+     * неотличимы, и автоматически лечить отказ нечем — можно только не молчать о
+     * том, что человек жмёт одно и то же в третий раз (I4). Успешная установка
+     * этот счётчик не переживёт: процесса не будет.
+     */
+    @Volatile
+    private var installerHandoffVersion = ""
+
+    @Volatile
+    private var installerHandoffCount = 0
+
+    /**
      * Итог одной попытки скачивания. `canResume` — можно ли продолжить с того места,
      * докуда дошли: после 404 продолжать нечего, после обрыва связи — есть что.
      */
@@ -250,6 +311,36 @@ object AppUpdateManager {
      * расписанию, проверка при старте, докачка и установка приходят мимо UI.
      */
     val isUpdaterEnabled: Boolean get() = BuildConfig.UPDATER_ENABLED
+
+    /** Что сказать человеку, когда за обновлением не пускает режим DNS. */
+    const val DNS_MODE_BLOCK_MESSAGE: String =
+        "В режиме DNS обновления отключены: канал слишком узкий"
+
+    /**
+     * Идёт ли сейчас сеанс по DNS — и значит, наружу за обновлением ходить нельзя.
+     *
+     * Запрет не про экономию вообще, а про порядок величин: измеренный потолок
+     * канала 380/42 кбит/с, APK весит около сорока мегабайт, то есть загрузка
+     * заняла бы часы и весь канал целиком — ровно тот канал, ради которого
+     * режим и включают. Сама проверка дешевле, но она кончается предложением
+     * скачать, а кнопка, ведущая в тупик, хуже её отсутствия.
+     *
+     * Глушатся **все** входы, а не кнопка: расписание, проверка при старте и
+     * докачка приходят мимо экрана. Установка уже скачанного не глушится — она
+     * идёт с диска и сети не трогает.
+     */
+    private fun isBlockedByDnsMode(
+        context: Context,
+        clientData: ClientData = ClientData(context.applicationContext),
+    ): Boolean {
+        val state = clientData.getServiceState()
+        return ConnectionSelectorPolicy.isDnsSessionActive(
+            exitPreference = clientData.getExitRegionPreference(),
+            serviceTransport = clientData.getServiceTransport(),
+            sessionLive = state == NovaVpnService.STATE_CONNECTED ||
+                state == NovaVpnService.STATE_CONNECTING,
+        )
+    }
 
     fun hasReadyDownloadedUpdate(context: Context): Boolean {
         if (!isUpdaterEnabled) return false
@@ -292,6 +383,10 @@ object AppUpdateManager {
         if (!isUpdaterEnabled) return false
         val appContext = context.applicationContext
         val clientData = ClientData(appContext)
+        if (isBlockedByDnsMode(appContext, clientData)) {
+            LogManager.log("Режим DNS: загрузку обновления по нажатию не начинаем — канал слишком узкий.")
+            return false
+        }
         val metadata = buildStoredMetadata(clientData) ?: return false
         if (!isNewerVersion(metadata.version, getInstalledVersion(appContext))) return false
         return enqueueDownload(appContext, metadata, allowMetered = true)
@@ -336,6 +431,10 @@ object AppUpdateManager {
         val appContext = context.applicationContext
         val clientData = ClientData(appContext)
         if (!clientData.getAutoAppUpdate()) return
+        if (isBlockedByDnsMode(appContext, clientData)) {
+            LogManager.log("Режим DNS: внеочередную проверку обновлений ($reason) не заводим.")
+            return
+        }
         getReadyDownloadedUpdate(appContext, clientData)
         val now = System.currentTimeMillis()
         if (reason == "app-launch" && now - clientData.getLastUpdateCheckAt() < MIN_LAUNCH_CHECK_INTERVAL_MS) {
@@ -359,6 +458,10 @@ object AppUpdateManager {
         val appContext = context.applicationContext
         val clientData = ClientData(appContext)
         if (!clientData.getAutoAppUpdate()) return false
+        if (isBlockedByDnsMode(appContext, clientData)) {
+            LogManager.log("Режим DNS: плановую проверку обновлений пропускаем — канал слишком узкий.")
+            return false
+        }
         getReadyDownloadedUpdate(appContext, clientData)
         val metadata = fetchMetadata(appContext) ?: return false
         clientData.setLastUpdateCheckAt(System.currentTimeMillis())
@@ -410,6 +513,13 @@ object AppUpdateManager {
         try {
             val appContext = context.applicationContext
             val clientData = ClientData(appContext)
+            if (isBlockedByDnsMode(appContext, clientData)) {
+                LogManager.log("Режим DNS: проверка обновлений по нажатию отклонена — канал слишком узкий.")
+                return ManualUpdateCheckResult(
+                    kind = ManualUpdateCheckResult.Kind.FAILED,
+                    message = DNS_MODE_BLOCK_MESSAGE,
+                )
+            }
             if (clientData.isUpdateRepairInProgress()) {
                 val version = clientData.getUpdateRepairVersion().ifBlank { clientData.getLastUpdateVersion() }
                 return ManualUpdateCheckResult(
@@ -541,10 +651,33 @@ object AppUpdateManager {
         // Установка идёт поверх скачанного файла, поэтому её проверяем раньше
         // готовности: иначе экран во время установки продолжал бы предлагать
         // «Обновить» — то самое действие, которое уже выполняется.
+        // APK уже у системного установщика: он на экране, и нажимать здесь нечего.
+        //
+        // Окно, а не вечный признак: если человек закрыл установщик кнопкой
+        // «Назад», о его решении нам никто не сообщит, и плашка осталась бы
+        // «устанавливающейся» до перезапуска процесса. Возвращение на экран
+        // снимает признак раньше (`forgetInstallerHandoff`).
+        val handoffAt = installerHandoffAt
+        if (handoffAt > 0L && System.currentTimeMillis() - handoffAt in 0 until INSTALLER_HANDOFF_WINDOW_MS) {
+            return UpdateDownloadProgress(
+                state = UpdateDownloadProgress.State.INSTALLING,
+                version = clientData.getDownloadedApkVersion(),
+                // Процента здесь нет и быть не может: копирования больше нет, а
+                // сколько займёт установка — видно только самой системе.
+                progressPercent = -1,
+                downloadedBytes = 0L,
+                totalBytes = 0L,
+                statusLabel = "Открываем системный установщик",
+            )
+        }
         if (installSessionInProgress.get()) {
             val percent = installProgressPercent.get().coerceIn(0, 100)
-            val version = getReadyDownloadedVersion(appContext)
-                .ifBlank { clientData.getDownloadedApkVersion() }
+            // Версия берётся из состояния, а не из повторной проверки файла:
+            // этот путь опрашивается раз в секунду, а проверка разбирает APK и
+            // считает по нему SHA-256 — ровно во время установки, когда тот же
+            // файл читает система.
+            val version = clientData.getDownloadedApkVersion()
+                .ifBlank { clientData.getLastUpdateVersion() }
             return UpdateDownloadProgress(
                 state = UpdateDownloadProgress.State.INSTALLING,
                 version = version,
@@ -729,7 +862,9 @@ object AppUpdateManager {
                     url = intent.getStringExtra(EXTRA_URL).orEmpty(),
                     sha256 = intent.getStringExtra(EXTRA_SHA256).orEmpty(),
                 )
-                if (metadata.version.isNotBlank() && metadata.url.isNotBlank()) {
+                if (isBlockedByDnsMode(appContext)) {
+                    LogManager.log("Режим DNS: загрузка обновления из уведомления отклонена.")
+                } else if (metadata.version.isNotBlank() && metadata.url.isNotBlank()) {
                     enqueueDownload(appContext, metadata, allowMetered = true)
                 }
                 NotificationManagerCompat.from(appContext).cancel(NOTIFICATION_AVAILABLE_ID)
@@ -1099,24 +1234,24 @@ object AppUpdateManager {
     }
 
     /**
-     * @param showDisconnect показывать ли кнопку «Отключить». Не всегда:
-     *        уведомление остаётся висеть и когда туннель уже выключен, а работает
-     *        одна раздача, — там эта кнопка обещала бы не то, что сделает.
+     * @param button какую кнопку показать. Уведомление остаётся висеть и когда
+     *        туннель уже выключен, а работает одна раздача, — там «Отключить»
+     *        обещало бы не то, что сделает, и стоит [VpnNotificationButton.CONNECT].
      */
     fun buildForegroundVpnNotification(
         context: Context,
         channelId: String,
         subtitle: String = "",
-        showDisconnect: Boolean = false,
+        button: VpnNotificationButton = VpnNotificationButton.DISCONNECT,
         collapsed: Boolean = false,
     ): Notification {
         val readyVersion = getReadyDownloadedVersion(context)
         val openAppIntent = buildOpenAppPendingIntent(context, 5005)
-        // Своя строка — единственный способ показать «Отключить», не заставляя
+        // Своя строка — единственный способ показать кнопку, не заставляя
         // разворачивать карточку: Android не даёт попросить систему открыть её.
-        // Только когда кнопка вообще нужна и сверху не висит «обновление готово»:
-        // у той ветки свой макет, и два макета в одном уведомлении не уживаются.
-        val ownRow = showDisconnect && !collapsed && readyVersion.isBlank()
+        // Только когда сверху не висит «обновление готово»: у той ветки свой
+        // макет, и два макета в одном уведомлении не уживаются.
+        val ownRow = !collapsed && readyVersion.isBlank()
         val builder = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(R.drawable.ic_qs_nova)
             // Шапка карточки — акцентом темы; читаемость шапки система выправляет сама.
@@ -1130,17 +1265,18 @@ object AppUpdateManager {
 
         // Действие добавляется до ветки с готовым обновлением намеренно:
         // `DecoratedCustomViewStyle` рисует кнопки под своим макетом, поэтому
-        // отключиться можно и когда сверху висит «обновление готово». Иначе
-        // человек терял бы кнопку ровно в тот день, когда вышла новая версия.
-        // При `ownRow` действия не добавляем вовсе: `DecoratedCustomViewStyle`
-        // рисует их под своим макетом, и кнопка вышла бы дважды — один раз в
-        // самой строке, второй раз системным действием под ней.
-        if (showDisconnect && !ownRow) {
+        // управлять туннелем можно и когда сверху висит «обновление готово».
+        // Иначе человек терял бы кнопку ровно в тот день, когда вышла новая
+        // версия. При `ownRow` действия не добавляем вовсе:
+        // `DecoratedCustomViewStyle` рисует их под своим макетом, и кнопка вышла
+        // бы дважды — один раз в самой строке, второй раз системным действием
+        // под ней.
+        if (!ownRow) {
             builder.addAction(
                 NotificationCompat.Action.Builder(
                     R.drawable.ic_widget_power,
-                    NovaLanguage.tr(context, "Отключить"),
-                    buildDisconnectPendingIntent(context),
+                    NovaLanguage.tr(context, button.label),
+                    buildTunnelActionPendingIntent(context, button),
                 ).build()
             )
         }
@@ -1158,7 +1294,12 @@ object AppUpdateManager {
         }
 
         if (ownRow) {
-            val row = buildVpnStatusRemoteViews(context, subtitle, buildDisconnectPendingIntent(context))
+            val row = buildVpnStatusRemoteViews(
+                context = context,
+                subtitle = subtitle,
+                button = button,
+                actionPendingIntent = buildTunnelActionPendingIntent(context, button),
+            )
             return builder
                 .setContentTitle("Nova VPN")
                 .setContentText(NovaLanguage.tr(context, subtitle))
@@ -1174,9 +1315,29 @@ object AppUpdateManager {
             .build()
     }
 
+    /**
+     * @param context по возможности **экран**, а не `applicationContext`.
+     *
+     * Системный установщик — это activity, а запуск activity из фона Android
+     * молча отклоняет с десятой версии: в журнале остаётся только своё «Abort
+     * background activity starts», исключения нет, и снаружи это выглядит как
+     * «нажал установить, и ничего не произошло». Пока сюда приходил
+     * `applicationContext`, установка так и запускалась — из приёмника
+     * широковещания, то есть из фона.
+     */
     fun installReadyUpdate(context: Context) {
         if (!isUpdaterEnabled) return
-        launchInstaller(context.applicationContext)
+        launchInstaller(context)
+    }
+
+    /**
+     * Человек вернулся на экран — значит, установщик закрыт.
+     *
+     * Если бы он поставил обновление, процесса бы уже не было; раз мы здесь,
+     * установку отменили, и плашке пора вернуться к «Обновить».
+     */
+    fun forgetInstallerHandoff() {
+        installerHandoffAt = 0L
     }
 
     fun resumePendingInstallIfAllowed(context: Context) {
@@ -1192,31 +1353,94 @@ object AppUpdateManager {
         Handler(Looper.getMainLooper()).post {
             Toast.makeText(appContext, NovaLanguage.tr(appContext, "Пробуем установить обновление"), Toast.LENGTH_SHORT).show()
         }
-        installReadyUpdate(appContext)
+        // Дальше идёт `startActivity`, поэтому передаём то, что дали нам: сюда
+        // приходит экран, вернувшийся из системных настроек, а из фона системный
+        // установщик не открыть (см. [installReadyUpdate]).
+        installReadyUpdate(context)
     }
 
     private fun launchInstaller(context: Context) {
-        val clientData = ClientData(context)
-        val readyVersion = getReadyDownloadedVersion(context)
+        val appContext = context.applicationContext
+        val clientData = ClientData(appContext)
         val apkFile = File(clientData.getDownloadedApkPath())
         if (!apkFile.exists()) {
             LogManager.log("Кнопка установки нажата, но APK обновления не найден по пути ${apkFile.absolutePath}.")
-            getReadyDownloadedUpdate(context, clientData)
+            Thread({ getReadyDownloadedUpdate(appContext, clientData) }, "NovaUpdateStateRecheck")
+                .apply { isDaemon = true }
+                .start()
             Handler(Looper.getMainLooper()).post {
-                Toast.makeText(context, NovaLanguage.tr(context, "Файл обновления пропал, проверь загрузку ещё раз"), Toast.LENGTH_SHORT).show()
+                Toast.makeText(appContext, NovaLanguage.tr(appContext, "Файл обновления пропал, проверь загрузку ещё раз"), Toast.LENGTH_SHORT).show()
             }
             return
         }
+        // Разрешение спрашивается здесь, а не в потоке: за ним стоит переход в
+        // системные настройки, и запускать его должен тот же вызов, который
+        // пришёл с нажатия.
+        if (!ensurePackageInstallerPermission(appContext, rememberRetry = true)) {
+            return
+        }
+        if (!installSessionInProgress.compareAndSet(false, true)) {
+            LogManager.log("Установка обновления уже запускается. Повторный вызов пропускаем.")
+            return
+        }
+        // Дальше — в своём потоке.
+        //
+        // Проверка перед установкой идёт **мимо кэша** и поэтому стоит полного
+        // разбора APK дважды плюс SHA-256 по сорока мегабайтам. Нажатие приходит
+        // с главного потока (плашка, строка настроек) либо из `onReceive` с его
+        // десятью секундами, и синхронно это было секундным замиранием экрана
+        // ровно в момент нажатия (I13).
+        Thread(
+            {
+                var ownSessionRunning = false
+                try {
+                    ownSessionRunning = prepareAndHandOverInstall(context, appContext, clientData, apkFile)
+                } finally {
+                    // Признак занятости держит только **своя** сессия: ей ещё
+                    // предстоит отчитаться через `handleInstallCommitStatus`. На
+                    // пути системного установщика отчитываться некому, и плашкой
+                    // там управляет окно `installerHandoffAt`; не сняв признак
+                    // здесь, мы оставили бы «УСТАНОВКА ОБНОВЛЕНИЯ» навсегда.
+                    if (!ownSessionRunning) finishInstallSession()
+                }
+            },
+            "NovaInstallLaunch",
+        ).apply { isDaemon = true }.start()
+    }
+
+    /**
+     * Проверяет APK и отдаёт его установщику.
+     *
+     * @return `true` только когда поднята **своя** сессия `PackageInstaller`:
+     *         она одна отчитывается через `handleInstallCommitStatus`, и только
+     *         ради неё признак занятости остаётся взведённым.
+     */
+    private fun prepareAndHandOverInstall(
+        context: Context,
+        appContext: Context,
+        clientData: ClientData,
+        apkFile: File,
+    ): Boolean {
+        val readyVersion = getReadyDownloadedVersion(appContext)
+        // Мимо кэша намеренно. Кэш отвечает на вопрос «что показать на экране»;
+        // здесь же файл уходит наружу, и проверять его надо заново.
+        //
+        // Окно подмены эта проверка сужает, но не закрывает: системе отдаётся
+        // `content://` на сам файл, и читает она его в момент нажатия «Установить»
+        // — то есть спустя произвольное время. Настоящая преграда на этом
+        // участке одна и стоит она в системе: APK, подписанный другим ключом,
+        // поверх установленного не встанет.
         val validation = validateDownloadedApk(
-            context = context,
+            context = appContext,
             apkFile = apkFile,
             expectedVersion = readyVersion.ifBlank { clientData.getDownloadedApkVersion() },
             expectedSha256 = clientData.getLastUpdateSha256(),
+            allowCached = false,
         )
         val parsedApk = validation.parsedApk
         if (parsedApk == null) {
             val repairStarted = enqueueRepairForInvalidApk(
-                context = context,
+                context = appContext,
                 clientData = clientData,
                 path = apkFile.absolutePath,
                 reason = validation.failureReason.ifBlank {
@@ -1225,7 +1449,7 @@ object AppUpdateManager {
             )
             if (!repairStarted) {
                 discardInvalidDownloadedApkState(
-                    context = context,
+                    context = appContext,
                     clientData = clientData,
                     path = apkFile.absolutePath,
                     reason = validation.failureReason.ifBlank {
@@ -1233,29 +1457,158 @@ object AppUpdateManager {
                     },
                 )
             }
+            return false
+        }
+        val version = readyVersion.ifBlank { parsedApk.versionName }
+        noteInstallerHandoffAttempt(version)
+        // Сначала — обычный системный установщик, как у всех остальных приложений.
+        //
+        // Возвращается **`false`**, и это не описка: значение здесь отвечает на
+        // вопрос «осталась ли за нами своя сессия», а не «отдали ли APK».
+        // Системному установщику отчитываться перед нами нечем, поэтому признак
+        // занятости обязан сняться. Пока отсюда возвращалось `true`,
+        // `installSessionInProgress` не снимался до смерти процесса: человек
+        // закрывал системный экран установки, жал «Установить» второй раз — и
+        // получал в ответ тишину («Установка обновления уже запускается»), а
+        // плашка «УСТАНОВКА ОБНОВЛЕНИЯ» не гасла вовсе.
+        if (startSystemInstallerActivity(context, apkFile, version)) return false
+
+        return runCatching {
+            launchInstallerSession(
+                context = appContext,
+                apkFile = apkFile,
+                version = version,
+            )
+        }.onFailure { error ->
+            LogManager.log("Не удалось передать APK в PackageInstaller.Session: ${error.message}")
+        }.getOrDefault(false)
+    }
+
+    /**
+     * Считает, сколько раз подряд одну и ту же версию отдают установщику.
+     *
+     * Лечить отсюда нечего: отказ системы и отмену человеком по этому пути не
+     * различить. Но третье подряд нажатие на одну версию в одном и том же
+     * процессе означает, что установка не проходит, и в журнале это обязано
+     * быть названо — иначе снаружи видно только «жму, и ничего» (I4).
+     */
+    private fun noteInstallerHandoffAttempt(version: String) {
+        if (version != installerHandoffVersion) {
+            installerHandoffVersion = version
+            installerHandoffCount = 0
+        }
+        installerHandoffCount += 1
+        if (installerHandoffCount >= 3) {
+            LogManager.log(
+                "Обновление $version отдаётся установщику ${installerHandoffCount}-й раз подряд, " +
+                    "а приложение всё ещё прежней версии. APK нашу проверку проходит (пакет, версия, " +
+                    "подпись, SHA-256), значит отказывает система либо человек отменяет установку сам."
+            )
+        }
+    }
+
+    /**
+     * Отдаёт APK системному установщику так же, как это делает файловый менеджер.
+     *
+     * Зачем именно так, а не собственной сессией `PackageInstaller`. Сессия
+     * выглядит современнее, но ведёт себя иначе в двух местах, и оба видны
+     * человеку:
+     *
+     *  * подтверждение сессии системный экран показывает **одним диалогом**: он
+     *    отвечает «да» и сразу закрывается (`PackageInstallerActivity` при
+     *    непустом `sessionId` делает `setPermissionsResult` и `finish`). Дальше
+     *    установка идёт в фоне, наш процесс убивают заменой пакета — и человек
+     *    оказывается на рабочем столе без единого слова о том, чем всё кончилось.
+     *    Обычный путь (`ACTION_VIEW` на APK) ведёт через экран установки к экрану
+     *    «Приложение установлено» с кнопками «Готово» и «Открыть» — ровно то, что
+     *    человек видит, ставя любое другое приложение;
+     *  * сессия требует переложить сорок с лишним мегабайт в её поток, и только
+     *    потом начинается сама установка. По `content://` система читает файл
+     *    сама, ничего никуда не копируя.
+     *
+     * Перекладывать APK больше не нужно, поэтому и процента больше нет — вместо
+     * него плашка коротко говорит, что установщик открывается.
+     *
+     * @return удалось ли открыть установщик. `false` — остаётся запасной путь
+     *         собственной сессией.
+     */
+    private fun startSystemInstallerActivity(
+        context: Context,
+        apkFile: File,
+        version: String,
+    ): Boolean {
+        val uri = runCatching {
+            androidx.core.content.FileProvider.getUriForFile(
+                context.applicationContext,
+                BuildConfig.APPLICATION_ID + ".provider",
+                apkFile,
+            )
+        }.getOrElse { error ->
+            LogManager.log("Не удалось выдать системе ссылку на APK обновления: ${error.message}")
+            return false
+        }
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            // Из экрана — в его же задаче: так системный установщик остаётся
+            // поверх Nova и после установки показывает «Открыть». Новая задача
+            // нужна только там, где экрана нет вовсе (уведомление, плитка).
+            if (context !is android.app.Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        val fromScreen = context is android.app.Activity
+        return runCatching {
+            startActivityOnMainThread(context, intent)
+            installerHandoffAt = System.currentTimeMillis()
+            // «Отдали», а не «открыли»: отсутствие исключения ещё не значит, что
+            // экран появился. Запуск activity из фона система с десятой версии
+            // отклоняет **молча** — в журнале остаётся только её собственное
+            // «Abort background activity starts». С экрана это надёжно, из фона
+            // держится на льготе от нажатия по уведомлению и проверке не
+            // поддаётся; обещать здесь больше, чем мы знаем, нельзя.
+            LogManager.log(
+                "Отдали APK ${version.ifBlank { apkFile.name }} системному установщику " +
+                    if (fromScreen) {
+                        "с экрана."
+                    } else {
+                        "из фона — открылся ли он, приложению не видно."
+                    }
+            )
+            true
+        }.getOrElse { error ->
+            LogManager.log("Системный установщик не открылся: ${error.message}. Пробуем собственную сессию.")
+            false
+        }
+    }
+
+    /**
+     * `startActivity` с главного потока, чем бы ни был вызывающий поток.
+     *
+     * Проверка APK перед установкой идёт в своём потоке (она стоит разбора
+     * файла и SHA-256 по сорока мегабайтам), а запуск чужого экрана оттуда —
+     * это ровно тот случай, когда «обычно работает» хуже, чем «работает».
+     * Исключение изнутри `post` пробрасывается наружу: вызывающий по нему
+     * решает, падать ли в запасной путь.
+     */
+    private fun startActivityOnMainThread(context: Context, intent: Intent) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            context.startActivity(intent)
             return
         }
-        if (!ensurePackageInstallerPermission(context, rememberRetry = true)) {
-            return
-        }
-        if (!installSessionInProgress.compareAndSet(false, true)) {
-            LogManager.log("Установка обновления уже запускается. Повторный вызов пропускаем.")
-            return
-        }
-        Thread {
-            val success = runCatching {
-                launchInstallerSession(
-                    context = context,
-                    apkFile = apkFile,
-                    version = readyVersion.ifBlank { parsedApk.versionName },
-                )
-            }.onFailure { error ->
-                LogManager.log("Не удалось передать APK в PackageInstaller.Session: ${error.message}")
-            }.getOrDefault(false)
-            if (!success) {
-                finishInstallSession()
+        val failure = java.util.concurrent.atomic.AtomicReference<Throwable>()
+        val done = java.util.concurrent.CountDownLatch(1)
+        Handler(Looper.getMainLooper()).post {
+            try {
+                context.startActivity(intent)
+            } catch (error: Throwable) {
+                failure.set(error)
+            } finally {
+                done.countDown()
             }
-        }.start()
+        }
+        if (!done.await(5, TimeUnit.SECONDS)) {
+            throw IllegalStateException("главный поток не ответил за 5 с")
+        }
+        failure.get()?.let { throw it }
     }
 
     private fun launchInstallerSession(
@@ -1600,25 +1953,59 @@ object AppUpdateManager {
     }
 
     /**
-     * Намерение кнопки «Отключить».
+     * Кнопка в строке уведомления: что она обещает сделать.
+     *
+     * Кнопка следует состоянию туннеля, а не наличию службы. Служба живёт и при
+     * выключенном VPN — например, когда осталась одна раздача, — и «Отключить»
+     * там обещало бы то, чего уже нет.
+     */
+    enum class VpnNotificationButton(
+        /** Русский литерал — он же ключ перевода (I14, I29). */
+        val label: String,
+        val action: String,
+        val requestCode: Int,
+    ) {
+        DISCONNECT(
+            label = "Отключить",
+            action = NovaNotificationActionReceiver.ACTION_DISCONNECT,
+            requestCode = NovaNotificationActionReceiver.REQUEST_DISCONNECT,
+        ),
+        CONNECT(
+            label = "Подключить",
+            action = NovaNotificationActionReceiver.ACTION_CONNECT,
+            requestCode = NovaNotificationActionReceiver.REQUEST_CONNECT,
+        ),
+    }
+
+    /**
+     * Намерение кнопки «Отключить» / «Подключить».
      *
      * Широковещание, а не намерение прямо в службу: останов снимает признаки
-     * через `SharedPreferences`, а они кэшируются попроцессно (I2), и снять их
-     * обязан **основной** процесс. Приёмник объявлен без `android:process`,
-     * поэтому попадает именно туда — см. [NovaNotificationActionReceiver].
+     * через `SharedPreferences`, а запуск читает оттуда весь срез настроек,
+     * который обязан уехать вместе с намерением (I19). И то и другое кэшируется
+     * попроцессно (I2), поэтому делать это обязан **основной** процесс. Приёмник
+     * объявлен без `android:process`, поэтому попадает именно туда — см.
+     * [NovaNotificationActionReceiver].
      *
      * `setPackage` стоит потому, что намерение с собственным действием без него
      * считается неявным, а неявные широковещания к приёмнику из манифеста
      * Android 8 и старше не доставляет вовсе.
+     *
+     * Код запроса у каждого действия свой: с общим кодом `FLAG_UPDATE_CURRENT`
+     * переписывал бы одно намерение другим, и кнопка «Подключить» звала бы
+     * останов.
      */
-    private fun buildDisconnectPendingIntent(context: Context): PendingIntent {
-        val intent = Intent(NovaNotificationActionReceiver.ACTION_DISCONNECT).apply {
+    private fun buildTunnelActionPendingIntent(
+        context: Context,
+        button: VpnNotificationButton,
+    ): PendingIntent {
+        val intent = Intent(button.action).apply {
             setPackage(context.packageName)
             setClass(context, NovaNotificationActionReceiver::class.java)
         }
         return PendingIntent.getBroadcast(
             context,
-            NovaNotificationActionReceiver.REQUEST_DISCONNECT,
+            button.requestCode,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
@@ -1678,7 +2065,7 @@ object AppUpdateManager {
     )
 
     /**
-     * Строка уведомления VPN со своей кнопкой «Отключить».
+     * Строка уведомления VPN со своей кнопкой — «Отключить» либо «Подключить».
      *
      * Кнопка нарисована внутри макета, а не добавлена действием: действия видны
      * только в развёрнутой карточке, а развернуть её из приложения нельзя.
@@ -1686,24 +2073,26 @@ object AppUpdateManager {
     private fun buildVpnStatusRemoteViews(
         context: Context,
         subtitle: String,
-        disconnectPendingIntent: PendingIntent,
+        button: VpnNotificationButton,
+        actionPendingIntent: PendingIntent,
     ): RemoteViews {
         val palette = NovaNotificationPalette.current(context)
         return RemoteViews(context.packageName, R.layout.notification_vpn_status).apply {
             setTextViewText(R.id.tv_vpn_notification_subtitle, NovaLanguage.tr(context, subtitle))
             // Подпись кнопки в макете — русская заглушка: макет раздувает шторка, и
-            // наш перевод до неё не доходит. Ставим текст явно.
-            setTextViewText(R.id.btn_vpn_notification_disconnect, NovaLanguage.tr(context, "Отключить"))
+            // наш перевод до неё не доходит. Ставим текст явно — и он же решает,
+            // что кнопка обещает.
+            setTextViewText(R.id.btn_vpn_notification_action, NovaLanguage.tr(context, button.label))
             // Заливка, обводка и подпись кнопки — по акценту темы, с контрастом
             // подписи не ниже `NovaNotificationPalette.MIN_CONTRAST`.
-            setInt(R.id.iv_vpn_notification_disconnect_fill, "setColorFilter", palette.buttonFill)
-            setInt(R.id.iv_vpn_notification_disconnect_stroke, "setColorFilter", palette.buttonStroke)
-            setTextColor(R.id.btn_vpn_notification_disconnect, palette.buttonText)
+            setInt(R.id.iv_vpn_notification_action_fill, "setColorFilter", palette.buttonFill)
+            setInt(R.id.iv_vpn_notification_action_stroke, "setColorFilter", palette.buttonStroke)
+            setTextColor(R.id.btn_vpn_notification_action, palette.buttonText)
             setViewVisibility(
                 R.id.tv_vpn_notification_subtitle,
                 if (subtitle.isBlank()) android.view.View.GONE else android.view.View.VISIBLE,
             )
-            setOnClickPendingIntent(R.id.btn_vpn_notification_disconnect, disconnectPendingIntent)
+            setOnClickPendingIntent(R.id.btn_vpn_notification_action, actionPendingIntent)
         }
     }
 
@@ -2060,7 +2449,35 @@ object AppUpdateManager {
         }.toSet()
     }
 
+    /**
+     * @param allowCached можно ли ответить прошлым результатом для того же файла.
+     *        Перед установкой — нельзя: ровно там проверка и нужна по-настоящему.
+     */
     private fun validateDownloadedApk(
+        context: Context,
+        apkFile: File,
+        expectedVersion: String,
+        expectedSha256: String,
+        allowCached: Boolean = true,
+    ): DownloadedApkValidationResult {
+        val fingerprint = ApkValidationFingerprint(
+            path = apkFile.absolutePath,
+            length = apkFile.length(),
+            lastModified = apkFile.lastModified(),
+            expectedVersion = expectedVersion.trim(),
+            expectedSha256 = normalizeSha256(expectedSha256),
+        )
+        if (allowCached) {
+            apkValidationCache?.let { (cachedFingerprint, cachedResult) ->
+                if (cachedFingerprint == fingerprint) return cachedResult
+            }
+        }
+        val result = runFullApkValidation(context, apkFile, expectedVersion, expectedSha256)
+        apkValidationCache = fingerprint to result
+        return result
+    }
+
+    private fun runFullApkValidation(
         context: Context,
         apkFile: File,
         expectedVersion: String,
@@ -2136,6 +2553,7 @@ object AppUpdateManager {
             }
         }
         runCatching { File(path).delete() }
+        apkValidationCache = null
         clientData.clearDownloadedUpdateState()
         cleanupDownloadedApkFiles(context, keepPath = null)
         NotificationManagerCompat.from(context).cancel(NOTIFICATION_READY_ID)
@@ -2160,6 +2578,10 @@ object AppUpdateManager {
         path: String,
         reason: String,
     ): Boolean {
+        if (isBlockedByDnsMode(context, clientData)) {
+            LogManager.log("$reason Восстановление не запускаем: режим DNS, канал слишком узкий.")
+            return false
+        }
         val metadata = buildStoredMetadata(clientData)
         if (metadata == null) {
             LogManager.log("$reason Восстановление не запущено: нет актуальных metadata обновления.")
@@ -2274,6 +2696,18 @@ object AppUpdateManager {
     ): Boolean {
         val appContext = context.applicationContext
         val clientData = ClientData(appContext)
+        if (isBlockedByDnsMode(appContext, clientData)) {
+            // Работа восстановления могла быть заведена ещё до того, как человек
+            // ушёл в DNS, и WorkManager запускает её сам. Отказ вслух (I4).
+            LogManager.log("Режим DNS: докачку обновления не ведём — канал слишком узкий.")
+            clientData.setUpdateRepairState(
+                active = false,
+                version = metadata.version,
+                status = DNS_MODE_BLOCK_MESSAGE,
+            )
+            broadcastUpdateStateChanged(appContext)
+            return false
+        }
         val downloadDir = appContext.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
         if (downloadDir == null) {
             clientData.setUpdateRepairState(

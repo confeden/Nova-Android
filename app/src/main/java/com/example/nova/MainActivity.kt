@@ -1019,6 +1019,10 @@ class MainActivity : AppCompatActivity() {
         // Расписание переживает перезагрузку, но не переустановку и не «очистить
         // данные»: восстанавливаем его на каждом запуске, раз подписка сохранена.
         VlessSubscriptionManager.syncSchedule(this)
+        // Адрес своего сервера DNS-туннеля: раз в 8 часов фоном и сразу, если
+        // сверки давно не было. В обеих сборках — это не обновление приложения.
+        DnsServerFeed.syncSchedule(this)
+        DnsServerFeed.refreshInBackground(this, LogManager::log)
         refreshInstallUpdateButton()
         btnConnect.setPillStyle(
             fillColor = Color.argb(78, 220, 208, 255),
@@ -1069,14 +1073,14 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 UpdateDownloadProgress.State.READY -> {
-                    // Плашка гаснет сразу же, ещё до первого процента: сессия
-                    // установки поднимается в своём потоке, и без этого между
-                    // нажатием и первым отчётом оставалось окно, в котором
-                    // «Обновить» нажималось второй раз.
+                    // Плашка перестаёт нажиматься сразу же: между нажатием и
+                    // открытием системного установщика есть окно, в котором
+                    // «Обновить» нажималось второй раз. Процента тут нет —
+                    // установку ведёт система, и её прогресс нам не виден.
                     showUpdateChip(
                         caption = "УСТАНОВКА ОБНОВЛЕНИЯ",
                         captionColor = UPDATE_CHIP_BUSY_COLOR,
-                        progressLine = "0%",
+                        progressLine = "",
                         clickable = false,
                     )
                     AppUpdateManager.installReadyUpdate(this)
@@ -1298,6 +1302,9 @@ class MainActivity : AppCompatActivity() {
         refreshProtonAvailableCountries()
         refreshWarpDiscoverySnapshotFromStorage()
         statusHandler.post(statusRunnable)
+        // Человек вернулся на экран — значит, системный установщик закрыт, и
+        // плашке пора перестать обещать идущую установку.
+        AppUpdateManager.forgetInstallerHandoff()
         refreshInstallUpdateButton()
         AppUpdateManager.resumePendingInstallIfAllowed(this)
         currentTunnelBackend = resolveUiBackend(clientData.getServiceBackend())
@@ -1414,6 +1421,18 @@ class MainActivity : AppCompatActivity() {
         val progress = AppUpdateManager.getDownloadProgress(this)
         updateChipState = progress.state
         syncUpdateChipTicker()
+        // В режиме DNS плашка предлагает только то, что не стоит трафика.
+        //
+        // Проверка и загрузка там заблокированы в самом [AppUpdateManager]:
+        // лента обновлений и APK на сорок мегабайт через канал 380/42 кбит/с —
+        // это часы работы и весь канал целиком. Кнопка, которая нажимается и
+        // ничего не делает, хуже отсутствующей, поэтому здесь её просто нет.
+        // Уже скачанное обновление ставится как обычно: установка идёт с диска
+        // и сети не трогает.
+        if (isDnsSessionActive() && progress.state != UpdateDownloadProgress.State.READY) {
+            btnInstallUpdate.visibility = View.GONE
+            return
+        }
         when (progress.state) {
             UpdateDownloadProgress.State.DOWNLOADING,
             UpdateDownloadProgress.State.PAUSED -> {
@@ -1434,7 +1453,10 @@ class MainActivity : AppCompatActivity() {
                 showUpdateChip(
                     caption = "УСТАНОВКА ОБНОВЛЕНИЯ",
                     captionColor = UPDATE_CHIP_BUSY_COLOR,
-                    progressLine = "${progress.progressPercent}%",
+                    // Процента может не быть вовсе: APK уходит системному
+                    // установщику целиком, и «0%» на всё время установки — это
+                    // обещание прогресса, которого никто не даёт.
+                    progressLine = if (progress.progressPercent >= 0) "${progress.progressPercent}%" else "",
                     // Установку не отменяют: APK уже уходит в системный
                     // установщик, и прерывать его на середине нечем.
                     clickable = false,
@@ -1752,6 +1774,9 @@ class MainActivity : AppCompatActivity() {
     /** Подсказка «Отключите DoT» рядом с выбором входа в Tor. */
     private var mainDotHint: TextView? = null
 
+    /** Кнопка, под которой сейчас строка подрегиона: объяснение про DoT говорит о ней. */
+    private var mainDotHintChip: String = ""
+
     /**
      * Страны, которые есть в выпущенных профилях Proton.
      *
@@ -1904,6 +1929,8 @@ class MainActivity : AppCompatActivity() {
     private fun bindMainRegionSelector() {
         mainRegionScroll = findViewById(R.id.sv_exit_region_main)
         mainRegionGroup = findViewById(R.id.rg_exit_region)
+        frostOverlay = findViewById(R.id.frost_overlay)
+        dnsModeNotice = findViewById(R.id.tv_dns_mode_notice)
         mainRegionNotice = findViewById(R.id.tv_exit_last)
         mainSubRegionRow = findViewById(R.id.ll_exit_sub_region)
         mainDotHint = findViewById<TextView>(R.id.tv_exit_dot_hint)?.apply {
@@ -1985,6 +2012,7 @@ class MainActivity : AppCompatActivity() {
      * под селектором честно говорит, что именно происходит (I4).
      */
     private fun applyChipFromMainScreen(chipValue: String) {
+        applyDnsFrostState(chipValue, animate = true)
         if (chipValue == ConnectionSelectorPolicy.CHIP_TOR) {
             LogManager.log("Главный экран: выбран TOR.")
             // Сбор мостов запускается заранее, а не в момент подключения: он идёт
@@ -2092,12 +2120,22 @@ class MainActivity : AppCompatActivity() {
 
     private fun showPrivateDnsExplanation() {
         val host = TorTransport.strictPrivateDnsHost(this)
+        val viaDns = mainDotHintChip == ConnectionSelectorPolicy.CHIP_DNS
         val message = "В настройках телефона включён «Частный DNS» в строгом режиме" +
             (if (host.isNotBlank()) " ($host)" else "") + ".\n\n" +
             "В этом режиме Android резолвит имена только через DoT к этому серверу и никогда " +
-            "не спрашивает их обычным запросом. Через Tor такой DoT не проходит, поэтому " +
-            "туннель поднимется и пинги будут идти, а ни один сайт не откроется — браузер " +
-            "покажет ERR_NAME_NOT_RESOLVED.\n\n" +
+            "не спрашивает их обычным запросом. " +
+            (
+                if (viaDns) {
+                    "Через DNS-туннель такой DoT не проходит: канал для него слишком узок, " +
+                        "а Nova в этом режиме в системный DNS не вмешивается. Поэтому туннель " +
+                        "поднимется, а сайты не откроются — браузер покажет ERR_NAME_NOT_RESOLVED.\n\n"
+                } else {
+                    "Через Tor такой DoT не проходит, поэтому " +
+                        "туннель поднимется и пинги будут идти, а ни один сайт не откроется — браузер " +
+                        "покажет ERR_NAME_NOT_RESOLVED.\n\n"
+                }
+            ) +
             "Приложение это исправить не может: настройка системная. Откройте настройки " +
             "телефона и переключите «Частный DNS» на «Автоматически» или «Выключено»."
         // Диалог строится в теме настроек, а не в теме главного экрана: главный
@@ -2108,7 +2146,7 @@ class MainActivity : AppCompatActivity() {
             NovaTheme.optionFor(NovaTheme.current(this)).styleRes,
         )
         android.app.AlertDialog.Builder(themed)
-            .setTitle("Частный DNS мешает Tor")
+            .setTitle(if (viaDns) "Частный DNS мешает DNS-туннелю" else "Частный DNS мешает Tor")
             .setMessage(message)
             .setPositiveButton("Открыть настройки") { _, _ -> openPrivateDnsSettings() }
             .setNegativeButton("Понятно", null)
@@ -2228,6 +2266,136 @@ class MainActivity : AppCompatActivity() {
      * меняется, не уходя с экрана, и отметка, поставленная один раз при старте,
      * устаревала бы при первом же переключении.
      */
+    private var frostOverlay: FrostOverlayView? = null
+    private var dnsModeNotice: android.widget.TextView? = null
+
+    /** Какому чипу сейчас соответствует лёд: чтобы не перезапускать анимацию зря. */
+    private var frostShownForDns = false
+
+    /**
+     * Намерзание и оттаивание по выбранному чипу.
+     *
+     * @param animate `false` — экран просто перерисовался (поворот, возврат из
+     *        настроек), и заново проигрывать двухсекундную анимацию нечестно:
+     *        человек ничего не нажимал. Лёд в этом случае выставляется сразу.
+     *
+     * Точка, из которой ползёт холод, — центр самой кнопки DNS в координатах
+     * слоя, а не центр экрана: просили, чтобы расползалось «от нажатия».
+     */
+    private fun applyDnsFrostState(chipValue: String, animate: Boolean) {
+        val overlay = frostOverlay
+        val isDns = chipValue == ConnectionSelectorPolicy.CHIP_DNS
+        dnsModeNotice?.let { notice ->
+            notice.text = ConnectionSelectorPolicy.DNS_STATUS_NOTICE
+            notice.visibility = if (isDns) View.VISIBLE else View.GONE
+        }
+        if (overlay == null) return
+        if (!isDns) {
+            if (frostShownForDns) overlay.thaw()
+            frostShownForDns = false
+            return
+        }
+        // Вырезы обновляются и тогда, когда лёд уже лежит: подпись кнопки
+        // меняется на «ОТКЛЮЧИТЬ», и старый вырез остался бы от прежнего слова.
+        overlay.setClearZones(buildFrostClearZones(overlay))
+        if (frostShownForDns) return
+        frostShownForDns = true
+        val origin = dnsChipCenterIn(overlay)
+        if (animate) {
+            overlay.freezeFrom(origin[0], origin[1])
+        } else {
+            overlay.freezeFrom(origin[0], origin[1], durationMs = 1L)
+        }
+    }
+
+    /**
+     * Что лёд обходит.
+     *
+     * Кнопка DNS — потому что с неё холод и начинается: замерзать должен экран
+     * вокруг неё, а не она сама. Никакой обводки по краю: кольцо инея читалось
+     * как лишняя рамка вокруг кнопки.
+     *
+     * Кнопка подключения замерзает **целиком**, кроме контуров букв. Вырезать
+     * прямоугольник под надписью нельзя — на круглой кнопке он выглядит
+     * квадратной дыркой; по буквам же лёд обходит только сам текст.
+     */
+    private fun buildFrostClearZones(overlay: View): List<FrostOverlayView.FrostZone> {
+        val zones = ArrayList<FrostOverlayView.FrostZone>()
+
+        val dnsIndex = ConnectionSelectorPolicy.ORDER.indexOf(ConnectionSelectorPolicy.CHIP_DNS)
+        mainRegionButtons.getOrNull(dnsIndex)?.let { chip ->
+            viewRectIn(overlay, chip)?.let { rect ->
+                val path = android.graphics.Path().apply {
+                    addRoundRect(rect, rect.height() / 2f, rect.height() / 2f, android.graphics.Path.Direction.CW)
+                }
+                zones.add(FrostOverlayView.FrostZone(path))
+            }
+        }
+
+        if (::btnConnect.isInitialized) {
+            textGlyphPathIn(overlay, btnConnect)?.let { zones.add(FrostOverlayView.FrostZone(it)) }
+        }
+        // Подсказку «Отключите DoT» лёд не закрывает: её надо прочитать и нажать.
+        mainDotHint?.takeIf { it.visibility == View.VISIBLE }?.let { hint ->
+            viewRectIn(overlay, hint)?.let { rect ->
+                val path = android.graphics.Path().apply {
+                    addRoundRect(rect, rect.height() / 2f, rect.height() / 2f, android.graphics.Path.Direction.CW)
+                }
+                zones.add(FrostOverlayView.FrostZone(path))
+            }
+        }
+        return zones
+    }
+
+    /**
+     * Контуры букв кнопки в координатах слоя.
+     *
+     * Берутся её собственной кистью: подпись меняется («ПОДКЛЮЧИТЬ» ↔
+     * «ОТКЛЮЧИТЬ»), и вырез, посчитанный один раз под одну из них, сидел бы
+     * криво под другой.
+     */
+    private fun textGlyphPathIn(overlay: View, button: android.widget.TextView): android.graphics.Path? {
+        val bounds = viewRectIn(overlay, button) ?: return null
+        val text = button.text?.toString().orEmpty()
+        if (text.isBlank()) return null
+        val paint = button.paint
+        val width = paint.measureText(text)
+        val metrics = paint.fontMetrics
+        val baseline = bounds.centerY() - (metrics.ascent + metrics.descent) / 2f
+        val path = android.graphics.Path()
+        paint.getTextPath(text, 0, text.length, bounds.centerX() - width / 2f, baseline, path)
+        return path
+    }
+
+    /** Прямоугольник [view] в координатах [overlay]; `null` — пока не измерен. */
+    private fun viewRectIn(overlay: View, view: View): android.graphics.RectF? {
+        if (view.width == 0 || view.height == 0) return null
+        val viewLocation = IntArray(2)
+        val overlayLocation = IntArray(2)
+        view.getLocationOnScreen(viewLocation)
+        overlay.getLocationOnScreen(overlayLocation)
+        val left = (viewLocation[0] - overlayLocation[0]).toFloat()
+        val top = (viewLocation[1] - overlayLocation[1]).toFloat()
+        return android.graphics.RectF(left, top, left + view.width, top + view.height)
+    }
+
+    /** Центр кнопки DNS в координатах слоя льда; середина экрана — запасной вариант. */
+    private fun dnsChipCenterIn(overlay: View): FloatArray {
+        val index = ConnectionSelectorPolicy.ORDER.indexOf(ConnectionSelectorPolicy.CHIP_DNS)
+        val chip = mainRegionButtons.getOrNull(index)
+        if (chip == null || chip.width == 0) {
+            return floatArrayOf(overlay.width / 2f, overlay.height / 2f)
+        }
+        val chipLocation = IntArray(2)
+        val overlayLocation = IntArray(2)
+        chip.getLocationOnScreen(chipLocation)
+        overlay.getLocationOnScreen(overlayLocation)
+        return floatArrayOf(
+            (chipLocation[0] - overlayLocation[0] + chip.width / 2).toFloat(),
+            (chipLocation[1] - overlayLocation[1] + chip.height / 2).toFloat(),
+        )
+    }
+
     private fun refreshMainRegionSelector() {
         val group = mainRegionGroup ?: return
         val buttons = mainRegionButtons
@@ -2252,6 +2420,12 @@ class MainActivity : AppCompatActivity() {
         // проход приходит несколько раз в секунду, и до этого оно стояло здесь
         // трижды подряд с гарантированно одинаковым ответом (I13).
         val storedRegion = clientData.getExitRegionPreference()
+        // Лёд — свойство выбранного транспорта, а не нажатия: вернувшись из
+        // настроек с уже выбранным DNS, человек обязан увидеть его на месте.
+        applyDnsFrostState(
+            ConnectionSelectorPolicy.valueAt(ConnectionSelectorPolicy.indexOf(storedRegion)),
+            animate = false,
+        )
         val availability = ConnectionSelectorPolicy.availability(
             operaSupported = OperaProxyManager.isSupportedOnDevice(this),
             deviceRegistrationInProgress = clientData.isDeviceRegistrationInProgress(),
@@ -2317,20 +2491,28 @@ class MainActivity : AppCompatActivity() {
     private fun refreshMainSubRegionRow(chipValue: String) {
         val row = mainSubRegionRow ?: return
         val group = mainSubRegionGroup ?: return
-        // Подсказка про DoT нужна только там, где она что-то меняет: у Tor и
-        // только при включённом строгом «Частном DNS».
-        mainDotHint?.visibility = if (
-            chipValue == ConnectionSelectorPolicy.CHIP_TOR &&
-            TorTransport.strictPrivateDnsHost(this).isNotBlank()
-        ) {
-            View.VISIBLE
-        } else {
-            View.GONE
-        }
+        // Подсказка про DoT нужна только там, где она что-то меняет: у Tor и у
+        // DNS-туннеля, и только при включённом строгом «Частном DNS».
+        val dotHintNeeded = (
+            chipValue == ConnectionSelectorPolicy.CHIP_TOR ||
+                chipValue == ConnectionSelectorPolicy.CHIP_DNS
+            ) && TorTransport.strictPrivateDnsHost(this).isNotBlank()
+        mainDotHintChip = chipValue
+        mainDotHint?.visibility = if (dotHintNeeded) View.VISIBLE else View.GONE
         val entries = ConnectionSelectorPolicy.subRegionsFor(
             chipValue,
             if (chipValue == "proton") protonAvailableCountries else emptyList(),
         )
+        // У DNS подрегионов нет, но строка нужна ради одной подсказки: без неё
+        // человек со строгим DoT видел бы «подключено» и ни одного сайта.
+        if (entries.isEmpty() && dotHintNeeded) {
+            row.visibility = View.VISIBLE
+            mainSubRegionLabel?.visibility = View.GONE
+            mainSubRegionSignature = ""
+            if (group.childCount > 0) group.removeAllViews()
+            return
+        }
+        mainSubRegionLabel?.visibility = View.VISIBLE
         if (entries.isEmpty()) {
             row.visibility = View.GONE
             mainSubRegionSignature = ""
@@ -2893,6 +3075,30 @@ class MainActivity : AppCompatActivity() {
         return backendLabel.trim().uppercase().startsWith(NovaVpnService.BACKEND_TOR)
     }
 
+    private fun isDnsBackend(backendLabel: String): Boolean {
+        return backendLabel.trim().uppercase().startsWith(NovaVpnService.BACKEND_DNS)
+    }
+
+    /**
+     * Идёт ли сеанс по DNS-туннелю.
+     *
+     * Один вопрос — три решения на этом экране: подпись бейджа, выключенный
+     * пинг и спрятанная плашка обновления. Ответ берётся у политики, а не
+     * собирается здесь: ровно тот же вопрос задают настройки и [AppUpdateManager].
+     */
+    private fun isDnsSessionActive(): Boolean {
+        // Состояние сеанса проверяется первым намеренно: оно лежит в поле, а оба
+        // остальных признака читаются из файлов (I2), и спрашивать их на каждом
+        // тике выключенного VPN незачем.
+        val sessionLive = isTunnelConnected() || vpnState == NovaVpnService.STATE_CONNECTING
+        if (!sessionLive) return false
+        return ConnectionSelectorPolicy.isDnsSessionActive(
+            exitPreference = clientData.getExitRegionPreference(),
+            serviceTransport = clientData.getServiceTransport(),
+            sessionLive = true,
+        )
+    }
+
     private fun resolveImportedUiBackendLabel(): String? {
         if (!clientData.isImportedConfigSourceActive()) return null
         // Схлопывание «AUTO» в единственную семью раньше жило только здесь, и экран
@@ -3013,12 +3219,22 @@ class MainActivity : AppCompatActivity() {
                 var snapshot = if (tunnelNetwork != null) {
                     if (isOperaBackend(resolvedBackend)) {
                         fetchIpSnapshotViaOperaProxy()
-                    } else if (isVlessBackend(resolvedBackend) || isTorBackend(resolvedBackend)) {
+                    } else if (
+                        isVlessBackend(resolvedBackend) ||
+                        isTorBackend(resolvedBackend) ||
+                        isDnsBackend(resolvedBackend)
+                    ) {
                         // Своими силами экран этот адрес не узнает: при раздельном
                         // туннелировании он снаружи VPN, и запрос «по умолчанию» уходит
                         // мимо узла — возвращался адрес и страна провайдера, отчего при
                         // выходе в Сингапуре бейдж показывал RU. Берём снимок службы:
                         // она наблюдает выход через SOCKS-инбаунд ядра.
+                        //
+                        // DNS попал сюда последним и по тому же признаку: канал идёт
+                        // через чужую точку выхода, а собственный запрос экрана — мимо
+                        // неё, и бейдж писал «RU» при выходе в Германии. Плюс своя
+                        // причина: один лишний запрос здесь стоит дороже, чем где бы то
+                        // ни было ещё — потолок канала 380/42 кбит/с.
                         null
                     } else if (pendingStrictWarpProof) {
                         // Пока нет подтверждённого data-plane, берём IP/trace только через сам VPN Network.
@@ -3091,7 +3307,8 @@ class MainActivity : AppCompatActivity() {
                     // его обратно нельзя: любое своё измерение здесь идёт мимо узла и
                     // затирало бы честное наблюдение адресом провайдера.
                     !isVlessBackend(resolvedBackend) &&
-                    !isTorBackend(resolvedBackend)
+                    !isTorBackend(resolvedBackend) &&
+                    !isDnsBackend(resolvedBackend)
                 ) {
                     clientData.saveLastExitObservation(
                         ip = primaryIp,
@@ -3919,6 +4136,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun measureLatency(minIntervalMs: Long = 2_000L) {
+        if (isDnsSessionActive()) {
+            // Пинг в режиме DNS выключен насовсем, а не отложен.
+            //
+            // Проба — это отдельное соединение через канал с измеренным потолком
+            // 380/42 кбит/с, и каждые две секунды она отнимала бы его у того, ради
+            // чего режим включили. Свой ответ она всё равно не даёт: сквозная
+            // проба через DNS-туннель идёт секунды и не укладывается ни в один
+            // срок (см. `startDnsTunnelHeartbeat`), то есть шкала показывала бы
+            // прочерк, потратив на него трафик.
+            //
+            // Подтверждение живого сеанса от этого не страдает: его даёт
+            // `hasConnectedUiProof` по состоянию службы, а не по замеру.
+            showDnsPingNotice()
+            promoteConnectedUiIfVerified()
+            return
+        }
+        hideDnsPingNotice()
         val now = SystemClock.elapsedRealtime()
         if (now - lastLatencyRefreshAtMs < minIntervalMs) {
             return
@@ -4199,6 +4433,16 @@ class MainActivity : AppCompatActivity() {
         if (NovaVpnService.isPublishedTransport(transport, NovaVpnService.TRANSPORT_TOR)) {
             return "${NovaVpnService.TRANSPORT_TOR}: $effectiveCountry"
         }
+        // DNS — та же история, и она наблюдалась вживую: туннель шёл через чужую
+        // точку выхода в Германии, а бейдж писал «WARP: RU». Ветки для него не
+        // было вовсе, и подпись сваливалась в общий хвост про WARP, подбирая по
+        // дороге страну, измеренную мимо туннеля.
+        if (
+            NovaVpnService.isPublishedTransport(transport, NovaVpnService.TRANSPORT_DNS) ||
+            isDnsBackend(backend)
+        ) {
+            return "${NovaVpnService.TRANSPORT_DNS}: $effectiveCountry"
+        }
         // Импортированный профиль AmneziaWG подписывается своим именем: бэкенд у него
         // тот же `WARP`, и раньше бейдж обещал Cloudflare там, где туннель шёл на
         // сервер пользователя.
@@ -4452,8 +4696,44 @@ class MainActivity : AppCompatActivity() {
         if (lastMeasuredLatencyMs >= 0) labelView.setTextColor(themeAccentColor)
     }
 
+    /**
+     * Ставит объяснение вместо шкалы задержки.
+     *
+     * Шкала остаётся на месте пустой рамкой: она держит на себе и строку адресов
+     * сверху, и номер версии снизу, поэтому убрать её в `gone` значит развалить
+     * низ экрана. Подпись «Ping» прячется — обещать замер, которого не будет,
+     * нельзя (I4).
+     */
+    private fun showDnsPingNotice() {
+        val notice = findViewById<TextView>(R.id.tv_dns_ping_notice) ?: return
+        // Только на переходе: этот путь проходят каждый тик состояния, а
+        // `clearLatencies` перерисовывает шкалу, и повторять это раз в секунду
+        // ради одной и той же пустоты незачем.
+        if (notice.visibility == View.VISIBLE) return
+        notice.text = ConnectionSelectorPolicy.DNS_PING_NOTICE
+        notice.visibility = View.VISIBLE
+        // INVISIBLE, а не GONE: левый край подписи «Ping» задаёт ширину строки
+        // адресов (`fitIpAddressToPing`), и спрятанная насовсем она отпустила бы
+        // адрес наезжать на край экрана.
+        findViewById<TextView>(R.id.tv_internet_label)?.visibility = View.INVISIBLE
+        if (::latencyGraph.isInitialized) {
+            lastMeasuredLatencyMs = -1
+            latencyGraph.clearLatencies()
+        }
+    }
+
+    /** Возвращает шкалу задержки к обычному виду. */
+    private fun hideDnsPingNotice() {
+        val notice = findViewById<TextView>(R.id.tv_dns_ping_notice) ?: return
+        if (notice.visibility == View.GONE) return
+        notice.visibility = View.GONE
+        findViewById<TextView>(R.id.tv_internet_label)?.visibility = View.VISIBLE
+    }
+
     private fun resetLatencyDisplay() {
         if (!::latencyGraph.isInitialized) return
+        // Сеанса нет — объяснению про DNS тем более неоткуда взяться.
+        hideDnsPingNotice()
         lastLatencyRefreshAtMs = 0L
         lastMeasuredLatencyMs = -1
         latencyGraph.clearLatencies()

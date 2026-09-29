@@ -9,7 +9,6 @@ import android.os.Build
 import android.content.Intent
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
-import androidx.core.content.ContextCompat
 
 class NovaTileService : TileService() {
     private var tileReceiverRegistered = false
@@ -48,65 +47,7 @@ class NovaTileService : TileService() {
             tile.label = "Nova"
             tile.updateTile()
         } else {
-            val intent = Intent(this, NovaVpnService::class.java).apply {
-                action = NovaVpnService.ACTION_CONNECT_SMART
-                putExtra(NovaVpnService.EXTRA_EXIT_REGION, clientData.getExitRegionPreference())
-                // Выбор источника профилей едет вместе с регионом.
-                //
-                // Без него плитка сообщала службе только регион, служба применяла его
-                // через commit() — и этот commit сбрасывал на диск весь устаревший срез
-                // настроек процесса `:vpn`, включая режим импортированных. Запуск из
-                // шторки поднимал встроенный WARP и заодно стирал выбор пользователя.
-                putExtra(
-                    NovaVpnService.EXTRA_IMPORTED_CONFIG_SOURCE_ENABLED,
-                    clientData.isImportedWarpOnlyModeEnabled(),
-                )
-                putExtra(
-                    NovaVpnService.EXTRA_IMPORTED_PROTOCOL_PREFERENCE,
-                    clientData.getImportedProtocolPreference(),
-                )
-                putExtra(NovaVpnService.EXTRA_REAPPLY_SPLIT_MODE, clientData.getSplitMode())
-                putStringArrayListExtra(
-                    NovaVpnService.EXTRA_REAPPLY_SPLIT_APPS,
-                    ArrayList(clientData.getSplitApps())
-                )
-                // «Прямой поток» едет тем же путём: настройки процесса `:vpn` своей
-                // копией не обновляются, и без этих extras выбор человека до службы
-                // просто не доезжает.
-                putStringArrayListExtra(
-                    NovaVpnService.EXTRA_REAPPLY_DIRECT_APPS,
-                    ArrayList(clientData.getDirectApps()),
-                )
-                putStringArrayListExtra(
-                    NovaVpnService.EXTRA_REAPPLY_DIRECT_EXCLUDED,
-                    ArrayList(clientData.getDirectAppsExcluded()),
-                )
-                putExtra(
-                    NovaVpnService.EXTRA_REAPPLY_RUSSIAN_DIRECT_ENABLED,
-                    clientData.isRussianDirectAppsEnabled(),
-                )
-                putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_ENABLED, clientData.getTrafficMaskEnabled())
-                putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_MODE, clientData.getTrafficMaskMode())
-                putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_HOST, clientData.getTrafficMaskHost())
-                putExtra(NovaVpnService.EXTRA_REAPPLY_SNI_MASK_MODE, clientData.getSniMaskMode())
-                putExtra(NovaVpnService.EXTRA_REAPPLY_SNI_MASK_LIST, clientData.getSniCustomListRaw())
-                putExtra(NovaVpnService.EXTRA_REAPPLY_TUNNEL_MTU, clientData.getTunnelMtu())
-                // «Обход по доменам» — по той же причине: список, записанный экраном, в
-                // процессе `:vpn` не виден, и без extras он бы сохранялся и не действовал.
-                putExtra(
-                    NovaVpnService.EXTRA_REAPPLY_DOMAIN_BYPASS_ENABLED,
-                    clientData.isDomainBypassEnabled(),
-                )
-                putExtra(
-                    NovaVpnService.EXTRA_REAPPLY_DOMAIN_BYPASS_ZONES,
-                    clientData.getDomainBypassZonesRaw(),
-                )
-                putExtra(
-                    NovaVpnService.EXTRA_REAPPLY_DOMAIN_BYPASS_CUSTOM,
-                    clientData.getDomainBypassCustomRaw(),
-                )
-            }
-            ContextCompat.startForegroundService(this, intent)
+            NovaTunnelControl.start(this, "Плитка в шторке")
 
             val tile = qsTile
             tile.state = Tile.STATE_ACTIVE

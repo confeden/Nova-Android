@@ -1,0 +1,27 @@
+[Unit]
+Description=Nova DNS tunnel (StormDNS server, Nova dialect)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=stormdns
+Group=stormdns
+ExecStart=/usr/local/bin/stormdns-server -config /etc/stormdns/server_config.toml
+WorkingDirectory=/var/lib/stormdns
+Environment=GOMEMLIMIT=220MiB NOVA_EGRESS_BLOCKLIST=/etc/stormdns/egress_block.txt
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ReadWritePaths=/var/lib/stormdns
+ReadOnlyPaths=/etc/stormdns
+MemoryMax=320M
+LimitNOFILE=65536
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

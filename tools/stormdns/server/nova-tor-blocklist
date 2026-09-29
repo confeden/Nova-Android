@@ -1,0 +1,26 @@
+#!/bin/sh
+# Refresh the list of Tor relay IPs the tunnel refuses to reach (all running relays, not only exits).
+set -eu
+out=/etc/stormdns/egress_block.txt
+tmp=$(mktemp)
+trap 'rm -f "$tmp" "$tmp.json"' EXIT
+curl -fsS --max-time 120 -o "$tmp.json" 'https://onionoo.torproject.org/summary?type=relay&running=true'
+python3 - "$tmp.json" > "$tmp" <<'PY'
+import json, sys, ipaddress
+d = json.load(open(sys.argv[1]))
+seen = set()
+for r in d.get("relays", []):
+    for a in r.get("a", []):
+        a = a.strip("[]")
+        try:
+            seen.add(str(ipaddress.ip_address(a)))
+        except ValueError:
+            pass
+print("# tor relays, onionoo summary")
+print("\n".join(sorted(seen)))
+PY
+n=$(grep -vc '^#' "$tmp" || true)
+# Refuse an obviously broken download: the network has ~7-9k relays.
+[ "$n" -gt 3000 ] || { echo "only $n addresses, keeping old list" >&2; exit 1; }
+install -m 0644 "$tmp" "$out.new" && mv "$out.new" "$out"
+echo "tor blocklist: $n addresses"

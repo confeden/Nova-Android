@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Строка уведомления VPN со своей кнопкой «Отключить».
+    Строка уведомления VPN со своей кнопкой — «Отключить» либо «Подключить».
+
+    Подпись кнопки ставит код: она зависит от состояния туннеля, а «Отключить»
+    здесь — русская заглушка на случай, если перекраска и перевод не дошли.
 
     Кнопка нарисована прямо в макете, а не добавлена действием уведомления:
     действия видны только в развёрнутой карточке, а попросить систему открыть её
@@ -43,7 +46,7 @@
         <!--
             Отдельной строки «Nova VPN» здесь нет, и это выбор из двух зол.
 
-            Кнопка «Отключить» съедает у строки около сотни dp, и подробности
+            Кнопка съедает у строки около сотни dp, и подробности
             («MASQUE · RU · ↓ 1,4 МБ/с ↑ 0,2 МБ/с») обрывались многоточием ровно
             на скорости — то есть настройка «Скорость и транспорт» показывала
             меньше, чем до появления кнопки. Двух строк подписи и заголовка
@@ -75,7 +78,7 @@
         android:layout_marginStart="8dp">
 
         <ImageView
-            android:id="@+id/iv_vpn_notification_disconnect_fill"
+            android:id="@+id/iv_vpn_notification_action_fill"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:importantForAccessibility="no"
@@ -83,7 +86,7 @@
             android:src="@drawable/bg_notification_disconnect" />
 
         <ImageView
-            android:id="@+id/iv_vpn_notification_disconnect_stroke"
+            android:id="@+id/iv_vpn_notification_action_stroke"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:importantForAccessibility="no"
@@ -91,7 +94,7 @@
             android:src="@drawable/bg_notification_disconnect_stroke" />
 
         <TextView
-            android:id="@+id/btn_vpn_notification_disconnect"
+            android:id="@+id/btn_vpn_notification_action"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:paddingStart="10dp"

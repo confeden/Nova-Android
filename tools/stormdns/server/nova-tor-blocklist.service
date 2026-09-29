@@ -1,0 +1,6 @@
+[Unit]
+Description=Refresh Tor relay blocklist for the DNS tunnel
+After=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nova-tor-blocklist

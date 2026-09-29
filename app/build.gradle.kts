@@ -104,8 +104,8 @@ val tgCfWsSecret: String = run {
  * `NOVA_OPERA_RELAY_PASSWORD` остаётся аварийной подменой — но сборка с ней
  * перестаёт быть воспроизводимой, поэтому публиковать её нельзя.
  */
-val relayKeyId: String = "nova-android-159"
-val relayKeyToken: String = "QeVHQVr-uNuEnoM38MtAeyWUxrSlPYAs"
+val relayKeyId: String = "nova-android-160"
+val relayKeyToken: String = "afQGUQJM53ty5wrqC5lJPfR3-IPiLgpI"
 
 val operaRelayPassword: String = run {
     val override = System.getenv("NOVA_OPERA_RELAY_PASSWORD")?.trim()?.takeIf { it.isNotEmpty() }
@@ -165,8 +165,8 @@ android {
         // упаковывается (проверка ниже), а быстрая и диагностическая сборки идут с
         // прежним ключом, который сервер принимает. Провернуть ключ в обход сервера —
         // получить `407` у всех пользователей.
-        versionCode = 159
-        versionName = "1.32.4"
+        versionCode = 160
+        versionName = "1.32.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -292,6 +292,28 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+        }
+        resources {
+            // Мёртвый вес из BouncyCastle, который R8 не трогает: ресурсы — не код.
+            //
+            // `picnic/lowmc*.bin.properties` — таблицы постквантовой подписи Picnic:
+            // 1 221 059 байт, и они почти несжимаемы (высокая энтропия), то есть
+            // занимают в APK ровно столько же. Picnic в проекте не упоминается
+            // нигде: `bcprov` здесь ради Proton и WARP (`ProtonCrypto`,
+            // `WarpClient`), а PQC-провайдер не инстанцируется ни разу.
+            //
+            // `CertPathReviewerMessages_de` — немецкие тексты ошибок проверки
+            // цепочки сертификатов. Английский остаётся.
+            //
+            // Если однажды что-то позовёт Picnic, оно упадёт в рантайме, а не на
+            // сборке, — поэтому исключение узкое и названо поимённо, а не
+            // `org/bouncycastle/pqc/**`.
+            excludes += setOf(
+                "org/bouncycastle/pqc/crypto/picnic/lowmcL1.bin.properties",
+                "org/bouncycastle/pqc/crypto/picnic/lowmcL3.bin.properties",
+                "org/bouncycastle/pqc/crypto/picnic/lowmcL5.bin.properties",
+                "org/bouncycastle/x509/CertPathReviewerMessages_de.properties",
+            )
         }
     }
 }

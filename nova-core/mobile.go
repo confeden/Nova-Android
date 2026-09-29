@@ -125,6 +125,27 @@ func StartTorPtProxy(name string, listenAddr string, stateDir string, allowedTar
 	return novaengine.StartTorPtProxy(name, listenAddr, stateDir, allowedTargets)
 }
 
+// StartDNSTunnel raises a DNS tunnel and returns the local listen address.
+//
+// configJSON carries the endpoint the user supplied (zone + public key), the
+// carriers to try in order, and the cover knobs. The far end of a dnstt-class
+// server points at a SOCKS5 daemon, so the returned port behaves as SOCKS5 end
+// to end and tun2proxy can consume it unchanged.
+func StartDNSTunnel(configJSON string, listenAddr string) (string, error) {
+	return novaengine.StartDNSTunnel(configJSON, listenAddr)
+}
+
+// StopDNSTunnel closes the DNS tunnel and its listener.
+func StopDNSTunnel() {
+	novaengine.StopDNSTunnel()
+}
+
+// DNSTunnelStatus returns one line for the log: alive or not, on which carrier,
+// and how it died when it did.
+func DNSTunnelStatus() string {
+	return novaengine.DNSTunnelStatus()
+}
+
 // StopTorPtProxy closes every pluggable-transport listener.
 func StopTorPtProxy() {
 	novaengine.StopTorPtProxy()

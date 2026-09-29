@@ -94,6 +94,54 @@ object AwgI1Adaptation {
         return hex.substring(2, 10).equals("00000001", ignoreCase = true)
     }
 
+    /**
+     * Место профиля в очереди по прикрытию: 0 — вперёд, 1 — за ними.
+     *
+     * На сотовой сети решает `I1`, а не джанк. Замер на МегаФоне (Pixel 4a, стенд
+     * FlClash, 14 форм × 6 точек входа, два прохода вперемешку, контроль 24/24):
+     * QUIC Initial прошёл 53 раза из 60 при любом джанке, даже без него; SIP-звонок —
+     * 0 из 72, будь то текст из RFC 3261 или свой, с `I2` или без; без `I1` — 0 из 24.
+     * Шире по точкам входа SIP прошёл на одной из 24 (`8.6.112.6:8742`), и Nova на
+     * чистой установке перебирала три SIP-семени, прежде чем дойти до неё.
+     * На домашнем Ростелекоме проходят оба прикрытия, поэтому вне сотовой сети
+     * порядок не трогается. SIP-семена остаются в очереди хвостом, а не
+     * выбрасываются: на другой сети прикрытия могут поменяться местами (N5).
+     *
+     * Точка входа по имени, а не по адресу, тоже уходит в хвост. Таких семян два —
+     * `engage.cloudflareclient.com` на портах 2408 и 7103, оба с QUIC, и первое из них
+     * оказалось во главе очереди. На МегаФоне имя однажды не разрешилось, движок ждал
+     * поиска ~40 с сверх бюджета попытки, и первая попытка съела 83 с вместо шести.
+     *
+     * @param firmwareI1 строка или значение `I1` профиля; null — `I1` нет вовсе
+     * @param host точка входа профиля
+     */
+    fun cellularMaskRank(onCellular: Boolean, firmwareI1: String?, host: String): Int {
+        if (!onCellular) return 0
+        val quic = firmwareI1 != null && isQuicInitial(firmwareI1)
+        return if (quic && isIpLiteralHost(host)) 0 else 1
+    }
+
+    /** Адрес, а не имя: IPv4 из четырёх чисел или IPv6 (в скобках или без). */
+    fun isIpLiteralHost(host: String): Boolean {
+        val value = host.trim().removePrefix("[").removeSuffix("]")
+        if (value.contains(':')) return true
+        val parts = value.split('.')
+        return parts.size == 4 && parts.all { part -> part.toIntOrNull()?.let { it in 0..255 } == true }
+    }
+
+    /**
+     * Общее запасное прикрытие для сгенерированных профилей без своего `I1`.
+     *
+     * Раньше это было `I1` первого семени по списку, а первые пять семян — SIP:
+     * личный профиль уезжал с одним «INVITE» без `I2`, и на сотовой сети такой не
+     * проходит вовсе (см. [cellularMaskRank]). QUIC Initial проходит на обеих
+     * измеренных сетях, поэтому берётся он; SIP — только если QUIC нет ни у кого.
+     */
+    fun preferredSharedMask(candidates: List<String>): String {
+        val values = candidates.map { it.trim() }.filter { it.isNotEmpty() }
+        return values.firstOrNull { isQuicInitial(it) } ?: values.firstOrNull().orEmpty()
+    }
+
     fun applyI1(extras: List<String>, adaptedI1: String): List<String> {
         val value = adaptedI1.trim()
         if (value.isEmpty()) return extras

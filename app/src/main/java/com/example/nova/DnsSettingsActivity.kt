@@ -49,6 +49,7 @@ class DnsSettingsActivity : AppCompatActivity() {
     private lateinit var etAppFallback: EditText
     private lateinit var swAppPlainFallback: Switch
     private lateinit var tvSummary: TextView
+    private lateinit var tvPrivateDnsWarning: TextView
     private lateinit var dnsAppPickerAdapter: DnsAppPickerAdapter
 
     /**
@@ -172,6 +173,7 @@ class DnsSettingsActivity : AppCompatActivity() {
         etAppFallback = findViewById(R.id.et_app_fallback_dns)
         swAppPlainFallback = findViewById(R.id.sw_app_plain_fallback)
         tvSummary = findViewById(R.id.tv_dns_runtime_summary)
+        tvPrivateDnsWarning = findViewById(R.id.tv_dns_private_dns_warning)
         bindDnsRulesList()
         dnsAppPickerAdapter = DnsAppPickerAdapter(selectedOverridePackage) { selected ->
             selectedOverridePackage = selected.packageName
@@ -432,7 +434,65 @@ class DnsSettingsActivity : AppCompatActivity() {
             view.alpha = if (appOverrideEnabled) 1f else 0.55f
         }
         tvSelectedApp.alpha = if (appOverrideEnabled) 1f else 0.55f
+        renderPrivateDnsWarning()
         renderExclusiveActionState()
+    }
+
+    /**
+     * Предупреждение: системный «Частный DNS» перекрывает весь этот список.
+     *
+     * При строгом («имя узла провайдера») и при «Автоматически» Android шифрует
+     * запросы сам — DoT уходит мимо UDP/53, на котором построен перехват ядра, —
+     * и порядок резолверов здесь ни на что не влияет: список опрашивается только
+     * когда до ядра доходит открытый запрос. Замерено на Pixel 4a: при DNS-AI
+     * первым в списке страница dns-ai.ru/ip показывала «Используется DNS-AI: нет»,
+     * а стоило выключить системный «Частный DNS» — лог ядра тут же резолвил через
+     * первый резолвер списка. Молча показывать заполненный список, который не
+     * действует, — тот же дефект, ради которого экран и переделывался (I4). Та же
+     * причина и лечение уже названы в «Обходе по доменам».
+     *
+     * Показывается только когда список включён: при выключенном своём DNS
+     * перекрывать нечего.
+     */
+    private fun renderPrivateDnsWarning() {
+        val mode = privateDnsMode()
+        if (mode.isEmpty() || !swGlobalDns.isChecked) {
+            tvPrivateDnsWarning.visibility = View.GONE
+            return
+        }
+        tvPrivateDnsWarning.text =
+            "«Частный DNS» в системе включён ($mode): Android шифрует запросы сам, " +
+                "и этот список не действует — резолверы опрашиваются, только когда он выключен. " +
+                "Отключите его в настройках Android → Сеть и интернет → Частный DNS."
+        tvPrivateDnsWarning.visibility = View.VISIBLE
+    }
+
+    /**
+     * Режим системного «Частного DNS», если он включён.
+     *
+     * Читается из настроек системы, а не из `LinkProperties`: при поднятом VPN
+     * активная сеть — наша, и та описывала бы её, а не выбор человека. Пустая
+     * строка — «Частный DNS» выключен.
+     */
+    private fun privateDnsMode(): String {
+        val raw = runCatching {
+            android.provider.Settings.Global.getString(contentResolver, "private_dns_mode")
+        }.getOrNull()?.trim().orEmpty()
+        return when (raw.lowercase()) {
+            "", "off" -> ""
+            "opportunistic" -> "Автоматически"
+            "hostname" -> "имя узла провайдера"
+            else -> raw
+        }
+    }
+
+    /**
+     * Возврат из настроек Android: «Частный DNS» мог измениться, пока экран был
+     * в фоне. Перечитываем предупреждение, чтобы оно не отставало от системы.
+     */
+    override fun onResume() {
+        super.onResume()
+        if (::swGlobalDns.isInitialized) renderPrivateDnsWarning()
     }
 
     private fun renderSelectedApp() {

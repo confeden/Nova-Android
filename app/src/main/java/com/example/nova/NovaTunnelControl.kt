@@ -2,9 +2,10 @@ package com.example.nova
 
 import android.content.Context
 import android.content.Intent
+import androidx.core.content.ContextCompat
 
 /**
- * Остановка туннеля «снаружи экрана» — из плитки, виджета и уведомления.
+ * Включение и выключение туннеля «снаружи экрана» — из плитки, виджета и уведомления.
  *
  * Зачем отдельным местом. Последовательность останова состоит из пяти шагов, и
  * все пять обязательны: три признака снимаются, состояние записывается, и только
@@ -71,6 +72,94 @@ object NovaTunnelControl {
         clientData.clearRestartSession()
         clientData.saveServiceState(NovaVpnService.STATE_STOPPED)
         LogManager.log("$reason: остановка туннеля.")
+    }
+
+    /**
+     * Запуск туннеля «снаружи экрана» — из плитки, виджета и уведомления.
+     *
+     * Отдельным местом по той же причине, что и [stop], только беда здесь другая.
+     * Намерение подключения несёт с собой **весь срез настроек**: служба живёт в
+     * `:vpn`, её копия `SharedPreferences` своей жизнью не обновляется (I2), и
+     * применяет она пришедшее через `commit()`. Урезанное намерение поэтому не
+     * «не доедет» — оно сбросит на диск устаревший срез и сотрёт выбор человека
+     * (режим импортированных профилей, маскировка, раздельное туннелирование,
+     * обход по доменам). Это I19 дословно.
+     *
+     * Копий этого списка было две — в плитке и в виджете, слово в слово. Третья
+     * ради уведомления — ровно тот способ, которым в этом проекте уже расходились
+     * списки (G49), поэтому список один на всех.
+     *
+     * @param reason кто именно подключил — попадает в журнал.
+     */
+    fun start(context: Context, reason: String) {
+        val appContext = context.applicationContext
+        val clientData = ClientData(appContext)
+        val intent = Intent(appContext, NovaVpnService::class.java).apply {
+            action = NovaVpnService.ACTION_CONNECT_SMART
+            putExtra(NovaVpnService.EXTRA_EXIT_REGION, clientData.getExitRegionPreference())
+            // Выбор источника профилей едет вместе с регионом: без него служба
+            // применяла только регион, а commit() сбрасывал на диск устаревший
+            // срез и стирал режим импортированных.
+            putExtra(
+                NovaVpnService.EXTRA_IMPORTED_CONFIG_SOURCE_ENABLED,
+                clientData.isImportedWarpOnlyModeEnabled(),
+            )
+            putExtra(
+                NovaVpnService.EXTRA_IMPORTED_PROTOCOL_PREFERENCE,
+                clientData.getImportedProtocolPreference(),
+            )
+            putExtra(NovaVpnService.EXTRA_REAPPLY_SPLIT_MODE, clientData.getSplitMode())
+            putStringArrayListExtra(
+                NovaVpnService.EXTRA_REAPPLY_SPLIT_APPS,
+                ArrayList(clientData.getSplitApps()),
+            )
+            // «Прямой поток» едет тем же путём: настройки процесса `:vpn` своей
+            // копией не обновляются, и без этих extras выбор человека до службы
+            // просто не доезжает.
+            putStringArrayListExtra(
+                NovaVpnService.EXTRA_REAPPLY_DIRECT_APPS,
+                ArrayList(clientData.getDirectApps()),
+            )
+            putStringArrayListExtra(
+                NovaVpnService.EXTRA_REAPPLY_DIRECT_EXCLUDED,
+                ArrayList(clientData.getDirectAppsExcluded()),
+            )
+            putExtra(
+                NovaVpnService.EXTRA_REAPPLY_RUSSIAN_DIRECT_ENABLED,
+                clientData.isRussianDirectAppsEnabled(),
+            )
+            putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_ENABLED, clientData.getTrafficMaskEnabled())
+            putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_MODE, clientData.getTrafficMaskMode())
+            putExtra(NovaVpnService.EXTRA_REAPPLY_TRAFFIC_MASK_HOST, clientData.getTrafficMaskHost())
+            putExtra(NovaVpnService.EXTRA_REAPPLY_SNI_MASK_MODE, clientData.getSniMaskMode())
+            putExtra(NovaVpnService.EXTRA_REAPPLY_SNI_MASK_LIST, clientData.getSniCustomListRaw())
+            putExtra(NovaVpnService.EXTRA_REAPPLY_TUNNEL_MTU, clientData.getTunnelMtu())
+            // «Обход по доменам» — по той же причине: список, записанный экраном, в
+            // процессе `:vpn` не виден, и без extras он бы сохранялся и не действовал.
+            putExtra(
+                NovaVpnService.EXTRA_REAPPLY_DOMAIN_BYPASS_ENABLED,
+                clientData.isDomainBypassEnabled(),
+            )
+            putExtra(
+                NovaVpnService.EXTRA_REAPPLY_DOMAIN_BYPASS_ZONES,
+                clientData.getDomainBypassZonesRaw(),
+            )
+            putExtra(
+                NovaVpnService.EXTRA_REAPPLY_DOMAIN_BYPASS_CUSTOM,
+                clientData.getDomainBypassCustomRaw(),
+            )
+        }
+        // Отказ старта нельзя проглотить (I4): на Android 12+ фоновый запуск
+        // foreground-службы прошивка вправе отклонить, и без строки в журнале это
+        // выглядит как «кнопка не нажимается».
+        runCatching { ContextCompat.startForegroundService(appContext, intent) }
+            .onSuccess { LogManager.log("$reason: запуск туннеля.") }
+            .onFailure { error ->
+                LogManager.log(
+                    "$reason: команда запуска не дошла до службы — " +
+                        "${error.javaClass.simpleName}: ${error.message}."
+                )
+            }
     }
 
     /** Действие службы. Строка историческая, менять её нельзя. */

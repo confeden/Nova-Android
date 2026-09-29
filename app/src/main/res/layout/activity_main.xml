@@ -60,6 +60,28 @@
         app:layout_constraintStart_toStartOf="parent" />
 
     <!--
+        Предупреждение под состоянием: DNS-канал измеренно держит 380/42 кбит/с,
+        и человек, ждущий от него обычной скорости, решит, что приложение
+        сломалось. Текст лежит ВНУТРИ нижнего отступа tvStatus, поэтому цепочка
+        ограничений ниже не сдвигается вовсе.
+    -->
+    <TextView
+        android:id="@+id/tv_dns_mode_notice"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp"
+        android:layout_marginBottom="14dp"
+        android:textColor="#CFE1F2"
+        android:alpha="0.82"
+        android:textSize="12sp"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="@+id/tvStatus"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <!--
         Выпуск личных профилей Cloudflare — прямо под зелёным статусом, как
         попросил владелец.
 
@@ -385,6 +407,11 @@
                 android:id="@+id/rb_exit_tor"
                 style="@style/NovaMainRegionChip"
                 android:text="TOR" />
+
+            <RadioButton
+                android:id="@+id/rb_exit_dns"
+                style="@style/NovaMainRegionChip"
+                android:text="DNS" />
         </com.example.nova.FlowRadioGroup>
         </HorizontalScrollView>
 
@@ -584,6 +611,30 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent" />
 
+    <!--
+        Пояснение вместо пинга в режиме DNS.
+
+        Лежит ровно поверх шкалы, а не вместо неё: `graph_latency` держит на себе
+        и строку адресов сверху, и версию снизу, и если убрать его в `gone`, обе
+        уедут к краю экрана. Шкала в этом режиме остаётся пустой рамкой, внутри
+        которой и стоит текст.
+    -->
+    <TextView
+        android:id="@+id/tv_dns_ping_notice"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:gravity="center"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:saveEnabled="false"
+        android:textColor="#CFE1F2"
+        android:textSize="11sp"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="@+id/graph_latency"
+        app:layout_constraintEnd_toEndOf="@+id/graph_latency"
+        app:layout_constraintStart_toStartOf="@+id/graph_latency"
+        app:layout_constraintTop_toTopOf="@+id/graph_latency" />
+
     <TextView
         android:id="@+id/tv_version"
         android:layout_width="wrap_content"
@@ -596,5 +647,21 @@
         android:textStyle="bold"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="@+id/graph_latency" />
+
+    <!--
+        Лёд кладётся ПОСЛЕДНИМ ребёнком намеренно: он обязан лежать поверх всего,
+        иначе намерзает не на интерфейс, а под него. Касания сквозь него проходят
+        (см. FrostOverlayView.onTouchEvent).
+    -->
+    <com.example.nova.FrostOverlayView
+        android:id="@+id/frost_overlay"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:clickable="false"
+        android:focusable="false"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

@@ -118,7 +118,7 @@ object RegionTransportPolicy {
      * голландский выход Opera. Ровно тот дефект, ради которого написан этот файл
      * (см. [allowsOperaTransport]), только пришедший с другой стороны.
      */
-    val KNOWN_REGIONS: Set<String> = setOf("auto", "ru", "eu", "us", "masque", "vless", "proton", "tor")
+    val KNOWN_REGIONS: Set<String> = setOf("auto", "ru", "eu", "us", "masque", "vless", "proton", "tor", "dns")
 
     /**
      * Приводит сохранённое значение к известному, а незнакомое — к «Авто».

@@ -252,6 +252,53 @@ class TunnelStallDetectorTest {
         assertTrue(d.forceBudgetExhausted)
     }
 
+    /**
+     * Из-за этого дефекта переподключался рабочий туннель. Бюджет форсирований
+     * открывает только [TunnelStallDetector.HEALTHY_FLOW_MS] подряд идущего потока,
+     * а одно тихое окно сбрасывает отсчёт. На малотрафичном сеансе полминуты
+     * непрерывного потока не набираются никогда, бюджет остаётся израсходованным —
+     * и каждое следующее срабатывание уходит в переподключение вместо рукопожатия.
+     *
+     * Активная проба, прошедшая через тот же туннель, доказывает обратное, и этот
+     * факт обязан открывать бюджет заново.
+     */
+    @Test
+    fun `внешнее доказательство здоровья открывает бюджет форсирований`() {
+        val d = TunnelStallDetector(maxUnhelpfulForces = 1)
+        walk(d, listOf(4_000L to 0L, 4_000L to 0L))
+        assertTrue("бюджет обязан исчерпаться первым срабатыванием", d.forceBudgetExhausted)
+
+        d.noteExternalHealthProof()
+        assertFalse("проба доказала, что узел жив", d.forceBudgetExhausted)
+
+        val outcomes = walk(d, listOf(4_000L to 0L, 4_000L to 0L), startMs = 60_000L)
+        assertTrue(
+            "после доказательства снова просим рукопожатие, а не переподключение",
+            outcomes.any { it.shouldForceHandshake },
+        )
+    }
+
+    /**
+     * Доказательство здоровья снимает накопленную тишину, иначе ближайший же тик
+     * досчитал бы старое окно до порога и сработал бы снова.
+     */
+    @Test
+    fun `внешнее доказательство снимает накопленную тишину`() {
+        val d = detector()
+        val before = walk(d, listOf(4_000L to 0L))
+        assertEquals(TunnelStallDetector.State.SUSPECTED, before.last().state)
+
+        d.noteExternalHealthProof()
+
+        val after = d.observe(TunnelStallDetector.Sample(60_000L, 0L, 0L))
+        assertEquals(
+            "после разрыва наблюдения окно не судит узел",
+            TunnelStallDetector.State.NOT_INDICATIVE,
+            after.state,
+        )
+        assertEquals(0L, after.stalledForMs)
+    }
+
     @Test
     fun `reset снимает всё состояние`() {
         val d = detector()

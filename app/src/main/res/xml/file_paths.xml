@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <cache-path name="logs" path="logs/" />
+    <!--
+        Скачанный APK обновления. Системный установщик читает его по `content://`:
+        `file://` с Android 7 бросает `FileUriExposedException`, а без этого пути
+        ему нечего было бы открыть.
+    -->
+    <external-files-path name="updates" path="Download/" />
 </paths>

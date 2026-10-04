@@ -178,18 +178,9 @@ class StrokeTextView @JvmOverloads constructor(
         val blue = Color.blue(pillGlowColor)
         val baseAlpha = Color.alpha(pillGlowColor)
 
-        val rawText = text?.toString().orEmpty().ifBlank { " " }
-        val textWidth = paint.measureText(rawText)
-        val fontMetrics = paint.fontMetrics
-        val textHeight = (fontMetrics.descent - fontMetrics.ascent).coerceAtLeast(dp(18f))
-        val cx = width / 2f
-        val cy = height / 2f
-
         // Ядро — капсула по строке, тех же пропорций, что были в 1.26: свет идёт
         // линией из-под букв, а не точкой из середины.
-        val coreHalfW = textWidth / 2f + dp(12f)
-        val coreHalfH = textHeight / 2f + dp(6f)
-        val core = RectF(cx - coreHalfW, cy - coreHalfH, cx + coreHalfW, cy + coreHalfH)
+        val core = textCapsule()
         val coreRadius = core.height() / 2f
 
         pillBlurPaint.reset()
@@ -216,7 +207,7 @@ class StrokeTextView @JvmOverloads constructor(
             floatArrayOf(0.07f, 0.92f),
             floatArrayOf(0.04f, 1.00f),
         )
-        val widest = pillBlurRadius
+        val widest = fittedBlurRadius(core)
         for (layer in layers) {
             val blur = (widest * layer[0]).coerceAtLeast(1f)
             val alpha = (baseAlpha * layer[1]).toInt().coerceIn(0, 255)
@@ -235,19 +226,8 @@ class StrokeTextView @JvmOverloads constructor(
     }
 
     private fun drawPill(canvas: Canvas) {
-        val rawText = text?.toString().orEmpty().ifBlank { " " }
-        val textWidth = paint.measureText(rawText)
-        val fontMetrics = paint.fontMetrics
-        val textHeight = (fontMetrics.descent - fontMetrics.ascent).coerceAtLeast(dp(18f))
-
-        val cx = width / 2f
-        val cy = height / 2f
-
         // Базовый прямоугольник, слегка больше текста
-        val halfW = textWidth / 2f + dp(12f)
-        val halfH = textHeight / 2f + dp(6f)
-
-        val rect = RectF(cx - halfW, cy - halfH, cx + halfW, cy + halfH)
+        val rect = textCapsule()
         val cornerRadius = rect.height() / 2f
 
         pillBlurPaint.reset()
@@ -257,14 +237,62 @@ class StrokeTextView @JvmOverloads constructor(
         if (Color.alpha(pillGlowColor) > 0) {
             run {
                 pillBlurPaint.color = pillGlowColor
-                pillBlurPaint.maskFilter = BlurMaskFilter(pillBlurRadius, BlurMaskFilter.Blur.NORMAL)
+                pillBlurPaint.maskFilter = BlurMaskFilter(fittedBlurRadius(rect), BlurMaskFilter.Blur.NORMAL)
                 canvas.drawRoundRect(rect, cornerRadius, cornerRadius, pillBlurPaint)
                 pillBlurPaint.maskFilter = null
             }
         }
     }
 
+    /**
+     * Капсула под текстом: по самой длинной **строке**, высотой во все строки, с
+     * центром в области текста, а не в середине вида.
+     *
+     * Ширина бралась от всей фразы одной строкой, а центр — от середины вида. В
+     * горизонтальной раскладке статус переносится на две строки и стоит в узкой
+     * колонке: капсула выходила шире вида, и свечение обрезалось его краями в
+     * сплошной прямоугольник. Отступы статуса сверху и снизу теперь разные — от
+     * середины вида свет съезжал бы с букв.
+     */
+    private fun textCapsule(): RectF {
+        val fontMetrics = paint.fontMetrics
+        val lineHeight = (fontMetrics.descent - fontMetrics.ascent).coerceAtLeast(dp(18f))
+        val textLayout = layout
+        val textWidth: Float
+        val textHeight: Float
+        if (textLayout != null && textLayout.lineCount > 0) {
+            textWidth = (0 until textLayout.lineCount).maxOf { textLayout.getLineWidth(it) }
+            textHeight = textLayout.height.toFloat().coerceAtLeast(lineHeight)
+        } else {
+            textWidth = paint.measureText(text?.toString().orEmpty().ifBlank { " " })
+            textHeight = lineHeight
+        }
+        val cx = (paddingLeft + width - paddingRight) / 2f
+        val cy = (paddingTop + height - paddingBottom) / 2f
+        val halfW = textWidth / 2f + dp(12f)
+        val halfH = textHeight / 2f + dp(6f)
+        return RectF(cx - halfW, cy - halfH, cx + halfW, cy + halfH)
+    }
+
+    /**
+     * Радиус размытия, который вид способен показать.
+     *
+     * Вид рисуется в программном слое, и всё, что за его границей, отрезается
+     * ровной линией. Размытие сжимается до свободного места вокруг капсулы с
+     * допуском [BLUR_OVERFLOW_DP] — ровно на столько свечение выходило за поле и в
+     * исходной портретной раскладке (72 dp при 60 dp отступа), где край его
+     * облака незаметен.
+     */
+    private fun fittedBlurRadius(capsule: RectF): Float {
+        val room = minOf(capsule.left, width - capsule.right, capsule.top, height - capsule.bottom)
+        return pillBlurRadius.coerceAtMost(room + dp(BLUR_OVERFLOW_DP)).coerceAtLeast(dp(4f))
+    }
+
     private fun dp(value: Float): Float = value * resources.displayMetrics.density
+
+    private companion object {
+        const val BLUR_OVERFLOW_DP = 18f
+    }
 
     // Текст переводится в момент показа: код ставит русский исходник (см. NovaLanguage).
     override fun setText(text: CharSequence?, type: BufferType?) = NovaLanguage.onSetText(this, text, type)

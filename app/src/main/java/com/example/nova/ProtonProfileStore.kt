@@ -449,6 +449,9 @@ class ProtonProfileStore(context: Context) {
     fun readAttemptOutcomes(networkClass: String?): AttemptOutcomes =
         decodeAttemptOutcomes(readAtomically(outcomesFile), outcomeNetworkClass(networkClass))
 
+    /** Адреса узлов с успешной попыткой в любом классе сети ([decodeSucceededHosts]). */
+    fun readSucceededHosts(): Set<String> = decodeSucceededHosts(readAtomically(outcomesFile))
+
     /**
      * Отмечает исход попытки на паре `адрес:порт` узла Proton.
      *
@@ -747,10 +750,12 @@ class ProtonProfileStore(context: Context) {
 
             // Шаг 1: кто в голове своей страны.
             val rankInCountry = HashMap<String, Int>()
+            val ranks = IntArray(ordered.size)
             val wantsFallback = ArrayList<Boolean>(ordered.size)
-            ordered.forEach { profile ->
+            ordered.forEachIndexed { index, profile ->
                 val country = profile.country.trim().uppercase(Locale.US)
                 val rank = rankInCountry.getOrDefault(country, 0)
+                ranks[index] = rank
                 wantsFallback += rank < PORT_FALLBACK_SERVERS_PER_COUNTRY
                 rankInCountry[country] = rank + 1
             }
@@ -770,25 +775,33 @@ class ProtonProfileStore(context: Context) {
                 }
                 multiCount = affordable
             }
-            var singlesBudget = limit - multiCount * PORTS_PER_FALLBACK_SERVER
+            val singlesBudget = limit - multiCount * PORTS_PER_FALLBACK_SERVER
 
-            // Шаг 3: раздача.
+            // Шаг 3: одиночные слоты — тоже по странам, по кругу: сначала третий узел
+            // каждой страны, потом четвёртый и так далее. Раздача подряд по задержке
+            // отдавала весь остаток ближайшей стране: у NL сорок узлов, и NO с тремя
+            // узлами получала в список ровно два — оба могли молчать с этой сети, а
+            // живой третий не попадал в очередь вовсе (Pixel 4a, 2026-10-04).
+            val singles = ordered.indices
+                .filter { !wantsFallback[it] && ordered[it].entryIp.trim().trim('[', ']').isNotEmpty() }
+                .sortedWith(compareBy({ ranks[it] }, { it }))
+                .take(singlesBudget.coerceAtLeast(0))
+                .toHashSet()
+
+            // Шаг 4: раздача в исходном порядке.
             val out = ArrayList<ProtonProfile>(limit)
             val seen = HashSet<String>(limit * 2)
             ordered.forEachIndexed { index, profile ->
                 val host = profile.entryIp.trim().trim('[', ']')
                 if (host.isEmpty()) return@forEachIndexed
-                val ports = if (wantsFallback[index]) {
-                    fallbackPortsFor(profile.port)
-                } else {
-                    if (singlesBudget <= 0) return@forEachIndexed
-                    listOf(profile.port)
+                val ports = when {
+                    wantsFallback[index] -> fallbackPortsFor(profile.port)
+                    index in singles -> listOf(profile.port)
+                    else -> return@forEachIndexed
                 }
                 val variants = ports.mapNotNull { port ->
                     if (seen.add("$host:$port")) profile.copy(port = port) else null
                 }
-                if (variants.isEmpty()) return@forEachIndexed
-                if (!wantsFallback[index]) singlesBudget--
                 out += variants
             }
             return out
@@ -799,6 +812,88 @@ class ProtonProfileStore(context: Context) {
             val start = PORTS.indexOf(assigned).takeIf { it >= 0 } ?: 0
             val count = PORTS_PER_FALLBACK_SERVER.coerceAtMost(PORTS.size)
             return (0 until count).map { PORTS[(start + it) % PORTS.size] }
+        }
+
+        /**
+         * Пул узлов для выпуска: проверенные на этом телефоне, затем основной список,
+         * затем запасной — без повторов адреса.
+         *
+         * Зачем объединять. `/vpn/logicals` каждой сессии отдаёт свой срез бесплатного
+         * набора (N30, N36): 2026-10-04 у Mi A1 из NO был один `95.173.205.163` — и он
+         * держал туннель часами, — а у Pixel 4a на той же Wi-Fi только `.165` и `.167`,
+         * оба молчали. Узел, которого нет в текущем списке сессии, ключ всё равно
+         * принимает (`212.8.253.137`, 2026-09-13), поэтому выбрасывать известный узел
+         * только потому, что эта сессия его не назвала, — значит терять живой вход.
+         *
+         * @param proven узлы, через которые на этом телефоне уже был успех.
+         * @param primary живой список (или встроенный, если живого нет).
+         * @param extra встроенный список, когда основной — живой.
+         */
+        fun mergeNodePools(
+            proven: List<ProtonApi.Server>,
+            primary: List<ProtonApi.Server>,
+            extra: List<ProtonApi.Server>,
+        ): List<ProtonApi.Server> {
+            val primaryByHost = primary.associateBy { normalizeHost(it.entryIp) }
+            val out = LinkedHashMap<String, ProtonApi.Server>()
+            // Проверенный узел, который есть и в живом списке, берётся из живого:
+            // там свежая нагрузка и, если сменился, ключ пира.
+            proven.forEach { node ->
+                val host = normalizeHost(node.entryIp)
+                if (host.isNotEmpty()) out.putIfAbsent(host, primaryByHost[host] ?: node)
+            }
+            primary.sortedWith(compareBy<ProtonApi.Server> { it.load }.thenBy { it.score }).forEach { node ->
+                val host = normalizeHost(node.entryIp)
+                if (host.isNotEmpty()) out.putIfAbsent(host, node)
+            }
+            extra.forEach { node ->
+                val host = normalizeHost(node.entryIp)
+                if (host.isNotEmpty()) out.putIfAbsent(host, node)
+            }
+            return out.values.toList()
+        }
+
+        /**
+         * Отбирает до [limit] кандидатов **по кругу стран**, сохраняя порядок внутри
+         * страны.
+         *
+         * Общий срез по нагрузке отдавал 80 мест в основном NL и US (на Mi A1: NL 39,
+         * US 23, NO 1), и страна, которую выбрал человек, могла не дожить до замера
+         * ни одним узлом, кроме одного-двух. Круг гарантирует каждой стране все её
+         * узлы, пока предел не исчерпан большими странами.
+         */
+        fun pickCandidatesByCountry(ordered: List<ProtonApi.Server>, limit: Int): List<ProtonApi.Server> {
+            if (limit <= 0) return emptyList()
+            val byCountry = LinkedHashMap<String, ArrayDeque<ProtonApi.Server>>()
+            ordered.forEach { node ->
+                byCountry.getOrPut(node.country.trim().uppercase(Locale.US)) { ArrayDeque() }.addLast(node)
+            }
+            val out = ArrayList<ProtonApi.Server>(limit.coerceAtMost(ordered.size))
+            while (out.size < limit && byCountry.values.any { it.isNotEmpty() }) {
+                for (queue in byCountry.values) {
+                    if (out.size >= limit) break
+                    queue.removeFirstOrNull()?.let { out += it }
+                }
+            }
+            return out
+        }
+
+        /** Адреса, через которые был успех хоть в одном классе сети. */
+        fun decodeSucceededHosts(raw: String?): Set<String> {
+            if (raw.isNullOrBlank()) return emptySet()
+            return runCatching {
+                val root = JSONObject(raw)
+                val out = HashSet<String>()
+                root.keys().forEach { networkClass ->
+                    val succeeded = root.optJSONObject(networkClass)?.optJSONObject("succeeded_at")
+                        ?: return@forEach
+                    succeeded.keys().forEach { key ->
+                        val host = normalizeHost(key.substringBeforeLast(':'))
+                        if (host.isNotEmpty()) out += host
+                    }
+                }
+                out as Set<String>
+            }.getOrDefault(emptySet())
         }
 
         /** Ключ пары `адрес:порт` — один и для итогов попыток, и для очереди подключения. */

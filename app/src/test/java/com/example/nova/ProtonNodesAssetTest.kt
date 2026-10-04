@@ -34,7 +34,7 @@ class ProtonNodesAssetTest {
     @Test
     fun `в активе полсотни пригодных узлов`() {
         val nodes = asset().getJSONArray("nodes")
-        assertEquals(50, nodes.length())
+        assertTrue("в активе меньше полусотни узлов", nodes.length() >= 50)
         val seen = mutableSetOf<Pair<String, String>>()
         for (index in 0 until nodes.length()) {
             val node = nodes.getJSONObject(index)

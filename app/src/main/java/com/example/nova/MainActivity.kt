@@ -29,6 +29,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.constraintlayout.widget.ConstraintSet
 import androidx.core.content.ContextCompat
 import java.net.HttpURLConnection
 import java.net.InetAddress
@@ -152,6 +153,16 @@ class MainActivity : AppCompatActivity() {
          * четвёртая полоса уезжала под кнопку.
          */
         private const val SELECTOR_ROWS = 4
+
+        /** Под селектором в горизонтали: строка пояснений и «Настройки» с отступами. */
+        private const val LANDSCAPE_SELECTOR_FOOTER_DP = 100f
+
+        /** Сколько итог фонового события держится в микро-логе после его конца. */
+        private const val MICRO_EVENT_LINGER_MS = 8_000L
+
+        /** Строки счётчика микро-лога; переводятся шаблоном каталога. */
+        private const val ATTEMPT_TEMPLATE = "Попытка {0} из {1}"
+        private const val ATTEMPT_PROFILE_TEMPLATE = "Профиль {0} из {1}"
 
         /** Обычная высота кнопки селектора: столько же, сколько у бейджа. */
         private const val MAX_CHIP_HEIGHT_DP = 36f
@@ -326,6 +337,60 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread {
             protonProgressText = text
             updateAttemptProgressDisplay()
+            renderMicroEvent()
+        }
+    }
+
+    /** Строка событий микро-лога (`tv_micro_event`). */
+    private var tvMicroEvent: TextView? = null
+
+    /** Видели ли текущий прогон выпуска Proton живым — см. [renderMicroEvent]. */
+    private var microEventSawRun = false
+
+    /** До какого момента (`elapsedRealtime`) держать итог закончившегося прогона. */
+    private var microEventLingerUntilMs = 0L
+
+    private val microEventTick = Runnable { renderMicroEvent() }
+
+    /**
+     * Фоновые события — выпуск и обновление профилей Proton — в микро-логе.
+     *
+     * Шаг выпуска показывался только как счётчик подключения, когда Proton
+     * выпускался ради подключения. Кнопка «Обновить профили Proton» в настройках
+     * этого признака не ставит, а при живом туннеле строка счётчика скрыта, поэтому
+     * её прогон с главного экрана не был виден вовсе. Здесь строка своя: пока прогон
+     * идёт — его шаг, после конца — итог ещё [MICRO_EVENT_LINGER_MS]. Итог чужого,
+     * давно закончившегося прогона (его слушатель отдаёт сразу при подписке) не
+     * показывается: только тот, который этот экран застал живым.
+     */
+    private fun renderMicroEvent() {
+        val view = tvMicroEvent ?: return
+        statusHandler.removeCallbacks(microEventTick)
+        val running = ProtonProfileManager.isRunning()
+        // Шаг уже стоит в строке счётчика — второй раз его не пишем.
+        val inCounter = running && clientData.isProtonPreparationRequested()
+        val text = protonProgressText.ifBlank { ProtonProfileManager.currentStatus() }
+        val now = SystemClock.elapsedRealtime()
+        // Окно, а не однократный показ: менеджер снимает признак «идёт» раньше, чем
+        // публикует итог, и проверка, попавшая между ними, закрывала показ до того,
+        // как итог приходил.
+        if (!running && microEventSawRun) {
+            microEventSawRun = false
+            microEventLingerUntilMs = now + MICRO_EVENT_LINGER_MS
+        }
+        when {
+            running -> {
+                microEventSawRun = true
+                view.text = text
+                view.visibility = if (text.isBlank() || inCounter) View.GONE else View.VISIBLE
+                statusHandler.postDelayed(microEventTick, 1_000L)
+            }
+            now < microEventLingerUntilMs -> {
+                view.text = text
+                view.visibility = if (text.isBlank()) View.GONE else View.VISIBLE
+                statusHandler.postDelayed(microEventTick, microEventLingerUntilMs - now)
+            }
+            else -> view.visibility = View.GONE
         }
     }
     private var currentCountry = "--"
@@ -678,6 +743,7 @@ class MainActivity : AppCompatActivity() {
         window.navigationBarColor = android.graphics.Color.TRANSPARENT
         
         setContentView(R.layout.activity_main)
+        setupOrientationLayout()
 
         ivBackgroundArt = findViewById(R.id.iv_background_art)
         networkBackground = findViewById(R.id.nova_background_animation)
@@ -686,6 +752,7 @@ class MainActivity : AppCompatActivity() {
         tvIpAddress = findViewById(R.id.tv_ip_address)
         tvCountryBadge = findViewById(R.id.tv_country_badge)
         tvAttemptProgress = findViewById(R.id.tvAttemptProgress)
+        tvMicroEvent = findViewById(R.id.tv_micro_event)
         tvTransportNotice = findViewById(R.id.tv_transport_notice)
         restrictedMobileDots = findViewById(R.id.restricted_mobile_dots)
         tvStatus = findViewById(R.id.tvStatus)
@@ -1166,7 +1233,160 @@ class MainActivity : AppCompatActivity() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        applyOrientationLayout()
         updateUiByState(clientData.getServiceState())
+    }
+
+    private lateinit var mainRoot: androidx.constraintlayout.widget.ConstraintLayout
+
+    /** Разметка из XML — портретная; горизонтальная собирается поверх её копии. */
+    private lateinit var portraitConstraints: ConstraintSet
+    private var appliedLandscape: Boolean? = null
+    private var statusPortraitPaddingTop = 0
+    private var statusPortraitPaddingBottom = 0
+    private var landscapeInsetLeft = 0
+    private var landscapeInsetTop = 0
+    private var landscapeInsetRight = 0
+
+    private val isLandscapeLayout: Boolean
+        get() = appliedLandscape == true
+
+    /**
+     * Готовит переключение раскладки по повороту.
+     *
+     * Экран не пересоздаётся при повороте (`configChanges` в манифесте), поэтому
+     * `layout-land` здесь не сработал бы. Портретная разметка в горизонтали
+     * наслаивалась: кнопка по центру, статус на 120 dp отступов над ней уходил под
+     * строку состояния, а селектор, «Настройки», адреса и шкала пинга делили одну
+     * полосу высотой ~140 dp и ложились друг на друга (Pixel 4a, 2026-10-04).
+     */
+    private fun setupOrientationLayout() {
+        mainRoot = findViewById<ViewGroup>(android.R.id.content).getChildAt(0)
+            as androidx.constraintlayout.widget.ConstraintLayout
+        portraitConstraints = ConstraintSet().apply { clone(mainRoot) }
+        val status = findViewById<View>(R.id.tvStatus)
+        statusPortraitPaddingTop = status.paddingTop
+        statusPortraitPaddingBottom = status.paddingBottom
+        // Вырез камеры и панели в горизонтали стоят сбоку, а не сверху и снизу.
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(mainRoot) { _, insets ->
+            val bars = insets.getInsets(
+                androidx.core.view.WindowInsetsCompat.Type.systemBars() or
+                    androidx.core.view.WindowInsetsCompat.Type.displayCutout()
+            )
+            if (bars.left != landscapeInsetLeft || bars.top != landscapeInsetTop || bars.right != landscapeInsetRight) {
+                landscapeInsetLeft = bars.left
+                landscapeInsetTop = bars.top
+                landscapeInsetRight = bars.right
+                if (isLandscapeLayout) mainRoot.post { applyOrientationLayout(force = true) }
+            }
+            insets
+        }
+        applyOrientationLayout()
+    }
+
+    /**
+     * Три колонки в горизонтали: микро-лог | статус, кнопка, бейдж, адреса, пинг и
+     * версия | селектор, подрегион, «Настройки» и язык. Правая колонка — только
+     * органы управления, всё, что сообщает о туннеле, стоит под главной кнопкой.
+     * Портрет восстанавливается из XML как есть.
+     */
+    private fun applyOrientationLayout(force: Boolean = false) {
+        if (!::mainRoot.isInitialized) return
+        val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        if (!force && appliedLandscape == landscape) return
+        val orientationChanged = appliedLandscape != null && appliedLandscape != landscape
+        appliedLandscape = landscape
+        val density = resources.displayMetrics.density
+        fun dp(value: Int) = (value * density).toInt()
+        val set = ConstraintSet().apply { clone(portraitConstraints) }
+        val parent = ConstraintSet.PARENT_ID
+        val start = ConstraintSet.START
+        val end = ConstraintSet.END
+        val top = ConstraintSet.TOP
+        val bottom = ConstraintSet.BOTTOM
+        val split = R.id.guide_main_split
+        val logEdge = R.id.guide_main_log
+        val status = findViewById<View>(R.id.tvStatus)
+        if (landscape) {
+            // Микро-лог — слева от статуса, по центру его высоты.
+            set.clear(R.id.ll_micro_log, bottom)
+            set.connect(R.id.ll_micro_log, start, parent, start, landscapeInsetLeft + dp(12))
+            set.connect(R.id.ll_micro_log, end, logEdge, start, dp(4))
+            set.connect(R.id.ll_micro_log, top, R.id.tvStatus, top, 0)
+            set.connect(R.id.ll_micro_log, bottom, R.id.tvStatus, bottom, 0)
+
+            // Средняя колонка сверху вниз: статус, кнопка, бейдж; адреса, шкала и
+            // версия прижаты к низу, как в портрете.
+            listOf(R.id.tvStatus, R.id.tv_dns_mode_notice, R.id.btnConnect, R.id.tv_country_badge).forEach { id ->
+                set.connect(id, start, logEdge, start, 0)
+                set.connect(id, end, split, start, 0)
+            }
+            set.constrainWidth(R.id.tvStatus, ConstraintSet.MATCH_CONSTRAINT)
+            set.constrainWidth(R.id.tv_dns_mode_notice, ConstraintSet.MATCH_CONSTRAINT)
+            set.clear(R.id.tvStatus, bottom)
+            set.connect(R.id.tvStatus, top, parent, top, landscapeInsetTop)
+            set.setMargin(R.id.tv_dns_mode_notice, bottom, dp(8))
+            set.clear(R.id.btnConnect, top)
+            set.clear(R.id.btnConnect, bottom)
+            set.connect(R.id.btnConnect, top, R.id.tvStatus, bottom, 0)
+            // 236 dp кнопки и 68 dp «след. профиля» в среднюю колонку не входят.
+            set.constrainWidth(R.id.btnConnect, dp(200))
+            set.connect(R.id.btnNextProfile, end, split, start, 0)
+            set.connect(R.id.btn_install_update, end, split, start, dp(2))
+            set.clear(R.id.tv_country_badge, bottom)
+            set.connect(R.id.tv_country_badge, top, R.id.btnConnect, bottom, dp(10))
+            set.connect(R.id.graph_latency, start, logEdge, start, dp(12))
+            set.connect(R.id.graph_latency, end, split, start, dp(12))
+            set.constrainHeight(R.id.graph_latency, dp(48))
+
+            // Правая колонка: селектор от верха, под ним строка пояснений и
+            // «Настройки» с языком.
+            set.clear(R.id.sv_exit_region_main, bottom)
+            set.connect(R.id.sv_exit_region_main, top, parent, top, landscapeInsetTop + dp(8))
+            set.connect(R.id.sv_exit_region_main, start, split, start, dp(4))
+            set.connect(R.id.sv_exit_region_main, end, parent, end, landscapeInsetRight + dp(12))
+            set.connect(R.id.tv_exit_last, start, split, start, dp(4))
+            set.connect(R.id.tv_exit_last, end, parent, end, landscapeInsetRight + dp(12))
+            set.clear(R.id.btn_settings, bottom)
+            set.clear(R.id.btn_settings, start)
+            set.connect(R.id.btn_settings, top, R.id.tv_exit_last, bottom, dp(10))
+            set.connect(R.id.btn_settings, start, split, start, dp(16))
+        }
+        // `applyTo` переносит не только привязки, но и видимость, прозрачность и
+        // сдвиги — из снимка, сделанного при создании экрана. Без этого поворот
+        // возвращал фон в «скрыт, прозрачен»: фактура пропадала до следующей смены
+        // состояния, а кнопка «след. профиль» появлялась там, где её быть не должно.
+        for (index in 0 until mainRoot.childCount) {
+            val child = mainRoot.getChildAt(index)
+            if (child.id == View.NO_ID) continue
+            set.setVisibilityMode(child.id, ConstraintSet.VISIBILITY_MODE_IGNORE)
+            set.setAlpha(child.id, child.alpha)
+            set.setTranslationX(child.id, child.translationX)
+            set.setTranslationY(child.id, child.translationY)
+            set.setScaleX(child.id, child.scaleX)
+            set.setScaleY(child.id, child.scaleY)
+            set.setRotation(child.id, child.rotation)
+        }
+        set.applyTo(mainRoot)
+        if (landscape) {
+            // Портретный воздух под статусом держит расстояние до кнопки; в
+            // горизонтали высоты на него нет. Снизу остаётся строка под пояснение
+            // режима DNS, которое лежит внутри этого отступа.
+            status.setPadding(status.paddingLeft, dp(28), status.paddingRight, dp(30))
+        } else {
+            status.setPadding(status.paddingLeft, statusPortraitPaddingTop, status.paddingRight, statusPortraitPaddingBottom)
+        }
+        // Высота кнопок селектора считалась под прежний промежуток.
+        regionChipHeightPx = 0
+        regionChipGapPx = 0
+        mainRoot.post { applyRegionChipHeights() }
+        // Кольца расходятся от кнопки, а она переехала.
+        syncPulseOriginToConnectButton()
+        // Фактура собрана под размер экрана: повёрнутый растр растягивался бы
+        // вдвое и резался `centerCrop`.
+        if (orientationChanged && mainBackgroundMode() == MainBackgroundPolicy.MODE_IMAGE) {
+            loadBackdropArtSafely()
+        }
     }
 
     private fun getAppVersionName(): String {
@@ -1291,6 +1511,7 @@ class MainActivity : AppCompatActivity() {
         // текущий шаг, и вернувшийся на экран пользователь видит происходящее, а не
         // ждёт следующего.
         ProtonProfileManager.addListener(protonProgressListener)
+        renderMicroEvent()
         resumeProtonPreparationIfPending()
         // Регион мог смениться в настройках, пока экран был свёрнут. Тема — тоже,
         // а её главный экран сам не пересоздаёт, поэтому акцент ореола читается
@@ -1343,6 +1564,7 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
         isActivityResumed = false
         ProtonProfileManager.removeListener(protonProgressListener)
+        statusHandler.removeCallbacks(microEventTick)
         refreshKeepScreenAwake()
         statusHandler.removeCallbacks(statusRunnable)
         statusHandler.removeCallbacks(deferredNotificationPermissionRunnable)
@@ -1879,9 +2101,22 @@ class MainActivity : AppCompatActivity() {
      */
     private fun applyRegionChipHeights() {
         if (mainRegionButtons.isEmpty()) return
-        val settingsTop = findViewById<View>(R.id.btn_settings)?.top ?: 0
-        val connectBottom = if (::btnConnect.isInitialized) btnConnect.bottom else 0
-        if (settingsTop <= 0 || connectBottom <= 0 || settingsTop <= connectBottom) return
+        // В горизонтали «Настройки» стоят под селектором, а не ограничивают его
+        // снизу: граница — низ экрана за вычетом их строки и строки пояснений.
+        val settingsTop = if (isLandscapeLayout) {
+            mainRoot.height - (LANDSCAPE_SELECTOR_FOOTER_DP * resources.displayMetrics.density).toInt()
+        } else {
+            findViewById<View>(R.id.btn_settings)?.top ?: 0
+        }
+        // В горизонтали селектор стоит в правой колонке от самого верха, и над ним
+        // кнопки подключения нет: верхняя граница — край экрана (отступ под строку
+        // состояния уже в `topMargin`).
+        val connectBottom = when {
+            isLandscapeLayout -> 0
+            ::btnConnect.isInitialized -> btnConnect.bottom
+            else -> 0
+        }
+        if (settingsTop <= 0 || (!isLandscapeLayout && connectBottom <= 0) || settingsTop <= connectBottom) return
         val density = resources.displayMetrics.density
         val topMargin = (mainRegionScroll?.layoutParams as? ViewGroup.MarginLayoutParams)?.topMargin ?: 0
         // Поля под ореол берутся из того же промежутка: у обеих групп они сверху
@@ -1930,6 +2165,18 @@ class MainActivity : AppCompatActivity() {
         mainRegionScroll = findViewById(R.id.sv_exit_region_main)
         mainRegionGroup = findViewById(R.id.rg_exit_region)
         frostOverlay = findViewById(R.id.frost_overlay)
+        if (::btnConnect.isInitialized) {
+            btnConnect.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> refreshFrostClearZones() }
+            btnConnect.addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                override fun afterTextChanged(s: android.text.Editable?) {
+                    // Раскладка под новый текст будет готова только после прохода
+                    // разметки — поэтому через post, а не сразу.
+                    btnConnect.post { refreshFrostClearZones() }
+                }
+            })
+        }
         dnsModeNotice = findViewById(R.id.tv_dns_mode_notice)
         mainRegionNotice = findViewById(R.id.tv_exit_last)
         mainSubRegionRow = findViewById(R.id.ll_exit_sub_region)
@@ -2359,12 +2606,55 @@ class MainActivity : AppCompatActivity() {
         val text = button.text?.toString().orEmpty()
         if (text.isBlank()) return null
         val paint = button.paint
-        val width = paint.measureText(text)
-        val metrics = paint.fontMetrics
-        val baseline = bounds.centerY() - (metrics.ascent + metrics.descent) / 2f
+        val layout = button.layout
         val path = android.graphics.Path()
-        paint.getTextPath(text, 0, text.length, bounds.centerX() - width / 2f, baseline, path)
+        if (layout == null) {
+            val width = paint.measureText(text)
+            val metrics = paint.fontMetrics
+            val baseline = bounds.centerY() - (metrics.ascent + metrics.descent) / 2f
+            paint.getTextPath(text, 0, text.length, bounds.centerX() - width / 2f, baseline, path)
+            return path
+        }
+        // Позиция букв — из раскладки самой кнопки, а не посчитанная заново.
+        // Самодельный центр по ascent/descent расходился с TextView на
+        // несколько пикселей (тот центрует по top/bottom шрифта с учётом
+        // includeFontPadding), и вырез ложился рядом с буквами: подпись
+        // выглядела двоящейся, будто одна надпись наложена на другую.
+        val firstBaseline = button.baseline.toFloat()
+        val left = bounds.left + button.totalPaddingLeft - button.scrollX
+        val top = bounds.top + firstBaseline - layout.getLineBaseline(0)
+        // Текст раскладки, а не `button.text`: у кнопки включён textAllCaps, и
+        // нарисованы буквы преобразованного текста.
+        val shown = layout.text.toString()
+        val linePath = android.graphics.Path()
+        for (line in 0 until layout.lineCount) {
+            val start = layout.getLineStart(line)
+            val end = layout.getLineVisibleEnd(line)
+            if (end <= start) continue
+            linePath.reset()
+            paint.getTextPath(
+                shown, start, end,
+                left + layout.getLineLeft(line),
+                top + layout.getLineBaseline(line),
+                linePath,
+            )
+            path.addPath(linePath)
+        }
         return path
+    }
+
+    /**
+     * Пересчитывает вырезы льда под текущую подпись кнопки.
+     *
+     * Подпись меняется из двух десятков мест («ПОДКЛЮЧИТЬ», «ОТКЛЮЧИТЬ»,
+     * «ПОВТОРИТЬ», перевод на английский), а вырез раньше пересчитывался
+     * только при перерисовке селектора — и до неё под льдом оставались
+     * дыры от прежнего слова поверх нового.
+     */
+    private fun refreshFrostClearZones() {
+        if (!frostShownForDns) return
+        val overlay = frostOverlay ?: return
+        overlay.setClearZones(buildFrostClearZones(overlay))
     }
 
     /** Прямоугольник [view] в координатах [overlay]; `null` — пока не измерен. */
@@ -5965,6 +6255,7 @@ class MainActivity : AppCompatActivity() {
         if (ProtonProfileManager.isRunning() && clientData.isProtonPreparationRequested()) {
             val step = protonProgressText.ifBlank { ProtonProfileManager.currentStatus() }
             if (step.isNotBlank()) {
+                attemptProgressWaiting = false
                 tvAttemptProgress.text = step
                 tvAttemptProgress.visibility = View.VISIBLE
                 refreshTransportNotice()
@@ -6016,10 +6307,10 @@ class MainActivity : AppCompatActivity() {
             }
             if (displayedAttemptTotal > 0) {
                 val ordinal = displayedAttemptOrdinal.coerceIn(1, displayedAttemptTotal)
-                tvAttemptProgress.text = "$ordinal/${displayedAttemptTotal}"
+                showAttemptCount(ordinal, displayedAttemptTotal)
                 tvAttemptProgress.visibility = View.VISIBLE
             } else {
-                tvAttemptProgress.text = "..."
+                showAttemptWaiting()
                 tvAttemptProgress.visibility = View.VISIBLE
             }
         } else if (serviceTransport == NovaVpnService.TRANSPORT_VLESS &&
@@ -6038,9 +6329,9 @@ class MainActivity : AppCompatActivity() {
                 currentAttemptTotal = total
                 lastRawAttemptOrdinal = ordinal
                 lastRawAttemptTotal = total
-                tvAttemptProgress.text = "$ordinal/$total"
+                showAttemptCount(ordinal, total, ATTEMPT_PROFILE_TEMPLATE)
             } else {
-                tvAttemptProgress.text = "..."
+                showAttemptWaiting()
             }
             tvAttemptProgress.visibility = View.VISIBLE
         } else if (vpnState == NovaVpnService.STATE_CONNECTING) {
@@ -6089,9 +6380,9 @@ class MainActivity : AppCompatActivity() {
             }
             if (displayedAttemptTotal > 0 && displayedAttemptOrdinal > 0) {
                 val ordinal = displayedAttemptOrdinal.coerceIn(1, displayedAttemptTotal)
-                tvAttemptProgress.text = "$ordinal/${displayedAttemptTotal}"
+                showAttemptCount(ordinal, displayedAttemptTotal)
             } else {
-                tvAttemptProgress.text = "..."
+                showAttemptWaiting()
             }
             tvAttemptProgress.visibility = View.VISIBLE
         } else {
@@ -6191,15 +6482,49 @@ class MainActivity : AppCompatActivity() {
         refreshTransportNotice()
     }
 
+    /**
+     * Строка счётчика микро-лога: «Попытка 4 из 8» вместо голого «4/8».
+     *
+     * Голая дробь читалась по-разному — то как проценты, то как «4 из 8 серверов
+     * живы»; словами вопрос не возникает.
+     */
+    private fun showAttemptCount(ordinal: Int, total: Int, template: String = ATTEMPT_TEMPLATE) {
+        attemptProgressWaiting = false
+        tvAttemptProgress.text = NovaLanguage.tr(
+            this,
+            template.replace("{0}", ordinal.toString()).replace("{1}", total.toString()),
+        )
+    }
+
+    /**
+     * Счёт ещё не объявлен: словами, а ожидание показывают бегущие точки под строкой.
+     * Раньше здесь стояло «...» прямо над кнопкой подключения, и оно читалось как
+     * оборванный текст.
+     */
+    private fun showAttemptWaiting() {
+        attemptProgressWaiting = true
+        tvAttemptProgress.text = NovaLanguage.tr(this, "Готовим подключение")
+    }
+
+    /** Счётчик сейчас ждёт первого номера попытки ([showAttemptWaiting]). */
+    private var attemptProgressWaiting = false
+
+    /**
+     * Бегущие точки микро-лога: ожидание первого номера попытки или
+     * подключение по ограниченной мобильной сети с автоматической маскировкой.
+     */
     private fun refreshRestrictedMobileIndicator() {
         if (!::restrictedMobileDots.isInitialized) return
-        val shouldShow =
-            vpnState == NovaVpnService.STATE_CONNECTING &&
+        val connecting = vpnState == NovaVpnService.STATE_CONNECTING
+        val restrictedMobile =
+            connecting &&
                 warpDiscoverySnapshot?.running != true &&
                 clientData.getTrafficMaskEnabled() &&
                 clientData.getTrafficMaskMode() == "auto" &&
                 isRestrictedMobileActiveNow()
-        restrictedMobileDots.visibility = if (shouldShow) View.VISIBLE else View.INVISIBLE
+        val shouldShow = restrictedMobile ||
+            (connecting && attemptProgressWaiting && tvAttemptProgress.visibility == View.VISIBLE)
+        restrictedMobileDots.visibility = if (shouldShow) View.VISIBLE else View.GONE
         restrictedMobileDots.setAnimating(shouldShow)
     }
 

@@ -49,6 +49,7 @@ object DnsTunnelProcess {
      * Минута с запасом — это «долго, но честно», а не «зависли».
      */
     private const val READY_TIMEOUT_MS = 90_000L
+    private const val PORT_RELEASE_WAIT_MS = 2_000L
 
     /** Строки, которыми движок сам сообщает о судьбе сессии. */
     private const val SESSION_UP_MARK = "Session Initialized Successfully"
@@ -90,6 +91,8 @@ object DnsTunnelProcess {
      *
      * @param shouldAbort спрашивается, пока идёт перебор: человек мог нажать
      *        «отключить», и тогда ждать минуту готовности не для кого.
+     * @param preferredPort порт, который надо занять, если он свободен: при
+     *        смене сети tun2proxy уже смотрит на него. 0 — любой свободный.
      */
     fun start(
         context: Context,
@@ -97,6 +100,7 @@ object DnsTunnelProcess {
         resolvers: List<DnsTunnelResolver>,
         logger: (String) -> Unit,
         shouldAbort: () -> Boolean = { false },
+        preferredPort: Int = 0,
     ): Int {
         stop(logger)
         killStale(logger)
@@ -115,7 +119,11 @@ object DnsTunnelProcess {
             return 0
         }
 
-        val port = freePort()
+        val port = if (preferredPort in 1..65535 && awaitPortFree(preferredPort)) {
+            preferredPort
+        } else {
+            freePort()
+        }
         if (port == 0) {
             logger("DNS: не нашлось свободного локального порта под SOCKS5 движка.")
             return 0
@@ -292,6 +300,30 @@ object DnsTunnelProcess {
      * закрытием и запуском есть щель, но она в сотни раз уже, чем шанс угадать
      * занятый порт из фиксированного числа.
      */
+    /**
+     * Ждёт, пока прежний движок отпустит порт.
+     *
+     * `reuseAddress` — как у слушателя Go, который его тоже ставит: соединения
+     * прежнего движка в TIME_WAIT порт не держат.
+     */
+    private fun awaitPortFree(port: Int): Boolean {
+        val deadline = System.currentTimeMillis() + PORT_RELEASE_WAIT_MS
+        while (true) {
+            val free = try {
+                ServerSocket().use {
+                    it.reuseAddress = true
+                    it.bind(java.net.InetSocketAddress(InetAddress.getByName("127.0.0.1"), port), 1)
+                }
+                true
+            } catch (_: Exception) {
+                false
+            }
+            if (free) return true
+            if (System.currentTimeMillis() >= deadline) return false
+            Thread.sleep(100)
+        }
+    }
+
     private fun freePort(): Int = try {
         ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { it.localPort }
     } catch (_: Exception) {

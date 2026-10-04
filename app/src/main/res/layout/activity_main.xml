@@ -41,21 +41,50 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <!-- Status Text -->
+    <!--
+        Граница колонок горизонтальной раскладки (`MainActivity.applyOrientationLayout`):
+        слева статус и кнопка, справа селектор, адреса и пинг. В портрете к ней
+        ничего не привязано.
+    -->
+    <androidx.constraintlayout.widget.Guideline
+        android:id="@+id/guide_main_split"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        app:layout_constraintGuide_percent="0.62" />
+
+    <!-- Правая граница колонки микро-лога в горизонтали; в портрете не используется. -->
+    <androidx.constraintlayout.widget.Guideline
+        android:id="@+id/guide_main_log"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        app:layout_constraintGuide_percent="0.25" />
+
+    <!--
+        Status Text.
+
+        Отступы — поле под ореол букв (`StrokeTextView.fittedBlurRadius`); нижний
+        вместе с отступом до кнопки держит прежнее расстояние статус — кнопка. Микро-лог стоит над статусом (в горизонтали — колонкой слева),
+        а не между статусом и кнопкой: строки и бегущие точки над кнопкой читались
+        как часть кнопки, а «...» — как сломанный текст.
+    -->
     <com.example.nova.StrokeTextView
         android:id="@+id/tvStatus"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:gravity="center"
         android:text="НЕ ПОДКЛЮЧЕНО"
-        android:textColor="#C62828" 
+        android:textColor="#C62828"
         android:textSize="16sp"
         android:fontFamily="sans-serif-black"
         android:textStyle="bold"
         android:letterSpacing="0.082"
-        android:paddingTop="60dp"
+        android:breakStrategy="balanced"
+        android:paddingTop="44dp"
         android:paddingBottom="60dp"
-        app:layout_constraintBottom_toTopOf="@+id/tv_profile_issue_progress"
+        android:layout_marginBottom="48dp"
+        app:layout_constraintBottom_toTopOf="@+id/btnConnect"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent" />
 
@@ -72,7 +101,7 @@
         android:gravity="center"
         android:paddingStart="24dp"
         android:paddingEnd="24dp"
-        android:layout_marginBottom="14dp"
+        android:layout_marginBottom="30dp"
         android:textColor="#CFE1F2"
         android:alpha="0.82"
         android:textSize="12sp"
@@ -82,84 +111,100 @@
         app:layout_constraintStart_toStartOf="parent" />
 
     <!--
-        Выпуск личных профилей Cloudflare — прямо под зелёным статусом, как
-        попросил владелец.
-
-        Отдельная строка, а не `tvAttemptProgress`: тот уже занят счётчиком
-        перебора и шагом выпуска Proton, и третий претендент на одну строку
-        означал бы, что два сообщения затирают друг друга несколько раз в
-        секунду. Выпуск идёт в процессе `:vpn`, поэтому текст берётся из файла
-        `warp_generated_state.json`, а не из синглтона (I2).
+        Микро-лог: что сейчас происходит при подключении. Один контейнер, чтобы
+        раскладка переставляла его целиком: в портрете — над статусом, в
+        горизонтали — колонкой слева от статуса (`MainActivity.applyOrientationLayout`).
+        Порядок строк — от общего к частному: какой транспорт работает вместо
+        выбранного, выпуск профилей, номер попытки и бегущие точки ожидания.
     -->
-    <TextView
-        android:id="@+id/tv_profile_issue_progress"
+    <LinearLayout
+        android:id="@+id/ll_micro_log"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginStart="24dp"
         android:layout_marginEnd="24dp"
-        android:layout_marginBottom="8dp"
-        android:ellipsize="end"
-        android:gravity="center"
-        android:maxLines="1"
-        android:saveEnabled="false"
-        android:text=""
-        android:textColor="#7EEA87"
-        android:textSize="12sp"
-        android:textStyle="bold"
-        android:visibility="gone"
-        app:layout_constraintBottom_toTopOf="@+id/tv_transport_notice"
+        android:gravity="center_horizontal"
+        android:orientation="vertical"
+        app:layout_constraintBottom_toTopOf="@+id/tvStatus"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent" />
+        app:layout_constraintStart_toStartOf="parent">
 
-    <!-- Пояснение, когда работает не тот транспорт, который выбрал пользователь -->
-    <TextView
-        android:id="@+id/tv_transport_notice"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="24dp"
-        android:layout_marginEnd="24dp"
-        android:layout_marginBottom="10dp"
-        android:ellipsize="end"
-        android:gravity="center"
-        android:maxLines="2"
-        android:saveEnabled="false"
-        android:text=""
-        android:textColor="#FFC46B"
-        android:textSize="12sp"
-        android:textStyle="bold"
-        android:visibility="gone"
-        app:layout_constraintBottom_toTopOf="@+id/tvAttemptProgress"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent" />
+        <!--
+            Фоновое событие: выпуск и обновление профилей Proton с шагом и итогом
+            (`MainActivity.renderMicroEvent`).
+        -->
+        <TextView
+            android:id="@+id/tv_micro_event"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="6dp"
+            android:ellipsize="end"
+            android:gravity="center"
+            android:maxLines="2"
+            android:saveEnabled="false"
+            android:text=""
+            android:textColor="#9FD8FF"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
 
-    <TextView
-        android:id="@+id/tvAttemptProgress"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="24dp"
-        android:layout_marginEnd="24dp"
-        android:layout_marginBottom="8dp"
-        android:gravity="center"
-        android:maxLines="1"
-        android:ellipsize="end"
-        android:text="1/1"
-        android:textColor="#C8D4FF"
-        android:textSize="13sp"
-        android:textStyle="bold"
-        android:visibility="invisible"
-        app:layout_constraintBottom_toTopOf="@+id/restricted_mobile_dots"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent" />
+        <!-- Пояснение, когда работает не тот транспорт, который выбрал пользователь -->
+        <TextView
+            android:id="@+id/tv_transport_notice"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="6dp"
+            android:ellipsize="end"
+            android:gravity="center"
+            android:maxLines="3"
+            android:saveEnabled="false"
+            android:text=""
+            android:textColor="#FFC46B"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
 
-    <com.example.nova.SlidingDotsIndicatorView
-        android:id="@+id/restricted_mobile_dots"
-        android:layout_width="74dp"
-        android:layout_height="11dp"
-        android:layout_marginBottom="12dp"
-        android:visibility="invisible"
-        app:layout_constraintBottom_toTopOf="@+id/btnConnect"
-        app:layout_constraintEnd_toEndOf="@+id/tvAttemptProgress"
-        app:layout_constraintStart_toStartOf="@+id/tvAttemptProgress" />
+        <!--
+            Выпуск личных профилей Cloudflare. Отдельная строка, а не
+            `tvAttemptProgress`: тот занят счётчиком перебора и шагом выпуска
+            Proton. Выпуск идёт в процессе `:vpn`, поэтому текст берётся из файла
+            `warp_generated_state.json`, а не из синглтона (I2).
+        -->
+        <TextView
+            android:id="@+id/tv_profile_issue_progress"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="6dp"
+            android:ellipsize="end"
+            android:gravity="center"
+            android:maxLines="2"
+            android:saveEnabled="false"
+            android:text=""
+            android:textColor="#7EEA87"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/tvAttemptProgress"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:gravity="center"
+            android:maxLines="2"
+            android:text=""
+            android:textColor="#C8D4FF"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            android:visibility="invisible" />
+
+        <com.example.nova.SlidingDotsIndicatorView
+            android:id="@+id/restricted_mobile_dots"
+            android:layout_width="74dp"
+            android:layout_height="11dp"
+            android:layout_marginTop="6dp"
+            android:visibility="gone" />
+    </LinearLayout>
 
     <!-- Main Button (Geometric Center) -->
     <com.example.nova.GlowPillButton
@@ -187,6 +232,10 @@
         устройстве её принимали за «вперёд» вообще. Видимость подписи обязана
         меняться там же, где видимость самой кнопки, — иначе «след. профиль»
         повисает над пустым местом.
+
+        Подпись шире кнопки, поэтому она выровнена по её правому краю, а не по
+        центру: по центру она уходила за край экрана в портрете и на чипы
+        селектора в горизонтали.
     -->
     <TextView
         android:id="@+id/tv_next_profile_caption"
@@ -199,8 +248,7 @@
         android:textSize="10sp"
         android:visibility="gone"
         app:layout_constraintBottom_toTopOf="@+id/btnNextProfile"
-        app:layout_constraintEnd_toEndOf="@+id/btnNextProfile"
-        app:layout_constraintStart_toStartOf="@+id/btnNextProfile" />
+        app:layout_constraintEnd_toEndOf="@+id/btnNextProfile" />
 
     <com.example.nova.GlowPillButton
         android:id="@+id/btnNextProfile"

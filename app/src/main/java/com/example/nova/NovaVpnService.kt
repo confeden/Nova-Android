@@ -1535,6 +1535,12 @@ class NovaVpnService : OperaNativeVpnService() {
         /** Срок TCP-замера ([ProtonLatency]), которым меряется весь список. */
         private const val PROTON_PROBE_TCP_TIMEOUT_MS = 3_000
 
+        /** Сколько записей волны отдаётся другим странам, когда выбранная вся молчит. */
+        private const val PROTON_FOREIGN_SLOTS = 2
+
+        /** Отказ пары выбранной страны считается свежим столько времени. */
+        private const val PROTON_WANTED_SILENT_WINDOW_MS = 30L * 60 * 1000
+
         /** Режим сети меняется вместе с сетью, а не по часам; таймер тут — страховка. */
         private const val WHITELIST_REGIME_CACHE_MS = 5L * 60L * 1000L
         private const val BACKGROUND_HEARTBEAT_REQUEST_CODE = 4515
@@ -6577,7 +6583,10 @@ class NovaVpnService : OperaNativeVpnService() {
                     prepareMasqueIdentity(
                         clientData,
                         connectGenerationId = connectGenerationId,
-                        trackConnectProgress = true,
+                        // Счётчик — только когда MASQUE и есть выбранный способ. Иначе
+                        // это подготовка ключа, а не попытка, и «1/1» на экране было
+                        // чужим знаменателем перед очередью Proton или WARP.
+                        trackConnectProgress = masqueChosenExplicitly,
                         thoroughRegistration = masqueStartDecision.thoroughRegistration,
                         // В «Авто» MASQUE — догадка, а не просьба. Регистрация ради
                         // догадки стоит десятков секунд на Opera-прокси и API Cloudflare,
@@ -7010,7 +7019,11 @@ class NovaVpnService : OperaNativeVpnService() {
             // Теперь первой идёт очередь, а непопавшие в неё профили дописываются
             // следом — знаменатель остаётся прежним (весь встроенный набор), а
             // номер по построению растёт на единицу за попытку.
-            val builtInProgressGroupKeys = if (!importedConfigSourceActive) {
+            // Знаменатель — очередь выбранного способа. При выбранном Proton шкала
+            // строилась по встроенным профилям Cloudflare, и перебор узлов Proton
+            // показывался как «x/61».
+            val ownListProgressActive = importedConfigSourceActive || clientData.isProtonSourceActive()
+            val builtInProgressGroupKeys = if (!ownListProgressActive) {
                 buildList {
                     val seen = linkedSetOf<String>()
                     primaryWarpAttempts
@@ -7039,7 +7052,7 @@ class NovaVpnService : OperaNativeVpnService() {
             } else {
                 null
             }
-            val builtInProgressGroupKeysByCurrentQueue = if (!importedConfigSourceActive) {
+            val builtInProgressGroupKeysByCurrentQueue = if (!ownListProgressActive) {
                 primaryWarpAttempts
                     .map { buildWarpDiscoveryAttemptKey(it.mode.name, it.endpointHost, it.port) }
                     .filter { it.isNotBlank() }
@@ -7047,7 +7060,7 @@ class NovaVpnService : OperaNativeVpnService() {
             } else {
                 null
             }
-            val fullWarpProgressTotalHint = if (importedConfigSourceActive) {
+            val fullWarpProgressTotalHint = if (ownListProgressActive) {
                 importedPrimaryProgressCount.coerceAtLeast(1)
             } else {
                 builtInProgressGroupKeys?.size?.coerceAtLeast(1) ?: 1
@@ -9664,20 +9677,20 @@ class NovaVpnService : OperaNativeVpnService() {
         }
     }
 
-    private fun runDnsPhaseLocked(clientData: ClientData, connectGenerationId: Int): Boolean {
-        // Сверка адреса своего сервера — фоном: эта попытка идёт с тем, что уже
-        // известно, а переезд подхватит следующая (лента живёт в файле, общем
-        // для процессов).
-        DnsServerFeed.refreshInBackground(this, LogManager::log)
-        // Обходы для Telegram на паузе на весь режим DNS (владелец): ни
-        // ретрансляции через WSS-Worker'ы, ни прогрева их пула. Ретрансляция
-        // перехватывает трафик к дата-центрам Telegram от любого клиента —
-        // Telegram, NovaGram, AyuGram и прочих, — так что одно выключение
-        // закрывает всех. Здесь, а не у каждого из пяти входов в фазу, и явно:
-        // настройка ядра переживает сеанс. Вернёт её следующий не-DNS сеанс —
-        // он выставляет её заново по своим правилам.
-        setTelegramTransparentProxyConfigCompat(enabled = false, profile = "off")
-        LogManager.log("DNS: обходы для Telegram (WSS-ретрансляция) на паузе на время режима DNS.")
+    private data class DnsTunnelPlan(
+        val profile: DnsProfile,
+        val endpoint: DnsTunnelEndpoint,
+        val resolvers: List<DnsTunnelResolver>,
+    )
+
+    /**
+     * Профиль, точка и порядок несущих для очередного подъёма движка.
+     *
+     * Читается заново на каждый подъём, и это важно для смены сети: резолверы
+     * оператора берутся из свойств текущей подложной сети, а у новой сети
+     * они свои. `null` — подключаться нечем, причина уже в журнале (I4).
+     */
+    private fun resolveDnsTunnelPlan(): DnsTunnelPlan? {
         val profiles = DnsProfileStore.read(this)
         val profile = profiles.active()
         if (profile == null) {
@@ -9693,7 +9706,7 @@ class NovaVpnService : OperaNativeVpnService() {
                     "DNS: ни один профиль не подключается (" + blocked + ")."
                 }
             )
-            return false
+            return null
         }
         val listed = profiles.toEndpoint(profile)
         // Встроенному профилю — прямая несущая на адрес нашего NS-сервера, узнанный
@@ -9706,36 +9719,46 @@ class NovaVpnService : OperaNativeVpnService() {
             listed
         }
 
-        setCurrentBackend(BACKEND_DNS)
-        currentTransportLabel = TRANSPORT_DNS
-        broadcastState(STATE_CONNECTING)
-        installSocketProtector()
-
         val resolvers = DnsTunnelConfig.resolverOrder(systemResolverAddresses(), endpoint)
         if (resolvers.isEmpty()) {
             LogManager.log("DNS: ни одной несущей — ни у сети, ни в настройках. Подключаться нечем.")
-            return false
+            return null
         }
         LogManager.log(
             "DNS: профиль «${profile.name}», несущих в переборе ${resolvers.size}, " +
                 "первая ${resolvers.first().type} ${resolvers.first().addr}; зона ${endpoint.zone}."
         )
+        return DnsTunnelPlan(profile, endpoint, resolvers)
+    }
+
+    private fun runDnsPhaseLocked(clientData: ClientData, connectGenerationId: Int): Boolean {
+        // Сверка адреса своего сервера — фоном: эта попытка идёт с тем, что уже
+        // известно, а переезд подхватит следующая (лента живёт в файле, общем
+        // для процессов).
+        DnsServerFeed.refreshInBackground(this, LogManager::log)
+        // Обходы для Telegram на паузе на весь режим DNS (владелец): ни
+        // ретрансляции через WSS-Worker'ы, ни прогрева их пула. Ретрансляция
+        // перехватывает трафик к дата-центрам Telegram от любого клиента —
+        // Telegram, NovaGram, AyuGram и прочих, — так что одно выключение
+        // закрывает всех. Здесь, а не у каждого из пяти входов в фазу, и явно:
+        // настройка ядра переживает сеанс. Вернёт её следующий не-DNS сеанс —
+        // он выставляет её заново по своим правилам.
+        setTelegramTransparentProxyConfigCompat(enabled = false, profile = "off")
+        LogManager.log("DNS: обходы для Telegram (WSS-ретрансляция) на паузе на время режима DNS.")
+        val plan = resolveDnsTunnelPlan() ?: return false
+        val profile = plan.profile
+        val endpoint = plan.endpoint
+        val resolvers = plan.resolvers
+
+        setCurrentBackend(BACKEND_DNS)
+        currentTransportLabel = TRANSPORT_DNS
+        broadcastState(STATE_CONNECTING)
+        installSocketProtector()
 
         // Движок выбирает **профиль**, а не настройка: ссылка `slipnet://` — это
         // dnstt, и его поднимает ядро; `stormdns://` и `cottendns://` — общий
         // секрет и свой шифр, и это отдельный клиент отдельным процессом.
-        val socksPort = when (profile.engine) {
-            DnsProfileImport.Engine.DNSTT ->
-                startCoreDnsTunnel(endpoint, resolvers)
-
-            DnsProfileImport.Engine.COTTEN -> DnsTunnelProcess.start(
-                context = this,
-                profile = profile,
-                resolvers = resolvers,
-                logger = { LogManager.log(it) },
-                shouldAbort = { isUserStopped || !isConnectGenerationCurrent(connectGenerationId) },
-            )
-        }
+        val socksPort = startDnsEngine(plan, connectGenerationId)
         if (socksPort == 0) return false
         dnsSocksPort = socksPort
         if (isUserStopped || !isConnectGenerationCurrent(connectGenerationId)) {
@@ -9772,6 +9795,88 @@ class NovaVpnService : OperaNativeVpnService() {
         )
         startDnsTunnelHeartbeat(connectGenerationId)
         return true
+    }
+
+    /**
+     * Поднимает движок профиля и возвращает порт его SOCKS5; 0 — не поднялся.
+     *
+     * @param preferredPort порт, который движок должен занять. Нужен при смене
+     *        сети: tun2proxy уже смотрит на прежний порт, и движок, вставший на
+     *        тот же, подхватывает трафик без пересборки VPN-интерфейса.
+     */
+    private fun startDnsEngine(plan: DnsTunnelPlan, connectGenerationId: Int, preferredPort: Int = 0): Int =
+        when (plan.profile.engine) {
+            DnsProfileImport.Engine.DNSTT ->
+                startCoreDnsTunnel(plan.endpoint, plan.resolvers, preferredPort)
+
+            DnsProfileImport.Engine.COTTEN -> DnsTunnelProcess.start(
+                context = this,
+                profile = plan.profile,
+                resolvers = plan.resolvers,
+                logger = { LogManager.log(it) },
+                shouldAbort = { isUserStopped || !isConnectGenerationCurrent(connectGenerationId) },
+                preferredPort = preferredPort,
+            )
+        }
+
+    /**
+     * Перезапускает движок DNS-туннеля под живым VPN-интерфейсом.
+     *
+     * Полный реконнект для DNS губителен: туннель поверх движка держит
+     * tun2proxy, его остановка зовёт `tun2proxy_stop`, а тот через две секунды
+     * делает `exit(-1)` — процесс `:vpn` умирает, и сеанс возвращается только
+     * через перезапуск службы. На МегаФоне под белыми списками мобильная сеть
+     * пересоздаётся каждые три минуты (Pixel 4a, 2026-10-04: 1249 → 1252 → 1254),
+     * и каждый раз VPN пропадал на минуты.
+     *
+     * Меняется при смене сети только то, что к сети привязано: сокеты движка и
+     * резолверы оператора. Поэтому снимаем и поднимаем один движок на том же
+     * порту — интерфейс и tun2proxy остаются, приложения видят лишь оборванные
+     * соединения.
+     *
+     * @return `true` — движок снова на месте (или нас отменили); `false` —
+     *         на месте не вышло, и нужен полный путь.
+     */
+    private fun restartDnsEngineInPlace(connectGenerationId: Int): Boolean {
+        val port = dnsSocksPort
+        val tunThread = operaTunThread
+        if (
+            port !in 1..65535 ||
+            currentBackendLabel != BACKEND_DNS ||
+            !operaFallbackActive ||
+            tunThread == null ||
+            !tunThread.isAlive ||
+            tun2proxyForceStopAtMs != 0L
+        ) {
+            return false
+        }
+        if (!dnsPhaseActive.compareAndSet(false, true)) {
+            LogManager.log("DNS: фаза уже идёт в этом процессе — второй заход не заводим.")
+            return true
+        }
+        try {
+            LogManager.log("DNS: смена сети — перезапускаем движок на порту $port, VPN-интерфейс не трогаем.")
+            val plan = resolveDnsTunnelPlan() ?: return false
+            stopDnsTunnelQuietly()
+            val restarted = startDnsEngine(plan, connectGenerationId, preferredPort = port)
+            if (isUserStopped || !isConnectGenerationCurrent(connectGenerationId)) return true
+            if (restarted != port) {
+                LogManager.log(
+                    "DNS: движок не встал на прежний порт $port (получено $restarted) — " +
+                        "переходим к полному переподключению."
+                )
+                if (restarted != 0) stopDnsTunnelQuietly()
+                return false
+            }
+            dnsSocksPort = port
+            markSuccessfulTunnelProbe()
+            broadcastState(STATE_CONNECTED)
+            LogManager.log("DNS активен: профиль «${plan.profile.name}», движок перезапущен без пересборки туннеля.")
+            startDnsTunnelHeartbeat(connectGenerationId)
+            return true
+        } finally {
+            dnsPhaseActive.set(false)
+        }
     }
 
     /**
@@ -9820,10 +9925,11 @@ class NovaVpnService : OperaNativeVpnService() {
     private fun startCoreDnsTunnel(
         endpoint: DnsTunnelEndpoint,
         resolvers: List<DnsTunnelResolver>,
+        listenPort: Int = 0,
     ): Int {
         val configJson = DnsTunnelConfig.toCoreJson(endpoint, resolvers, DNS_TUNNEL_PROBE_TIMEOUT_MS)
         val listenAddr = try {
-            nova.Nova.startDNSTunnel(configJson, "127.0.0.1:0")
+            nova.Nova.startDNSTunnel(configJson, "127.0.0.1:$listenPort")
         } catch (error: Throwable) {
             LogManager.log("DNS: туннель не поднялся: ${error.message}")
             return 0
@@ -12986,8 +13092,10 @@ class NovaVpnService : OperaNativeVpnService() {
                     defaultIpv6 = wireGuardIpv6,
                 )
             }
+        // Proton — такой же собственный список, как импорт: шкала по его очереди, а не
+        // по встроенным профилям Cloudflare.
         val importedSourceProgressActive =
-            clientData.isImportedConfigSourceActive() &&
+            (clientData.isImportedConfigSourceActive() || clientData.isProtonSourceActive()) &&
                 connectionAttempts.any { it.importedConfigHost != null }
         val importedProgressGroupKeys = if (importedSourceProgressActive) {
             connectionAttempts.map { attempt ->
@@ -15543,9 +15651,41 @@ class NovaVpnService : OperaNativeVpnService() {
                         "${describeNetwork(connectivityManager, selectedUnderlying) ?: "unknown"}."
                 )
                 broadcastState(STATE_CONNECTING)
-                val connectGenerationId = beginConnectGeneration(stopExisting = true)
-
                 val regionPreference = normalizeRegionPreference(clientData.getExitRegionPreference())
+                if (regionPreference == ConnectionSelectorPolicy.CHIP_DNS) {
+                    // Сначала — без разборки интерфейса: иначе остановка tun2proxy
+                    // обрекает процесс (см. [restartDnsEngineInPlace]).
+                    val inPlaceGeneration = beginConnectGeneration(stopExisting = false)
+                    // Новое поколение сбросило флаг, а подъём движка идёт до
+                    // минуты: без флага следующий сигнал сторожа отменил бы этот
+                    // подъём и упёрся бы в занятую фазу — и не поднял бы никто.
+                    reconnectingForNetworkChange = true
+                    val restored = try {
+                        restartDnsEngineInPlace(inPlaceGeneration)
+                    } finally {
+                        reconnectingForNetworkChange = false
+                    }
+                    if (restored) return@startSafeServiceThread
+                    if (isUserStopped || !isConnectGenerationCurrent(inPlaceGeneration)) {
+                        return@startSafeServiceThread
+                    }
+                }
+                val connectGenerationId = beginConnectGeneration(stopExisting = true)
+                if (tun2proxyForceStopAtMs != 0L) {
+                    // Разборка звала tun2proxy_stop: через две секунды библиотека
+                    // выполнит exit(-1). Новый сеанс здесь продержится ровно эти
+                    // две секунды (так и было: DNS вставал и падал вместе с
+                    // процессом, а служба возвращалась через минуты), поэтому
+                    // поднимать его надо уже в свежем :vpn.
+                    LogManager.log(
+                        "Смена сети: остановка tun2proxy обрекла процесс :vpn. " +
+                            "Новый сеанс поднимет свежий процесс."
+                    )
+                    requestRestartFromMainProcess()
+                    invalidateConnectGeneration()
+                    return@startSafeServiceThread
+                }
+
                 // У Tor своя ветка, и её отсутствие было дефектом, а не упрощением.
                 //
                 // `shouldUseWarpTransport` и `shouldAllowOperaTransport` на `tor`
@@ -15562,9 +15702,9 @@ class NovaVpnService : OperaNativeVpnService() {
                 // владельца «при смене сети, особенно на TOR, связь теряется и сама
                 // не восстанавливается»), — его просто никто не звал.
                 if (regionPreference == ConnectionSelectorPolicy.CHIP_DNS) {
-                    // Своего процесса DNS-туннель не занимает и дважды в одном
-                    // процессе поднимается спокойно — в отличие от tor (G185),
-                    // — поэтому после смены сети просто поднимаем его заново.
+                    // Сюда доходим, только если движок не встал на место под
+                    // живым интерфейсом и tun2proxy при этом не останавливали
+                    // (например, его нить уже завершилась сама).
                     stopDnsTunnelQuietly()
                     if (!runDnsPhase(clientData, connectGenerationId)) {
                         LogManager.log("DNS не поднялся после смены сети, а подменять его другим протоколом нельзя.")
@@ -19071,7 +19211,35 @@ class NovaVpnService : OperaNativeVpnService() {
                     sorted.subList(index, sorted.size) + sorted.subList(0, index)
                 }
             }
-            .take(limit)
+            // Выбранная страна целиком молчит — в волну пускаются и другие.
+            //
+            // Страна — первый ключ, и пока у неё было шесть записей, хвост волны из
+            // восьми сам доставался соседям. Со всеми узлами страны в списке (NO: пять
+            // узлов, 2026-10-04) волна состоит из одной страны, и если вся она глухая с
+            // этой сети, телефон крутит её вечно под «ПОДКЛЮЧЕНИЕ…». Повторы при этом
+            // нужны: пара, молчавшая минуту назад, со следующей волны подняла туннель
+            // (Pixel 4a, NO, 5060). Поэтому две записи из восьми — другим странам, и
+            // только когда каждая пара выбранной страны уже пробовалась и молчала.
+            .let { sorted ->
+                if (protonWantedCountry == null || manualFirstAttemptKey != null || limit < 4) {
+                    return@let sorted.take(limit)
+                }
+                val (wanted, others) = sorted.partition { matchesWantedCountry(it) }
+                if (wanted.isEmpty() || others.isEmpty()) return@let sorted.take(limit)
+                val now = System.currentTimeMillis()
+                val allWantedSilent = wanted.all { config ->
+                    val key = ProtonProfileStore.endpointKey(config.host, config.port)
+                    val failedAt = protonOutcomes.failedAtByEndpoint[key] ?: return@all false
+                    failedAt > (protonOutcomes.succeededAtByEndpoint[key] ?: 0L) &&
+                        now - failedAt < PROTON_WANTED_SILENT_WINDOW_MS
+                }
+                if (!allWantedSilent) return@let sorted.take(limit)
+                LogManager.log(
+                    "USER WARP: все ${wanted.size} пар страны $protonWantedCountry молчали — " +
+                        "в волну добавлены ${PROTON_FOREIGN_SLOTS} узла других стран."
+                )
+                wanted.take(limit - PROTON_FOREIGN_SLOTS) + others.take(PROTON_FOREIGN_SLOTS)
+            }
         // Сколько узлов списка очередь уже знает по опыту — иначе по журналу не
         // отличить «волна взяла следующие узлы» от «волна снова взяла ту же голову».
         val protonOrderNote = protonConnectOrder?.let { order ->
@@ -26728,7 +26896,7 @@ class NovaVpnService : OperaNativeVpnService() {
             // честная вторая попытка (см. `ProtonProfileStore.expandPortFallbacks`).
             var ranked = ProtonProfileStore.expandPortFallbacks(
                 tcpOnly.sortedWith(byLatencyThenLoad) + silent.sortedBy { it.load },
-                ProtonProfileManager.TARGET_COUNT,
+                ProtonProfileManager.PROFILE_LIMIT,
             )
 
             // Одно рукопожатие — в голову очереди, то есть в тот узел, с которого

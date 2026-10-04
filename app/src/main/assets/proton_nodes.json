@@ -1,7 +1,7 @@
 {
  "generated_at": 1787916090591,
  "source": "vpn-api.proton.me /vpn/logicals?Tier=0",
- "note": "Only public server facts. No keys, no account: each device registers its own.",
+ "note": "Only public server facts. No keys, no account: each device registers its own. Nodes 51+ merged from a later live list (2026-10-04).",
  "nodes": [
   {
    "server_name": "CA-FREE#25",
@@ -352,6 +352,566 @@
    "city": "Amsterdam",
    "entry_ip": "212.8.243.7",
    "peer_public_key": "n4RGP+MGDzRHZ1eoPLQZgpuWxtjnW7qL8qzOP1DRvHo="
+  },
+  {
+   "server_name": "NL-FREE#57",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "138.199.7.251",
+   "peer_public_key": "Vhv/4oTMt5YYHFm3PpNC/3po1/kmjo2p8Jnk2O5zAFk="
+  },
+  {
+   "server_name": "NL-FREE#55",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "138.199.7.234",
+   "peer_public_key": "ozbmrTpgMTEuR1N7KguQD6qCMJzamTNYtFungG3xpQ0="
+  },
+  {
+   "server_name": "NL-FREE#38",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "190.2.153.215",
+   "peer_public_key": "3H83oJvvo4pMX9Lisc1/wNPhnGXoTe6FTubLo8JknSs="
+  },
+  {
+   "server_name": "MX-FREE#9",
+   "country": "MX",
+   "city": "Mexico City",
+   "entry_ip": "84.20.27.46",
+   "peer_public_key": "0WUvkg7/WEHLS2XzmJctvE/cvbDA0vNFJkoqbHKqezw="
+  },
+  {
+   "server_name": "MX-FREE#13",
+   "country": "MX",
+   "city": "Mexico City",
+   "entry_ip": "84.20.27.44",
+   "peer_public_key": "rf3F9avKpfKKe+m6RA6y3PJyF4IU9KKkv8tYGcAziDE="
+  },
+  {
+   "server_name": "NL-FREE#68",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "185.183.34.149",
+   "peer_public_key": "J4XVdtoBVc/EoI2Yk673Oes97WMnQSH5KfamZNjtM2s="
+  },
+  {
+   "server_name": "MX-FREE#8",
+   "country": "MX",
+   "city": "Mexico City",
+   "entry_ip": "84.20.27.47",
+   "peer_public_key": "eOxxZFIwEjujPtVOmN8JcgpmtKikl7O5qM9Oe1hUqmc="
+  },
+  {
+   "server_name": "NL-FREE#66",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "93.190.141.58",
+   "peer_public_key": "SPXmLWGJrr+NAcIALh7VadGZMqw0GZoceGO4VP2MEQo="
+  },
+  {
+   "server_name": "NO-FREE#1",
+   "country": "NO",
+   "city": "Oslo",
+   "entry_ip": "95.173.205.163",
+   "peer_public_key": "7fu30seb7WT0ViYGe/tkjNzqgJZM3hPa0QF0g/SXnQM="
+  },
+  {
+   "server_name": "NL-FREE#49",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "169.150.196.96",
+   "peer_public_key": "/nzl9zyzlLm97wJsBv7BpFS5gWxzYCYpcm9WWm1ohUw="
+  },
+  {
+   "server_name": "JP-FREE#1",
+   "country": "JP",
+   "city": "Tokyo",
+   "entry_ip": "103.125.235.18",
+   "peer_public_key": "agoivyLoPqor8MxA/s6UWJSMcA2pMl+ajO3vy/q3oWQ="
+  },
+  {
+   "server_name": "NL-FREE#81",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "185.177.126.132",
+   "peer_public_key": "DNQ7AKBMd+pBr3lhtk4/F02b4Vo9CzQnYpf2D1MPYQk="
+  },
+  {
+   "server_name": "US-FREE#61",
+   "country": "US",
+   "city": "Los Angeles",
+   "entry_ip": "149.88.25.129",
+   "peer_public_key": "z9XIDCXS950+Q+fQnQG6pFi3B07DxntrT7JrQMLsUWQ="
+  },
+  {
+   "server_name": "NL-FREE#74",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "89.38.97.138",
+   "peer_public_key": "U54ozdeZUU4q6cD6qmFCqaA4rNefeArKFnCIUk+g+Fk="
+  },
+  {
+   "server_name": "US-FREE#155",
+   "country": "US",
+   "city": "New York",
+   "entry_ip": "37.19.199.149",
+   "peer_public_key": "5PtTH6ccK9HiiZQlmXDWbBBD7Uz4xO2pel3iVwYVwkA="
+  },
+  {
+   "server_name": "NL-FREE#34",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "185.177.125.196",
+   "peer_public_key": "3U38ZXtMhIdnUe4kQKu196/7Nu8Uq1v1qMtNpifzf1c="
+  },
+  {
+   "server_name": "CA-FREE#18",
+   "country": "CA",
+   "city": "Montreal",
+   "entry_ip": "89.47.234.226",
+   "peer_public_key": "TrotkXhPfmF2QA4hi+QOtPiCCUZzYhq8lNv0svSYMGg="
+  },
+  {
+   "server_name": "CA-FREE#16",
+   "country": "CA",
+   "city": "Montreal",
+   "entry_ip": "89.238.156.242",
+   "peer_public_key": "v7sR+ZE9clVUJWEjtnwidmXmgcuUpW8y9vGiCG0+dEA="
+  },
+  {
+   "server_name": "US-FREE#50",
+   "country": "US",
+   "city": "Seattle",
+   "entry_ip": "156.146.51.129",
+   "peer_public_key": "OxA9T+O5ynU0SxUcnUVIsvoitUmMoB8AU0RSi6NQOTo="
+  },
+  {
+   "server_name": "US-FREE#5",
+   "country": "US",
+   "city": "Seattle",
+   "entry_ip": "149.40.62.21",
+   "peer_public_key": "cj0n9Y6KUdtXobHrhebwp/87bFUW0OnjjF+1lg8peCQ="
+  },
+  {
+   "server_name": "JP-FREE#3",
+   "country": "JP",
+   "city": "Osaka",
+   "entry_ip": "45.14.71.5",
+   "peer_public_key": "E5wPCWdLcrvCn8DI8/vetPVrOyIKFMpdgdhrVsTUdBU="
+  },
+  {
+   "server_name": "NL-FREE#165",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "185.107.94.181",
+   "peer_public_key": "6DXccPJXXsMc4Wxww4Udyvk95iBPL/Ie0E9rEX+YlAc="
+  },
+  {
+   "server_name": "NL-FREE#88",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "89.39.104.165",
+   "peer_public_key": "+TPg0y+6OBYFCOIoPc6JIGi06RWnWW9LntfWQdDOlik="
+  },
+  {
+   "server_name": "US-FREE#53",
+   "country": "US",
+   "city": "Los Angeles",
+   "entry_ip": "146.70.174.66",
+   "peer_public_key": "N1o6VqzZtb0UCQvmkZGQj909M1sM3Xb787U0YNyODEw="
+  },
+  {
+   "server_name": "US-FREE#128",
+   "country": "US",
+   "city": "Los Angeles",
+   "entry_ip": "194.180.33.8",
+   "peer_public_key": "W5D2Z1xyVOQXcwTPAbHScAHvHEO6byYhp+MPhbqaUFA="
+  },
+  {
+   "server_name": "NL-FREE#256",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "185.184.195.59",
+   "peer_public_key": "gN+CwsdzJmuuJPq6ZcwDB1pxcvZ8PiE8ugGx4MbYTR4="
+  },
+  {
+   "server_name": "NL-FREE#244",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "190.2.151.139",
+   "peer_public_key": "5jCMG3U4pgJLotvxcXNGiRUuQ2RiVXhAAGVPo4JG5Tg="
+  },
+  {
+   "server_name": "NL-FREE#16",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "89.39.107.185",
+   "peer_public_key": "IVHJWvZM75yochmMV527KbCxrvyQsNSkWatxvhiE+jQ="
+  },
+  {
+   "server_name": "CA-FREE#15",
+   "country": "CA",
+   "city": "Montreal",
+   "entry_ip": "89.238.156.194",
+   "peer_public_key": "q7jFh12kfVdVqAEdLxugYLf2+JNCT2HdCJDFbpEIg2c="
+  },
+  {
+   "server_name": "US-FREE#15",
+   "country": "US",
+   "city": "Dallas",
+   "entry_ip": "37.19.200.22",
+   "peer_public_key": "6viKMPw7x82HUJJbPTA08M3oY9U0SRDxpktohKENJTk="
+  },
+  {
+   "server_name": "US-FREE#6",
+   "country": "US",
+   "city": "Dallas",
+   "entry_ip": "37.19.200.1",
+   "peer_public_key": "rGq20PYMbmMtneRHYaWMYPKd78GycNzbqN1z0AZj6lI="
+  },
+  {
+   "server_name": "MX-FREE#1",
+   "country": "MX",
+   "city": "Mexico City",
+   "entry_ip": "103.14.26.127",
+   "peer_public_key": "x5qWLikynaMDbB2UrQAqsLNjd7+jGvneBvbMQ6M0mSQ="
+  },
+  {
+   "server_name": "NL-FREE#283",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "89.105.214.199",
+   "peer_public_key": "ftNhwDpe/QmnWdL8fG2+tJDbPn6hd6Xp56JgCX5LrUw="
+  },
+  {
+   "server_name": "NL-FREE#1",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "217.23.3.76",
+   "peer_public_key": "vH2i8RY1qc66XfqwrixBpvH4K9GYJatkugJj0GHgoUQ="
+  },
+  {
+   "server_name": "NL-FREE#56",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "138.199.7.250",
+   "peer_public_key": "a8iW00DUux7FfnJaJaok3BgbcrQje4s3JiDp4OEVnnA="
+  },
+  {
+   "server_name": "US-FREE#9",
+   "country": "US",
+   "city": "Chicago",
+   "entry_ip": "89.187.180.1",
+   "peer_public_key": "o3BjGF2/GcEQiWoP89XgDfXFVlFFm7ipBFVQaOCR00k="
+  },
+  {
+   "server_name": "US-FREE#111",
+   "country": "US",
+   "city": "Los Angeles",
+   "entry_ip": "149.34.251.136",
+   "peer_public_key": "4om6JQmpiDLuFY39hjAMtoRmc6F9auK4PIVZiZwxAAc="
+  },
+  {
+   "server_name": "NL-FREE#75",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "185.183.33.217",
+   "peer_public_key": "Hp2v99abdPDC2F255DDEO65Kf1yD/wgVcxiDqmMw+RA="
+  },
+  {
+   "server_name": "NL-FREE#70",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "185.180.222.89",
+   "peer_public_key": "qcb7KUuClTqMcsDxhDY3N5OnoW1twENuSw39kU8XiTU="
+  },
+  {
+   "server_name": "NL-FREE#43",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "169.150.196.71",
+   "peer_public_key": "lqxGpBwoRUrxKpUvlq3VhJ9SCHgt8N5KxcGEfuz+Vys="
+  },
+  {
+   "server_name": "NL-FREE#69",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "185.183.34.165",
+   "peer_public_key": "l8ruMGOv1tAle4+JixNxgnYI2dMCcFMl6ljEZQ0iAFg="
+  },
+  {
+   "server_name": "NL-FREE#221",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "185.132.132.113",
+   "peer_public_key": "GTGfDypXB5xmw60wpi8N/2B/lrrToPT68zCjCE9RJzQ="
+  },
+  {
+   "server_name": "NL-FREE#251",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "45.82.64.25",
+   "peer_public_key": "z28TwErPEaQ84LZAtY3ApX0lhmsQ33n8hAZEl/Poxnk="
+  },
+  {
+   "server_name": "NL-FREE#50",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "169.150.196.97",
+   "peer_public_key": "Jh4zc7MtYS56o+vEXKay0FpvYIZHFCmRBPAxzDzTTns="
+  },
+  {
+   "server_name": "NL-FREE#64",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "93.190.142.102",
+   "peer_public_key": "vXBEa5XYIa1I0l4thidTNodRNVEBSogDavAIku5RkyY="
+  },
+  {
+   "server_name": "NL-FREE#67",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "185.183.34.27",
+   "peer_public_key": "Ky8glqH9vHhIoSgiKcNv0q6o0qRsjCMV5S3I2v/j6w4="
+  },
+  {
+   "server_name": "CA-FREE#19",
+   "country": "CA",
+   "city": "Montreal",
+   "entry_ip": "89.47.234.242",
+   "peer_public_key": "yFvumwESPjQKVhVEuJPF7KsKIRY5htzJ0RJaZXEZtHo="
+  },
+  {
+   "server_name": "US-FREE#140",
+   "country": "US",
+   "city": "New York",
+   "entry_ip": "194.180.34.11",
+   "peer_public_key": "VHJLuWC6jMC+05qL1ulLFBk1f5UpyCP7uzxxQhmwg0Q="
+  },
+  {
+   "server_name": "US-FREE#67",
+   "country": "US",
+   "city": "Secaucus",
+   "entry_ip": "151.243.141.157",
+   "peer_public_key": "6MQmNyC8DSUPpeU7zv43Q06cTUGfqPqS4Wt+kNNlNAI="
+  },
+  {
+   "server_name": "NL-FREE#14",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "89.39.107.109",
+   "peer_public_key": "ySR6v9UfcItdDuny/ARauldNXdJFyAzQRcqCLcJTOFE="
+  },
+  {
+   "server_name": "NL-FREE#89",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "89.39.106.82",
+   "peer_public_key": "hUUoqiMCmsgdB1WVuc3xtz2EgjpFjaJcTwLTUaGffDc="
+  },
+  {
+   "server_name": "NL-FREE#65",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "109.236.81.160",
+   "peer_public_key": "BUp7VsCOApM6fRW4Ly5HhpVgMKN1zEQmjESpRLasyg0="
+  },
+  {
+   "server_name": "CA-FREE#17",
+   "country": "CA",
+   "city": "Montreal",
+   "entry_ip": "89.47.234.146",
+   "peer_public_key": "KjaouBXrfaoEvdapmi3uGIz40b18IyRg+qrHKtJmelA="
+  },
+  {
+   "server_name": "JP-FREE#7",
+   "country": "JP",
+   "city": "Osaka",
+   "entry_ip": "45.14.71.7",
+   "peer_public_key": "S4m34Hfczv02IBQV4tmTpd+mHkq3sDrabHv58J1Ikz0="
+  },
+  {
+   "server_name": "NL-FREE#252",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "185.100.233.84",
+   "peer_public_key": "KFB3s87hKR1DHZxV7f+vSlYkkLeHeEKGS3NpeUowWhw="
+  },
+  {
+   "server_name": "NL-FREE#71",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "109.236.81.166",
+   "peer_public_key": "g6DkXWKI/68RsLjROIwCEcyB/ZhyK5Q7OWcz1TtqER0="
+  },
+  {
+   "server_name": "NL-FREE#53",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "169.150.196.100",
+   "peer_public_key": "IzfEE9h6+HPn7K1fSmLw8txcAQMvyGFvy1tFmd9YAz4="
+  },
+  {
+   "server_name": "US-FREE#40",
+   "country": "US",
+   "city": "Houston",
+   "entry_ip": "37.19.221.193",
+   "peer_public_key": "WIeBbAgtnBInKKxUYyc9B+R1aqPlJSV5e6mq+xGgymc="
+  },
+  {
+   "server_name": "US-FREE#10",
+   "country": "US",
+   "city": "New York",
+   "entry_ip": "89.187.177.71",
+   "peer_public_key": "r0e3HMuB7OYPFgbBWKZOSrsGeMFTegRAagwTneQf8V4="
+  },
+  {
+   "server_name": "US-FREE#17",
+   "country": "US",
+   "city": "New York",
+   "entry_ip": "37.19.199.144",
+   "peer_public_key": "8yLN4SAi/FbYK0ZG3/7YUvjSFxNqWvZXxxSiVydGVkg="
+  },
+  {
+   "server_name": "NL-FREE#12",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "138.199.7.159",
+   "peer_public_key": "1s5mwMp3fZKNucEO3GeHRSUrhGLu/BYeC0UdusyxSWU="
+  },
+  {
+   "server_name": "NL-FREE#35",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "185.177.125.172",
+   "peer_public_key": "jDrSMRMm6XJgYGcSd01QqJbYiW13dyaOKp8GWDs0rTQ="
+  },
+  {
+   "server_name": "NL-FREE#72",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "93.190.138.166",
+   "peer_public_key": "O7NAlrmJoPD3RFQgzzOf1nsb8CBxGaI6nT7ikNs7Ky8="
+  },
+  {
+   "server_name": "US-FREE#114",
+   "country": "US",
+   "city": "Miami",
+   "entry_ip": "84.20.27.34",
+   "peer_public_key": "weCSxoXSpUf0pBwokYIRqxzHNc60zcEthqkNpuCCsWY="
+  },
+  {
+   "server_name": "US-FREE#14",
+   "country": "US",
+   "city": "Atlanta",
+   "entry_ip": "89.187.170.159",
+   "peer_public_key": "TvxKuL2rnvUxQ4vv48bwU+xyBAabV5yHnedFsP95C2s="
+  },
+  {
+   "server_name": "US-FREE#8",
+   "country": "US",
+   "city": "San Jose",
+   "entry_ip": "156.146.54.81",
+   "peer_public_key": "FF79Ab2fcEYtsyNYxviTUtVxJLuvUcoEOpl8DYbdsgg="
+  },
+  {
+   "server_name": "JP-FREE#32",
+   "country": "JP",
+   "city": "Tokyo",
+   "entry_ip": "149.88.103.163",
+   "peer_public_key": "VrNJ8jPdfeaq1pB0rH9DvB/50Y8EW2MGn0uHOey1mxE="
+  },
+  {
+   "server_name": "JP-FREE#5",
+   "country": "JP",
+   "city": "Tokyo",
+   "entry_ip": "138.199.21.206",
+   "peer_public_key": "6vLkUgiS/K8p5dTMwUQo6tiyJ65DrM8E2mwO+QFz/zs="
+  },
+  {
+   "server_name": "NL-FREE#220",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "185.165.242.20",
+   "peer_public_key": "roBGyRXXwzJJwKeP6n1r8PwvW9FvOmPi4s1mKyWoM0A="
+  },
+  {
+   "server_name": "NL-FREE#240",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "212.8.249.21",
+   "peer_public_key": "AA/em6xltsLJnlE7imBcBuyVym1sS97cCzGLBCPuI38="
+  },
+  {
+   "server_name": "NL-FREE#13",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "89.39.107.188",
+   "peer_public_key": "MTNPR632U9GOxI+B8dMP+KgMJVEO2xQPrem2SuDfTkM="
+  },
+  {
+   "server_name": "US-FREE#136",
+   "country": "US",
+   "city": "New York",
+   "entry_ip": "194.180.34.7",
+   "peer_public_key": "k89M6OO8VqSNj9Ct8jR4/fDACfHbdi9iVynhDSkM2hA="
+  },
+  {
+   "server_name": "US-FREE#16",
+   "country": "US",
+   "city": "Dallas",
+   "entry_ip": "37.19.200.17",
+   "peer_public_key": "xMBFL2Ejufuk926qSqBqPCIi6a6BRs33QmX7jWcsBDg="
+  },
+  {
+   "server_name": "JP-FREE#4",
+   "country": "JP",
+   "city": "Tokyo",
+   "entry_ip": "138.199.21.193",
+   "peer_public_key": "ZQ/KwfKaBtEpTZLp5q/7jYLJBOo9aO26oR4z0qaPKW8="
+  },
+  {
+   "server_name": "SG-FREE#16",
+   "country": "SG",
+   "city": "Singapore",
+   "entry_ip": "103.216.221.70",
+   "peer_public_key": "fqiCSyv+T8Axw7q8Yx5fdQO0dMunbSk1A2+cOULdJUY="
+  },
+  {
+   "server_name": "US-FREE#72",
+   "country": "US",
+   "city": "Secaucus",
+   "entry_ip": "151.243.141.161",
+   "peer_public_key": "2v1DSq+q5x9o7PMVUjJ6hSrBD4lfjevMp45E/1mgF2I="
+  },
+  {
+   "server_name": "NL-FREE#45",
+   "country": "NL",
+   "city": "Amsterdam",
+   "entry_ip": "169.150.196.83",
+   "peer_public_key": "622sGL+J3fUvgco2KFrZbhbZF324eTWiRmNhi7JhlXA="
+  },
+  {
+   "server_name": "SG-FREE#10",
+   "country": "SG",
+   "city": "Singapore",
+   "entry_ip": "149.50.211.144",
+   "peer_public_key": "UvZNvKtOQ3AF6Ly8Vzb+aOMsOETeGvOGKMvMYK9AHX4="
+  },
+  {
+   "server_name": "US-FREE#125",
+   "country": "US",
+   "city": "Los Angeles",
+   "entry_ip": "194.180.33.3",
+   "peer_public_key": "qiKNWVP3aSV+bfgIyU4xsBt1Bx+o+ASkoJZgiwraxmk="
+  },
+  {
+   "server_name": "US-FREE#113",
+   "country": "US",
+   "city": "Miami",
+   "entry_ip": "84.20.27.35",
+   "peer_public_key": "jeqp2wjE3dbdfQkS2n+ay3gnIw3ycPORD7ueiZvtvQ4="
   }
  ]
 }

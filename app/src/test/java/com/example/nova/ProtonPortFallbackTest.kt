@@ -158,4 +158,59 @@ class ProtonPortFallbackTest {
         assertTrue(ProtonProfileStore.expandPortFallbacks(emptyList(), limit = 50).isEmpty())
         assertTrue(ProtonProfileStore.expandPortFallbacks(servers(3), limit = 0).isEmpty())
     }
+    @Test
+    fun `single slots go round robin across countries`() {
+        // NL заполняет голову по задержке; NO из четырёх узлов стоит в хвосте.
+        // Раньше остаток бюджета уходил NL подряд, и третий-четвёртый узел NO
+        // в список не попадали (Pixel 4a, 2026-10-04).
+        val input = servers(40, "NL") + servers(4, "NO", from = 40)
+
+        val expanded = ProtonProfileStore.expandPortFallbacks(input, limit = 20)
+
+        val noHosts = expanded.filter { it.country == "NO" }.map { it.entryIp }.toSet()
+        assertEquals("все четыре узла NO в списке", 4, noHosts.size)
+        assertEquals(20, expanded.size)
+    }
+
+    @Test
+    fun `candidates are picked round robin by country`() {
+        fun server(ip: String, country: String, load: Int) =
+            ProtonApi.Server("n-$ip", country, "c", ip, "k=", load, 0.0)
+        val ordered = (0 until 40).map { server("10.0.0.$it", "NL", it) } +
+            (0 until 3).map { server("10.1.0.$it", "NO", 90 + it) }
+
+        val picked = ProtonProfileStore.pickCandidatesByCountry(ordered, limit = 10)
+
+        assertEquals(10, picked.size)
+        assertEquals(3, picked.count { it.country == "NO" })
+        // Порядок внутри страны сохраняется.
+        assertEquals(listOf("10.1.0.0", "10.1.0.1", "10.1.0.2"), picked.filter { it.country == "NO" }.map { it.entryIp })
+    }
+
+    @Test
+    fun `node pools merge proven first without duplicate hosts`() {
+        fun server(ip: String, load: Int, key: String = "k=") =
+            ProtonApi.Server("n-$ip", "NO", "c", ip, key, load, 0.0)
+        val proven = listOf(server("95.173.205.163", 40, key = "old="), server("1.1.1.1", 10))
+        val live = listOf(server("1.1.1.1", 70, key = "fresh="), server("95.173.205.165", 20))
+        val bundled = listOf(server("95.173.205.161", 50), server("95.173.205.165", 50))
+
+        val pool = ProtonProfileStore.mergeNodePools(proven, live, bundled)
+
+        assertEquals(
+            listOf("95.173.205.163", "1.1.1.1", "95.173.205.165", "95.173.205.161"),
+            pool.map { it.entryIp },
+        )
+        // Проверенный узел из живого списка берётся в живом виде.
+        assertEquals("fresh=", pool[1].peerPublicKey)
+    }
+
+    @Test
+    fun `succeeded hosts are read from every network class`() {
+        val raw = """{"wifi":{"failed_at":{"9.9.9.9:443":1},"succeeded_at":{"95.173.205.163:4569":2}},""" +
+            """"cell":{"succeeded_at":{"[2a07::1]:443":3}}}"""
+
+        assertEquals(setOf("95.173.205.163", "2a07::1"), ProtonProfileStore.decodeSucceededHosts(raw))
+        assertTrue(ProtonProfileStore.decodeSucceededHosts("{broken").isEmpty())
+    }
 }

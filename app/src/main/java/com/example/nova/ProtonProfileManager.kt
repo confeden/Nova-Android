@@ -3,6 +3,7 @@ package com.example.nova
 import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
+import java.util.Locale
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -22,8 +23,19 @@ import kotlin.random.Random
  */
 object ProtonProfileManager {
 
-    /** Сколько профилей должно получиться. */
+    /** Сколько профилей должно получиться — меньше этого набор не считается готовым. */
     const val TARGET_COUNT = 50
+
+    /**
+     * Потолок рабочего списка, а не цель.
+     *
+     * Пока бесплатных стран было четыре, полсотни записей хватало: головы стран
+     * брали по три порта, остаток шёл по одному узлу. С десятью странами
+     * (2026-10-04: US, NL, CA, JP, MX, NO, RO, PL, SG, CH) головы просили 60 записей,
+     * одиночных оставалось две, и у NO в списке было ровно два узла — оба молчали с
+     * этой сети, а живые третий и четвёртый в очередь не попадали никогда.
+     */
+    const val PROFILE_LIMIT = 100
 
     /** Сколько кандидатов разрешено перебрать, чтобы набрать [TARGET_COUNT]. */
     const val CANDIDATE_LIMIT = 80
@@ -363,7 +375,7 @@ object ProtonProfileManager {
             (measured || !probeRetryDue)
         ) {
             // Их могло накопиться больше цели — оставляем лучшие и не ходим в сеть.
-            val trimmed = existing.sortedBy { effectivePing(it) }.take(TARGET_COUNT)
+            val trimmed = existing.sortedBy { effectivePing(it) }.take(PROFILE_LIMIT)
             if (trimmed.size != existing.size) store.writeProfiles(trimmed)
             val bestPingMs = trimmed.firstOrNull()?.pingMs ?: 0
             return Outcome(
@@ -480,11 +492,44 @@ object ProtonProfileManager {
             .filter { it.isNotBlank() }
         val random = Random(System.nanoTime())
 
-        // Кандидаты: сначала наименее загруженные, портов — по кругу. Если оператор
-        // глушит один порт, кандидаты на нём просто не ответят и отсеются замером.
-        val candidates = servers
-            .sortedWith(compareBy<ProtonApi.Server> { it.load }.thenBy { it.score })
-            .take(CANDIDATE_LIMIT)
+        // Пул: проверенные на этом телефоне узлы, список сессии, встроенный список.
+        // Срез одной сессии бывает без единого живого узла нужной страны, хотя
+        // соседняя сессия держит туннель через узел, которого здесь нет
+        // (`ProtonProfileStore.mergeNodePools`).
+        val succeededHosts = runCatching { store.readSucceededHosts() }.getOrDefault(emptySet())
+        val proven = (store.readCandidates() + existing)
+            .filter { it.entryIp.trim().trim('[', ']').lowercase(Locale.US) in succeededHosts }
+            .map {
+                ProtonApi.Server(
+                    name = it.serverName,
+                    country = it.country,
+                    city = it.city,
+                    entryIp = it.entryIp,
+                    peerPublicKey = it.peerPublicKey,
+                    load = it.load,
+                    score = 0.0,
+                )
+            }
+        val extra = if (liveServers.isNotEmpty()) ProtonNodeCatalog.load(context) else emptyList()
+        val pool = ProtonProfileStore.mergeNodePools(proven, servers, extra)
+
+        // Кандидаты: по кругу стран, внутри страны — проверенные, затем наименее
+        // загруженные; портов — по кругу. Если оператор глушит один порт, кандидаты
+        // на нём просто не ответят и отсеются замером.
+        val picked = ProtonProfileStore.pickCandidatesByCountry(pool, CANDIDATE_LIMIT)
+        val provenHosts = proven.map { it.entryIp.trim().lowercase(Locale.US) }.toSet()
+        val serverHosts = servers.map { it.entryIp.trim().lowercase(Locale.US) }.toSet()
+        LogManager.log(
+            "Proton: пул ${pool.size} узлов (список ${servers.size}, проверенных " +
+                "${provenHosts.size}, из прошивки +${pool.count {
+                    val host = it.entryIp.trim().lowercase(Locale.US)
+                    host !in serverHosts && host !in provenHosts
+                }}); в замер ${picked.size}: " +
+                picked.groupingBy { it.country.uppercase(Locale.US) }.eachCount()
+                    .entries.sortedByDescending { it.value }
+                    .joinToString(", ") { "${it.key} ${it.value}" }
+        )
+        val candidates = picked
             .mapIndexed { index, server ->
                 val sni = whiteHosts.randomOrNull(random).orEmpty()
                 ProtonProfile(
@@ -563,7 +608,7 @@ object ProtonProfileManager {
         val selected = probed?.takeIf { it.isNotEmpty() } ?: run {
             val fallback = ProtonProfileStore.expandPortFallbacks(
                 candidates.sortedBy { it.load },
-                TARGET_COUNT,
+                PROFILE_LIMIT,
             )
             LogManager.log(
                 if (!probeRequested) {

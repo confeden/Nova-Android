@@ -1257,5 +1257,8 @@
  "WARP: {0} профилей, лучший {1} мс": "WARP: {0} profiles, best {1} ms",
  "WARP: прогон оборвался": "WARP: run aborted",
  "библиотека Xray недоступна: {0}": "Xray library unavailable: {0}",
- "ядро Xray не ответило на запуск": "Xray core did not respond to start"
+ "ядро Xray не ответило на запуск": "Xray core did not respond to start",
+ "Попытка {0} из {1}": "Attempt {0} of {1}",
+ "Профиль {0} из {1}": "Profile {0} of {1}",
+ "Готовим подключение": "Preparing the connection"
 }

@@ -162,12 +162,15 @@ object VlessXrayConfig {
         if (config.hostHeader.isNotBlank()) xhttp.put("host", config.hostHeader)
 
         // `extra` приходит строкой с JSON внутри и содержит тонкие настройки
-        // XHTTP (xmux, паддинг, размеры чанков). Разбирать их по полям не нужно —
-        // Xray понимает их сам; достаточно не потерять и не сломаться на "null".
+        // XHTTP (xmux, паддинг, размеры чанков). Отдаём его ядру как есть, полем
+        // `extra`: Xray сам сливает его с настройками, а `host`, `path` и `mode`
+        // берёт из ссылки (`SplitHTTPConfig.Build`). Раньше ключи расплющивались
+        // поверх, и пустые `"path":""`, `"host":""` из живых подписок затирали
+        // настоящий путь — сервер отвечал 404, профиль считался мёртвым.
         val extra = config.extraParams[EXTRA_PARAM]
         if (!extra.isNullOrBlank() && extra != "null") {
             runCatching { JSONObject(extra) }.getOrNull()?.let { parsed ->
-                parsed.keys().forEach { key -> xhttp.put(key, parsed.get(key)) }
+                xhttp.put(EXTRA_PARAM, parsed)
             }
         }
         return xhttp

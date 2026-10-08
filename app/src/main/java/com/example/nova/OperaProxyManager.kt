@@ -558,14 +558,29 @@ object OperaProxyManager {
                     }
                 }
                 if (cachedEndpoints.isNotEmpty()) {
+                    // Узел обслуживает сессию, а не адрес (S5): сессия, зарегистрированная
+                    // с российского адреса, получает 502 на любом узле. Поэтому кэшированный
+                    // адрес сначала пробуем с регистрацией через прокси из настроек или
+                    // свой релей — и только потом напрямую. Раньше шёл только прямой
+                    // вариант: он падал на probe, исправный адрес уходил в cooldown, и
+                    // Opera вставала лишь через полный discover (или не вставала вовсе).
+                    val registrationRoutes = buildList {
+                        if (customApiProxy.isNotEmpty()) add("" to customApiProxy)
+                        // Один релей: сессия либо регистрируется через релей, либо нет —
+                        // второй адрес того же релея лишь раздувал бы счётчик попыток.
+                        apiRelays.firstOrNull()?.let { add(it to "") }
+                        add("" to "")
+                    }
                     for (endpoint in cachedEndpoints) {
                         val pinnedHosts = candidateHosts.take(2).ifEmpty { listOf("") }
-                        for (host in pinnedHosts) {
-                            for (apiProfile in apiProfiles) {
-                                if (apiProfile.id == "api-legacy") {
-                                    appendPlan("", endpoint, apiProfile)
+                        for ((relay, proxy) in registrationRoutes) {
+                            for (host in pinnedHosts) {
+                                for (apiProfile in apiProfiles) {
+                                    if (apiProfile.id == "api-legacy") {
+                                        appendPlan("", endpoint, apiProfile, relay, proxy)
+                                    }
+                                    appendPlan(host, endpoint, apiProfile, relay, proxy)
                                 }
-                                appendPlan(host, endpoint, apiProfile)
                             }
                         }
                     }
@@ -636,9 +651,19 @@ object OperaProxyManager {
                     plan.apiRelay.isNotEmpty() -> 2
                     else -> 3
                 }
+                // Внутри кэша — по пути регистрации: статистика и метка «удержалась»
+                // релей от прямого не различают, и без этого прямой вариант снова
+                // обгонял бы релейный.
+                fun registrationTier(plan: OperaLaunchPlan): Int = when {
+                    plan.endpointOverride.isNullOrBlank() -> 0
+                    plan.apiProxy.isNotEmpty() -> 0
+                    plan.apiRelay.isNotEmpty() -> 1
+                    else -> 2
+                }
                 val rankedPlans = plans.withIndex()
                     .sortedWith(
                         compareBy<IndexedValue<OperaLaunchPlan>> { discoverTier(it.value) }
+                            .thenBy { registrationTier(it.value) }
                             // Способ, который уже удерживал соединение двадцать секунд,
                             // идёт раньше любой накопленной статистики: она считает
                             // успехом и запуск, отвалившийся через секунду.
@@ -786,6 +811,17 @@ object OperaProxyManager {
                     }
                     args += listOf("-api-proxy", bridgedRelay)
                 }
+                if (plan.apiRelay.isNotEmpty() || plan.apiProxy.isNotEmpty()) {
+                    // Имя API резолвит сам прокси. С `-bootstrap-dns` opera-proxy
+                    // оборачивает дозвон в ResolvingDialer, и релею уходит CONNECT на
+                    // IP из российского резолвера. Белый список релея — набор адресов,
+                    // который он сам раз в 5 минут резолвит из Швеции и заменяет
+                    // целиком; адрес не из текущего набора получает 403. Так релей
+                    // отказывал волнами по 10+ минут (Mi A1: 46 отказов подряд), а с ПК
+                    // в те же минуты пускал. Пустой список — и ResolvingDialer нет.
+                    val dnsIndex = args.indexOf("-bootstrap-dns")
+                    if (dnsIndex >= 0 && dnsIndex + 1 < args.size) args[dnsIndex + 1] = ""
+                }
                 if (plan.apiProxy.isNotEmpty()) {
                     // Прокси пользователя отдаём бинарнику как есть: мост нужен нашему
                     // релею ради имени и TLS, а здесь ни того, ни другого нет.
@@ -793,7 +829,11 @@ object OperaProxyManager {
                 }
 
                 launchLogger("Поднимаем встроенный Opera proxy для $purposeLabel... попытка ${attemptIndex + 1}/${launchPlans.size}")
-                launchLogger("Opera bootstrap DNS: $bootstrapLabel")
+                if (plan.apiRelay.isNotEmpty() || plan.apiProxy.isNotEmpty()) {
+                    launchLogger("Opera bootstrap DNS: нет — имя API резолвит прокси")
+                } else {
+                    launchLogger("Opera bootstrap DNS: $bootstrapLabel")
+                }
                 launchLogger("Opera API profile: ${apiProfile.label}")
                 if (fakeSni.isNotBlank()) {
                     launchLogger("Встроенный Opera proxy: fake SNI = $fakeSni")
@@ -1096,7 +1136,12 @@ object OperaProxyManager {
                         durationMs = System.currentTimeMillis() - planStartedAt,
                     )
                 }
-                if (!endpointOverride.isNullOrBlank()) {
+                // Порт не поднялся у плана с регистрацией через релей/прокси — значит,
+                // не прошла регистрация, а не узел: адрес не штрафуем, прямой вариант
+                // того же адреса ещё попробуем. Провал probe (planOutcomeRecorded) —
+                // регистрация прошла, и судить можно уже узел.
+                val registrationRouted = plan.apiRelay.isNotEmpty() || plan.apiProxy.isNotEmpty()
+                if (!endpointOverride.isNullOrBlank() && (!registrationRouted || planOutcomeRecorded)) {
                     clientData.demoteOperaPinnedEndpoint(requestedCountry, endpointOverride)
                     clientData.markOperaPinnedEndpointFailure(
                         requestedCountry,
@@ -1324,7 +1369,9 @@ object OperaProxyManager {
                     "-verbosity",
                     DEFAULT_VERBOSITY,
                     "-bootstrap-dns",
-                    bootstrapResolvers,
+                    // С прокси для API имя резолвит он сам (G259): иначе релей
+                    // получает CONNECT на IP и отказывает 403.
+                    if (apiRelay.isNotEmpty() || apiProxy.isNotEmpty()) "" else bootstrapResolvers,
                     "-server-selection",
                     serverSelectionForCountry(requestedCountry),
                     "-server-selection-test-url",

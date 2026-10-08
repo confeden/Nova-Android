@@ -95,6 +95,30 @@ class VlessXrayConfigTest {
     }
 
     @Test
+    fun passesXhttpExtraNestedSoEmptyFieldsDoNotOverrideTheLink() {
+        // Живая подписка: в `extra` пустые host/path/mode. Расплющенные поверх, они
+        // затирали путь из ссылки, и сервер отвечал 404.
+        val extra = java.net.URLEncoder.encode(
+            """{"host":"","path":"","mode":"","xPaddingBytes":"100-1000","xmux":{"maxConcurrency":"16-32"}}""",
+            "UTF-8",
+        )
+        val config = requireNotNull(
+            VlessConfig.parse(
+                "vless://11111111-2222-3333-4444-555555555555@1.2.3.4:2053" +
+                    "?encryption=none&security=tls&sni=a.example&host=a.example" +
+                    "&path=%2Fapi%2Fv1%2Fupload&mode=auto&type=xhttp&extra=$extra#x"
+            )
+        )
+        val xhttp = JSONObject(VlessXrayConfig.build(config, socksPort = 10808))
+            .getJSONArray("outbounds").getJSONObject(0)
+            .getJSONObject("streamSettings").getJSONObject("xhttpSettings")
+        assertEquals("/api/v1/upload", xhttp.getString("path"))
+        assertEquals("a.example", xhttp.getString("host"))
+        assertEquals("auto", xhttp.getString("mode"))
+        assertEquals("100-1000", xhttp.getJSONObject("extra").getString("xPaddingBytes"))
+    }
+
+    @Test
     fun keepsUdpAssociateEnabledOnSocksInbound() {
         // UDP через инбаунд принимается. Узлы его часто не пропускают, но отключать
         // приём на своей стороне незачем: с рабочим узлом это единственный путь для

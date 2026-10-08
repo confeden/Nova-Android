@@ -335,6 +335,7 @@ class NovaVpnService : OperaNativeVpnService() {
     private var operaBadGatewayWindowStartedAtMs = 0L
     @Volatile
     private var operaBadGatewayBurstCount = 0
+    private var lastOperaBadGatewayIgnoredLogAtMs = 0L
     @Volatile
     private var lastOperaBadGatewayRecoveryAtMs = 0L
     @Volatile
@@ -1216,19 +1217,22 @@ class NovaVpnService : OperaNativeVpnService() {
          * Сколько ждём ответа от одного узла VLESS, прежде чем взять следующий.
          *
          * Замеры на тестовом устройстве: живой узел отвечает за 320–550 мс, мёртвый выбирает
-         * бюджет целиком. Три секунды — с запасом на медленную мобильную сеть, и в них
-         * укладывается на треть больше кандидатов за то же время.
+         * бюджет целиком. Трёх секунд не хватало холодному XHTTP и gRPC: в подписке
+         * `zieng2/wl` четверть рабочих узлов отвечала на первый запрос за 3,5–6,7 с
+         * (Xray на ПК, 8 узлов параллельно) и отбраковывалась как мёртвая.
          */
-        private const val VLESS_CANDIDATE_PROBE_BUDGET_MS = 3_000L
+        private const val VLESS_CANDIDATE_PROBE_BUDGET_MS = 6_000L
 
         /**
          * Сколько ждём ответа узла в уже поднятой сессии.
          *
          * Здесь спешить некуда, а цена спешки высокая: не уложившаяся проба означает не
          * только «здоровье не подтверждено», но и отсутствие пинга на экране — публиковать
-         * нечего. Живой узел из Сингапура даёт около двух секунд, поэтому четыре.
+         * нечего. Живой узел из Сингапура даёт около двух секунд. Шесть — не меньше
+         * бюджета кандидата: теперь сессию держит только эта проба (G258), и узел,
+         * прошедший отбор за 5 с, иначе отбраковывался бы уже в сессии.
          */
-        private const val VLESS_SESSION_PROBE_TIMEOUT_MS = 4_000
+        private const val VLESS_SESSION_PROBE_TIMEOUT_MS = 6_000
 
         /**
          * Бюджет пробы Opera в цикле удержания.
@@ -3419,6 +3423,42 @@ class NovaVpnService : OperaNativeVpnService() {
     }
 
     /**
+     * Если остановка уже звала `tun2proxy_stop`, продолжать в этом процессе нельзя:
+     * через две секунды библиотека выполнит `exit(-1)` (G3).
+     *
+     * Opera теряла сеанс именно так: живая сессия ловила потерю data-plane или серию
+     * 502, гасила tun2proxy и тут же поднимала Opera заново в том же `:vpn` — новый
+     * туннель умирал вместе с процессом, а перезапуск никто не заказывал. Снаружи:
+     * «через пару минут Opera отключается и не переподключается».
+     *
+     * Возвращает `true`, если перезапуск передан основному процессу и текущему циклу
+     * пора выходить.
+     */
+    private fun handOffIfVpnProcessDoomed(context: String, connectGenerationId: Int): Boolean {
+        if (tun2proxyForceStopAtMs == 0L) return false
+        if (isUserStopped || explicitStopRequested) return false
+        // Чужое поколение: tun2proxy погасил другой поток (смена сети, recovery), и
+        // перезапуск он заказывает сам — второй сжёг бы лимит впустую.
+        if (!isConnectGenerationCurrent(connectGenerationId)) return false
+        // Без авто-реконнекта будильник не встанет, а экран остался бы в CONNECTING.
+        if (!ClientData(this).getAutoReconnect()) return false
+        if (!ClientData(this).tryConsumeDoomedProcessHandoff()) {
+            LogManager.log(
+                "$context: процесс :vpn обречён, но лимит перезапусков в свежем процессе " +
+                    "за 5 минут исчерпан — дальше восстановление средствами Android."
+            )
+            return false
+        }
+        LogManager.log(
+            "$context: остановка tun2proxy обрекла процесс :vpn. Новый сеанс поднимет свежий процесс."
+        )
+        broadcastState(STATE_CONNECTING)
+        requestRestartFromMainProcess()
+        invalidateConnectGeneration()
+        return true
+    }
+
+    /**
      * Просит основной процесс повторить запуск, когда обречённый `:vpn` умрёт.
      *
      * Обещание «Android перезапустит службу» на устройстве не выполняется вовремя:
@@ -3892,6 +3932,24 @@ class NovaVpnService : OperaNativeVpnService() {
         )
         if (operaBadGatewayBurstCount < 8) return
         if (now - lastOperaBadGatewayRecoveryAtMs < 45_000L) return
+        // 500/502 приходит и на отдельный запрос, который Opera просто не обслуживает:
+        // CONNECT не на 80/443 (FCM `mtalk.google.com:5228`, Telegram `:5222`) даёт
+        // `500 Internal Server Error`. Фоновые приложения повторяют такие запросы
+        // пачками — и серия набиралась на живом туннеле, recovery гасил tun2proxy, а
+        // процесс :vpn умирал (G3). Судит здесь проба живости: она ходит через тот же
+        // прокси раз в полторы секунды. Прошла недавно — туннель жив, рвать нечего.
+        if (lastSuccessfulTunnelProbeAtMs > 0L && now - lastSuccessfulTunnelProbeAtMs < 6_000L) {
+            if (now - lastOperaBadGatewayIgnoredLogAtMs >= 60_000L) {
+                lastOperaBadGatewayIgnoredLogAtMs = now
+                LogManager.log(
+                    "Opera: серия upstream 500/502 на отдельных запросах, но проба через прокси " +
+                        "прошла ${now - lastSuccessfulTunnelProbeAtMs} мс назад — туннель жив, recovery не запускаем."
+                )
+            }
+            operaBadGatewayWindowStartedAtMs = now
+            operaBadGatewayBurstCount = 0
+            return
+        }
 
         lastOperaBadGatewayRecoveryAtMs = now
         operaBadGatewayWindowStartedAtMs = now
@@ -3928,6 +3986,9 @@ class NovaVpnService : OperaNativeVpnService() {
                         "Перезапускаем текущий Opera-регион напрямую как запасной recovery."
                 )
                 val nextGeneration = beginConnectGeneration(stopExisting = true)
+                if (handOffIfVpnProcessDoomed("Recovery Opera после серии 502", nextGeneration)) {
+                    return@startSafeServiceThread
+                }
                 if (isConnectGenerationCurrent(nextGeneration) && !isUserStopped) {
                     configureAndStartOperaOnly(regionPreference, nextGeneration)
                 }
@@ -9364,10 +9425,8 @@ class NovaVpnService : OperaNativeVpnService() {
         socksPort: Int,
         connectGenerationId: Int,
     ): VlessSessionResult {
-        val connectivityManager = getSystemService(android.net.ConnectivityManager::class.java)
         val tunThread = operaTunThread
         val startedAtMs = SystemClock.elapsedRealtime()
-        var vpnNetwork: android.net.Network? = null
         var failures = 0
         var lastHealthyAtMs = startedAtMs
         fun uptimeMs(): Long = SystemClock.elapsedRealtime() - startedAtMs
@@ -9381,9 +9440,8 @@ class NovaVpnService : OperaNativeVpnService() {
                 return VlessSessionResult(VlessSessionOutcome.TUNNEL_GONE, uptimeMs())
             }
             Thread.sleep(1500L)
-            vpnNetwork = findCurrentVpnNetwork(connectivityManager) ?: vpnNetwork
-            val validated = isValidatedVpnNetwork(connectivityManager, vpnNetwork)
-            val tunnelReady = hasTunnelConnectivity(vpnNetwork, 1200, allowHttpDnsFallback = false)
+            // Только проба через узел: VALIDATED залипает, а проверка через сеть VPN
+            // на tun2proxy проходит всегда — рукопожатие и DNS отвечает он сам (G258).
             // Проба живости и есть замер задержки: запрос идёт наружу через сам узел.
             // Экран измерить не может — при раздельном туннелировании он снаружи VPN,
             // а порт SOCKS-инбаунда ему неизвестен, поэтому «Ping: ---» висел всегда.
@@ -9398,7 +9456,7 @@ class NovaVpnService : OperaNativeVpnService() {
                     TRANSPORT_VLESS,
                 )
             }
-            if (validated || tunnelReady || proxyReady) {
+            if (proxyReady) {
                 failures = 0
                 lastHealthyAtMs = SystemClock.elapsedRealtime()
                 markSuccessfulTunnelProbe()
@@ -9439,7 +9497,12 @@ class NovaVpnService : OperaNativeVpnService() {
                         ).toByteArray(Charsets.US_ASCII)
                 )
                 output.flush()
-                socket.getInputStream().bufferedReader().readLine().orEmpty().contains("200")
+                // Не «200»: `http://1.1.1.1/` Cloudflare отдаёт как 301 (перевод на
+                // https), и прежняя проверка отклоняла каждый живой узел VLESS —
+                // «ни один профиль не ответил» на подписке, которая работает в
+                // других клиентах. Та же ловушка, что G58 у Opera; полоса та же.
+                val statusLine = socket.getInputStream().bufferedReader().readLine().orEmpty()
+                proxyProbeStatusConfirmsUpstream(parseHttpStatusCode(statusLine))
             } ?: false
         } catch (_: Exception) {
             false
@@ -10985,6 +11048,7 @@ class NovaVpnService : OperaNativeVpnService() {
             Thread.sleep(1500L)
             if (
                 !stablePlanPromoted &&
+                failures == 0 &&
                 connectedAtMs > 0L &&
                 SystemClock.elapsedRealtime() - connectedAtMs >= STABLE_LAST_SUCCESS_HOLD_MS
             ) {
@@ -10996,9 +11060,11 @@ class NovaVpnService : OperaNativeVpnService() {
                     )
                 }
             }
-            vpnNetwork = findCurrentVpnNetwork(connectivityManager) ?: vpnNetwork
-            val validated = isValidatedVpnNetwork(connectivityManager, vpnNetwork)
-            val tunnelReady = hasTunnelConnectivity(vpnNetwork, 1200, allowHttpDnsFallback = false)
+            // Живость сессии решает только проба через сам прокси. VALIDATED у системы
+            // залипает, а проверка через сеть VPN на tun2proxy отвечает «да» всегда:
+            // TCP-рукопожатие принимает сам tun2proxy, DNS — его виртуальный резолвер.
+            // Проверено на Mi A1: узел Opera закрыт iptables, все запросы падают, а
+            // сессия минутами числилась живой и не переподключалась (G258).
             // Проба живости и есть замер задержки: запрос уходит наружу через сам прокси.
             // Экран измерить не может — в режиме Opera пакет Nova всегда вне VPN
             // (applyOperaSplitTunnelPolicy исключает его во всех трёх ветках), сети VPN
@@ -11013,7 +11079,7 @@ class NovaVpnService : OperaNativeVpnService() {
             if (proxyReady) {
                 clientData.publishTransportLatency(probeMs, TRANSPORT_OPERA)
             }
-            if (validated || tunnelReady || proxyReady) {
+            if (proxyReady) {
                 failures = 0
                 lastHealthyAtMs = SystemClock.elapsedRealtime()
                 markSuccessfulTunnelProbe()
@@ -11053,6 +11119,11 @@ class NovaVpnService : OperaNativeVpnService() {
             joinTimeoutMs = 2500L,
             stopProxyManager = readyState == OperaProxyManager.ReadyState.STARTED_INTERNAL,
         )
+        if (reconnectRecommended && handOffIfVpnProcessDoomed("Opera потеряла data-plane", connectGenerationId)) {
+            // Поколение уже сброшено: runOperaFallbackUntilStable выйдет, не перебирая
+            // регионы в процессе, который умрёт через две секунды.
+            return OperaFallbackResult.CONNECTED
+        }
         if (!isUserStopped) {
             setCurrentBackend(BACKEND_WARP)
             if (reconnectRecommended && clientData.getAutoReconnect()) {

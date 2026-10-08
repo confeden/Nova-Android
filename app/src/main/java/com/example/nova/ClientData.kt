@@ -3326,6 +3326,26 @@ class ClientData(context: Context) {
             stats.consecutiveFailures.coerceAtMost(6) * 4.0
     }
 
+    /**
+     * Не больше [maxPerWindow] передач перезапуска свежему `:vpn` за [windowMs]: иначе
+     * узел, который стабильно не даёт probe, крутил бы процесс по кругу.
+     */
+    fun tryConsumeDoomedProcessHandoff(
+        nowMs: Long = System.currentTimeMillis(),
+        windowMs: Long = 5L * 60L * 1000L,
+        maxPerWindow: Int = 3,
+    ): Boolean = synchronized(ClientData::class.java) {
+        val windowStartedAt = prefs.getLong("doomed_handoff_window_started_at", 0L)
+        val inWindow = windowStartedAt > 0L && nowMs - windowStartedAt in 0 until windowMs
+        val used = if (inWindow) prefs.getInt("doomed_handoff_count", 0) else 0
+        if (used >= maxPerWindow) return@synchronized false
+        prefs.edit()
+            .putLong("doomed_handoff_window_started_at", if (inWindow) windowStartedAt else nowMs)
+            .putInt("doomed_handoff_count", used + 1)
+            .commit()
+        true
+    }
+
     fun canStartOperaBootstrapViaWarp(nowMs: Long = System.currentTimeMillis()): Boolean {
         val lastStartedAt = prefs.getLong("opera_bootstrap_warp_started_at", 0L)
         return lastStartedAt <= 0L || nowMs - lastStartedAt >= 75_000L

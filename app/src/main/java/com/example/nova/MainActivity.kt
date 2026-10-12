@@ -83,6 +83,9 @@ class MainActivity : AppCompatActivity() {
         /** Сколько ждать прогресс от новой фазы, прежде чем доверять состоянию сервиса. */
         private const val PROGRESS_PHASE_SWITCH_QUIET_MS = 1_500L
 
+        /** Сколько свежему CONNECTED без объявленной VPN-сети дают побыть «ПОДКЛЮЧЕНИЕМ». */
+        private const val FRESH_CONNECTED_GRACE_MS = 10_000L
+
         /** Как часто опрашивать прогресс обновления, пока он вообще меняется. */
         private const val UPDATE_CHIP_TICK_MS = 1_000L
 
@@ -129,6 +132,12 @@ class MainActivity : AppCompatActivity() {
          * Обратный случай ничего не стоит: ответ основного обрывает опрос сразу.
          */
         private const val TRACE_ENTRY_GRACE_MS = 2_500L
+
+        private const val VLESS_BADGE_NAME_REFRESH_MS = 5_000L
+        private const val VLESS_BADGE_NAME_MAX = 22
+
+        /** Сколько ждать IPv4-замер после основного: его собственный срок 4,5 с. */
+        private const val EXIT_V4_JOIN_MS = 4_500L
 
         /**
          * Общий предел опроса входов, даже когда не ответил никто.
@@ -746,6 +755,10 @@ class MainActivity : AppCompatActivity() {
         setupOrientationLayout()
 
         ivBackgroundArt = findViewById(R.id.iv_background_art)
+        // Новые узоры для погружения фона (BackdropRevealImageView): строятся в фоне.
+        ivBackgroundArt.diveBitmapSupplier = { cycle, onReady ->
+            NovaMainBackdrop.requestDiveLayer(this, cycle, onReady)
+        }
         networkBackground = findViewById(R.id.nova_background_animation)
         tronBackdrop = findViewById(R.id.tron_backdrop)
         tronBackdrop.setYogurtIndigoEnabled(mainBackgroundMode() == MainBackgroundPolicy.MODE_ANIMATION)
@@ -757,6 +770,9 @@ class MainActivity : AppCompatActivity() {
         restrictedMobileDots = findViewById(R.id.restricted_mobile_dots)
         tvStatus = findViewById(R.id.tvStatus)
         btnConnect = findViewById(R.id.btnConnect)
+        // Приставка с пультом: экран открывается без касания, и без явного фокуса
+        // первым выбранным оказывался случайный элемент. Главная кнопка — первой.
+        if (btnConnect.isInTouchMode.not()) btnConnect.post { btnConnect.requestFocus() }
         btnNextProfile = findViewById(R.id.btnNextProfile)
         nextProfileCaption = findViewById(R.id.tv_next_profile_caption)
         tvProfileIssueProgress = findViewById(R.id.tv_profile_issue_progress)
@@ -1308,44 +1324,50 @@ class MainActivity : AppCompatActivity() {
         val logEdge = R.id.guide_main_log
         val status = findViewById<View>(R.id.tvStatus)
         if (landscape) {
-            // Микро-лог — слева от статуса, по центру его высоты.
+            // Отдельной колонки под микро-лог больше нет: он виден только пока идёт
+            // подключение, и всё остальное время левая четверть экрана пустовала, а
+            // кнопка, бейдж и адреса теснились у правой колонки. Теперь лог стоит
+            // над статусом, как в портрете, а средняя колонка начинается от края.
+            set.setGuidelinePercent(logEdge, 0.02f)
+            set.setGuidelinePercent(split, 0.6f)
             set.clear(R.id.ll_micro_log, bottom)
-            set.connect(R.id.ll_micro_log, start, parent, start, landscapeInsetLeft + dp(12))
-            set.connect(R.id.ll_micro_log, end, logEdge, start, dp(4))
-            set.connect(R.id.ll_micro_log, top, R.id.tvStatus, top, 0)
-            set.connect(R.id.ll_micro_log, bottom, R.id.tvStatus, bottom, 0)
+            set.connect(R.id.ll_micro_log, start, logEdge, start, landscapeInsetLeft + dp(12))
+            set.connect(R.id.ll_micro_log, end, split, start, dp(12))
+            set.connect(R.id.ll_micro_log, top, parent, top, landscapeInsetTop)
 
             // Средняя колонка сверху вниз: статус, кнопка, бейдж; адреса, шкала и
             // версия прижаты к низу, как в портрете.
             listOf(R.id.tvStatus, R.id.tv_dns_mode_notice, R.id.btnConnect, R.id.tv_country_badge).forEach { id ->
-                set.connect(id, start, logEdge, start, 0)
+                set.connect(id, start, logEdge, start, landscapeInsetLeft)
                 set.connect(id, end, split, start, 0)
             }
             set.constrainWidth(R.id.tvStatus, ConstraintSet.MATCH_CONSTRAINT)
             set.constrainWidth(R.id.tv_dns_mode_notice, ConstraintSet.MATCH_CONSTRAINT)
             set.clear(R.id.tvStatus, bottom)
-            set.connect(R.id.tvStatus, top, parent, top, landscapeInsetTop)
+            set.connect(R.id.tvStatus, top, R.id.ll_micro_log, bottom, 0)
             set.setMargin(R.id.tv_dns_mode_notice, bottom, dp(8))
             set.clear(R.id.btnConnect, top)
             set.clear(R.id.btnConnect, bottom)
             set.connect(R.id.btnConnect, top, R.id.tvStatus, bottom, 0)
             // 236 dp кнопки и 68 dp «след. профиля» в среднюю колонку не входят.
             set.constrainWidth(R.id.btnConnect, dp(200))
-            set.connect(R.id.btnNextProfile, end, split, start, 0)
-            set.connect(R.id.btn_install_update, end, split, start, dp(2))
+            // Зазор до правой колонки: подпись «след. профиль» шире кнопки и без
+            // него ложилась на чипы селектора.
+            set.connect(R.id.btnNextProfile, end, split, start, dp(16))
+            set.connect(R.id.btn_install_update, end, split, start, dp(16))
             set.clear(R.id.tv_country_badge, bottom)
             set.connect(R.id.tv_country_badge, top, R.id.btnConnect, bottom, dp(10))
-            set.connect(R.id.graph_latency, start, logEdge, start, dp(12))
-            set.connect(R.id.graph_latency, end, split, start, dp(12))
+            set.connect(R.id.graph_latency, start, logEdge, start, landscapeInsetLeft + dp(12))
+            set.connect(R.id.graph_latency, end, split, start, dp(16))
             set.constrainHeight(R.id.graph_latency, dp(48))
 
             // Правая колонка: селектор от верха, под ним строка пояснений и
             // «Настройки» с языком.
             set.clear(R.id.sv_exit_region_main, bottom)
             set.connect(R.id.sv_exit_region_main, top, parent, top, landscapeInsetTop + dp(8))
-            set.connect(R.id.sv_exit_region_main, start, split, start, dp(4))
+            set.connect(R.id.sv_exit_region_main, start, split, start, dp(8))
             set.connect(R.id.sv_exit_region_main, end, parent, end, landscapeInsetRight + dp(12))
-            set.connect(R.id.tv_exit_last, start, split, start, dp(4))
+            set.connect(R.id.tv_exit_last, start, split, start, dp(8))
             set.connect(R.id.tv_exit_last, end, parent, end, landscapeInsetRight + dp(12))
             set.clear(R.id.btn_settings, bottom)
             set.clear(R.id.btn_settings, start)
@@ -1573,6 +1595,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        // Погружение фона — только для фона-фактуры и только пока экран виден.
+        if (::ivBackgroundArt.isInitialized) {
+            ivBackgroundArt.setDiveEnabled(mainBackgroundMode() == MainBackgroundPolicy.MODE_IMAGE)
+        }
         val filter = android.content.IntentFilter(NovaVpnService.ACTION_VPN_STATE)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
              registerReceiver(vpnStateReceiver, filter, android.content.Context.RECEIVER_NOT_EXPORTED)
@@ -1601,6 +1627,7 @@ class MainActivity : AppCompatActivity() {
     
     override fun onStop() {
         super.onStop()
+        if (::ivBackgroundArt.isInitialized) ivBackgroundArt.setDiveEnabled(false)
         try { unregisterReceiver(vpnStateReceiver) } catch (e: Exception) {}
         try { unregisterReceiver(vpnProcessDoomedReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(warpDiscoveryReceiver) } catch (_: Exception) {}
@@ -4122,11 +4149,24 @@ class MainActivity : AppCompatActivity() {
         // Поддоменов `ipv4.`/`ipv6.` тут больше нет: `/txt` у них отдаёт 404, и
         // экран не получал адреса ни на одном транспорте. Семейство приходит
         // полем самого ответа.
+        // IPv4 спрашивается отдельно и параллельно: основной источник отвечает
+        // семейством, которое выбрал стек, и при живом IPv6 поле IPv4 оставалось
+        // прочерком на всех транспортах, кроме Tor ([ExitAddressV4]).
+        var v4: ExitAddress.Observation? = null
+        val v4Thread = Thread({ v4 = ExitAddressV4.overNetwork(network) }, "nova-exit-v4").apply {
+            isDaemon = true
+            start()
+        }
         val traces = pollTraceEntries(
             ExitAddress.URLS.map { url -> { fetchExitObservation(network, url) } }
         )
+        v4Thread.join(EXIT_V4_JOIN_MS)
         val index = traces.indexOfFirst { it != null }
-        if (index < 0) return null
+        val v4Observation = v4
+        if (index < 0) {
+            val merged = ExitAddressV4.merge(null, v4Observation) ?: return null
+            return IpSnapshot(ipv4 = merged.ipv4, ipv6 = "", country = merged.country, colo = "")
+        }
         val observation = traces[index] ?: return null
         if (index > 0) {
             // Подмена источника молчать не должна (I4): бейдж после неё
@@ -4137,15 +4177,16 @@ class MainActivity : AppCompatActivity() {
             )
         }
         if (observation.ip.isBlank()) return null
-        val isV4 = ExitAddress.isIpv4(observation.ip)
+        // Адрес и страна — из одного ответа (I10): страна берётся у IPv4-ответа
+        // вместе с его адресом, а основной ответ даёт только IPv6.
+        val merged = ExitAddressV4.merge(
+            ExitAddress.Observation(observation.ip, "", observation.country),
+            v4Observation,
+        ) ?: return null
         return IpSnapshot(
-            // Адрес и страна — из одного ответа. Второе семейство остаётся пустым:
-            // соврать про него нечем, а подставить чужой ответ — это ровно то
-            // смешение источников, на котором бейдж однажды показал адрес одного
-            // пути и страну другого (I10).
-            ipv4 = if (isV4) observation.ip else "",
-            ipv6 = if (isV4) "" else observation.ip,
-            country = observation.country,
+            ipv4 = merged.ipv4,
+            ipv6 = merged.ipv6,
+            country = merged.country,
             // Узла Cloudflare этот источник не знает и знать не может.
             colo = "",
         )
@@ -4295,12 +4336,18 @@ class MainActivity : AppCompatActivity() {
         // Через прокси они идут по очереди — параллелить нечего, ответ нужен один.
         val trace = ExitAddress.URLS.firstNotNullOfOrNull { url ->
             fetchExitObservationViaProxy(proxy, url)
-        } ?: return null
-        val isV4 = ExitAddress.isIpv4(trace.ip)
+        }
+        // Прокси резолвит имя сам и выбирает семейство за нас: IPv4 — отдельным
+        // запросом по литералу ([ExitAddressV4.viaProxy]).
+        val v4 = if (trace != null && ExitAddress.isIpv4(trace.ip)) null else ExitAddressV4.viaProxy(proxy)
+        val merged = ExitAddressV4.merge(
+            trace?.let { ExitAddress.Observation(it.ip, "", it.country) },
+            v4,
+        ) ?: return null
         return IpSnapshot(
-            ipv4 = if (isV4) trace.ip else "",
-            ipv6 = if (isV4) "" else trace.ip,
-            country = trace.country,
+            ipv4 = merged.ipv4,
+            ipv6 = merged.ipv6,
+            country = merged.country,
             colo = "",
         )
     }
@@ -4692,6 +4739,35 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @Volatile
+    private var vlessBadgeName: String = ""
+
+    @Volatile
+    private var vlessBadgeNameReadAtMs: Long = 0L
+
+    /**
+     * Имя активного профиля VLESS для бейджа, без чтения файла на главном потоке
+     * (I13): значение берётся из памяти, а перечитывается в фоне не чаще раза в
+     * пять секунд — бейдж перерисовывается часто, а меняется имя редко.
+     */
+    private fun vlessProfileNameForBadge(): String {
+        val now = SystemClock.elapsedRealtime()
+        if (now - vlessBadgeNameReadAtMs > VLESS_BADGE_NAME_REFRESH_MS) {
+            vlessBadgeNameReadAtMs = now
+            Thread({
+                val name = runCatching {
+                    VlessConfig.parse(clientData.getVlessConfigLink())?.remark?.trim().orEmpty()
+                }.getOrDefault("")
+                vlessBadgeName = if (name.length > VLESS_BADGE_NAME_MAX) {
+                    name.take(VLESS_BADGE_NAME_MAX - 1).trimEnd() + "…"
+                } else {
+                    name
+                }
+            }, "nova-vless-name").apply { isDaemon = true }.start()
+        }
+        return vlessBadgeName
+    }
+
     private fun buildTunnelBadgeText(): String {
         val backend = if (isTunnelConnected()) {
             resolveConnectedUiBackend()
@@ -4745,7 +4821,14 @@ class MainActivity : AppCompatActivity() {
             return "${NovaVpnService.TRANSPORT_AWG}: $effectiveCountry"
         }
         if (backend.trim().uppercase().startsWith(NovaVpnService.BACKEND_VLESS)) {
-            return "${NovaVpnService.BACKEND_VLESS}: $effectiveCountry"
+            // Имя профиля из ссылки (`#имя`): по нему человек узнаёт свой узел,
+            // страна выхода одна на десяток узлов подписки.
+            val name = vlessProfileNameForBadge()
+            return if (name.isEmpty()) {
+                "${NovaVpnService.BACKEND_VLESS}: $effectiveCountry"
+            } else {
+                "${NovaVpnService.BACKEND_VLESS}: $effectiveCountry · $name"
+            }
         }
         if (isAwgBackend(backend)) {
             return "AWG: $effectiveCountry"
@@ -5732,9 +5815,15 @@ class MainActivity : AppCompatActivity() {
 
         vpnState = resolvedState.ifBlank { NovaVpnService.STATE_STOPPED }
         if (vpnState == NovaVpnService.STATE_CONNECTED && !hasLiveNovaVpn()) {
+            // Свежее CONNECTED без VPN-сети — обычно служба просто опередила
+            // ConnectivityManager: интерфейс уже поднят, а сеть ещё не объявлена.
+            // У DNS-туннеля сеанса для рестарта нет, и экран на эти доли секунды
+            // показывал красное «НЕ ПОДКЛЮЧЕНО», а потом сразу зелёное.
+            val connectedJustNow = clientData.getServiceState() == NovaVpnService.STATE_CONNECTED &&
+                (System.currentTimeMillis() - clientData.getServiceStateUpdatedAt()) in 0L..FRESH_CONNECTED_GRACE_MS
             vpnState = if (
                 isNovaVpnServiceRunning() &&
-                clientData.getRestartSession() != null &&
+                (clientData.getRestartSession() != null || connectedJustNow) &&
                 !isRecentLocalStop()
             ) {
                 NovaVpnService.STATE_CONNECTING
@@ -6686,6 +6775,13 @@ class MainActivity : AppCompatActivity() {
                 w / 2f,
                 h / 2f,
             )
+            // Погружение фона идёт из той же точки, откуда расходятся кольца.
+            if (::ivBackgroundArt.isInitialized) {
+                ivBackgroundArt.setDiveOrigin(
+                    btnConnect.x + w / 2f - ivBackgroundArt.x,
+                    btnConnect.y + h / 2f - ivBackgroundArt.y,
+                )
+            }
         }
     }
 
@@ -7675,6 +7771,15 @@ class MainActivity : AppCompatActivity() {
             override fun onAvailable(network: Network) {
                 vpnNetwork = network
                 Log.i("NovaVPN", "VPN Network Available: $network (${describeNetwork(network)})")
+                // Экран мог ждать эту сеть жёлтым «ПОДКЛЮЧЕНИЕ...» поверх уже
+                // объявленного службой CONNECTED — дорисовываем зелёное сразу.
+                runOnUiThread {
+                    if (vpnState == NovaVpnService.STATE_CONNECTING &&
+                        clientData.getServiceState() == NovaVpnService.STATE_CONNECTED
+                    ) {
+                        updateUiByState(null)
+                    }
+                }
             }
             override fun onLost(network: Network) {
                 if (vpnNetwork == network) vpnNetwork = null

@@ -97,8 +97,18 @@ class ConfigsAdapter(
             val meta = metadata[item.id]
 
             val displayMode = normalizeModeForDisplay(item.rawConfig, item.mode)
+            // Профили, выпущенные самой Nova (WarpProfileGenerator): живут в своём
+            // файле, а не в хранилище проверенных конфигураций, поэтому правка,
+            // удаление и ручной порядок к ним не применимы.
+            val generated = item.endpointSource == WarpGeneratedStore.ENDPOINT_SOURCE
             tvTitle.text = when {
+                generated -> "NOVA • $displayMode @ ${item.host}:${item.port}"
                 item.manual -> "MANUAL"
+                // У VLESS имя из ссылки (`#имя`, `tag` sing-box) лежит в
+                // endpointSource (ClientData.getVlessProfilesAsConfigs): по нему
+                // человек и узнаёт узел, адрес у десятка узлов подписки похож.
+                item.userImported && item.mode.startsWith("VLESS") ->
+                    "${item.endpointSource.ifBlank { "${item.host}:${item.port}" }} • $displayMode"
                 item.userImported -> "USER • $displayMode @ ${item.host}:${item.port}"
                 else -> "$displayMode @ ${item.host}:${item.port}"
             }
@@ -194,8 +204,12 @@ class ConfigsAdapter(
             // прошивки, и подменить его значило бы получить профиль, о
             // происхождении которого уже никто не скажет. Кнопку прячем, а не
             // выключаем: неактивная кнопка читается как «сломано».
-            val editable = !clientData.isBundledSeed(item)
+            val editable = !clientData.isBundledSeed(item) && !generated
             btnEdit.visibility = if (editable) View.VISIBLE else View.GONE
+            btnDelete.visibility = if (generated) View.GONE else View.VISIBLE
+            listOf(btnMoveTop, btnMoveUp, btnMoveDown, btnMoveBottom).forEach {
+                it.visibility = if (generated) View.GONE else View.VISIBLE
+            }
             btnEdit.setOnClickListener { activity.showEditConfigDialog(item) }
             btnDelete.setOnClickListener {
                 expandedIds.remove(item.id)

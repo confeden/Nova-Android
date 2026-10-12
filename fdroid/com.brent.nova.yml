@@ -26,7 +26,7 @@
 #   * flavor `fdroid` собирается и в нём выключен встроенный загрузчик обновлений
 #     (BuildConfig.UPDATER_ENABLED=false), при этом flavor `github` не изменился;
 #   * libtun2proxy_jni.so собирается из src/main/cpp для обеих ABI;
-#   * liboperaproxy.so собирается из snawoot-proxies-forks/opera-proxy@v1.15.0-fork
+#   * liboperaproxy.so собирается из Alexey71/opera-proxy@v1.30.0 (как у Nova PC)
 #     (tools/build_opera_proxy.sh) и проверен на устройстве: режим Opera EU
 #     поднялся, выходной IP сменился на нидерландский;
 #   * libtun2proxy.so собирается из tun2proxy/tun2proxy@v0.7.21

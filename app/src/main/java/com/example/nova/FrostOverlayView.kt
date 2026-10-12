@@ -2,13 +2,19 @@ package com.example.nova
 
 import android.animation.ValueAnimator
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PathMeasure
+import android.os.Build
 import android.util.AttributeSet
+import android.view.Choreographer
 import android.view.View
+import android.view.animation.AnimationUtils
 import android.view.animation.DecelerateInterpolator
+import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
@@ -54,12 +60,30 @@ class FrostOverlayView @JvmOverloads constructor(
 
     private class IcePlate(val path: Path, val distance: Float, val alpha: Int)
 
+    /**
+     * Снежинка — готовый спрайт ([sprite], маска ALPHA_8) плюс движение.
+     *
+     * Спрайт рисуется один раз при постройке: фрактальная фигура — это сотни
+     * отрезков, и гонять их через Path каждый кадр значило бы жечь процессор
+     * ради неподвижного рисунка. Кадр двигает только матрицу.
+     */
     private class Snowflake(
-        val path: Path,
-        val centerX: Float,
-        val centerY: Float,
-        val distance: Float,
+        val sprite: Bitmap,
+        val half: Float,
+        var currentX: Float,
+        var currentY: Float,
+        var currentRotation: Float,
+        var distance: Float,
         val alpha: Int,
+        val size: Float,
+        val fallSpeedPxPerMs: Float,
+        val swayAmplitudePx: Float,
+        val swayOmega: Float,
+        /** Фаза копится по дельтам кадров, а не считается от uptime: `Float` от
+         *  миллисекунд с загрузки теряет точность через несколько часов, и
+         *  покачивание шло ступеньками. */
+        var swayPhase: Float,
+        val rotationSpeedDegPerMs: Float,
     )
 
     private class Tendril(val path: Path, val length: Float, val distance: Float)
@@ -86,6 +110,22 @@ class FrostOverlayView @JvmOverloads constructor(
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
     }
+    private val spritePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val spriteMatrix = Matrix()
+    private val cachePaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val eraserPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.CLEAR)
+    }
+
+    /**
+     * Промёрзший слой целиком (вуаль, осколки, усы) — когда намерзание кончилось.
+     *
+     * Дальше он не меняется, а снег падает непрерывно: без кэша каждый кадр
+     * заново растеризовал сотни осколков и резал усы через PathMeasure.
+     */
+    private var staticCache: Bitmap? = null
+    private var staticCacheFailed = false
     private val tendrilPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
@@ -123,12 +163,34 @@ class FrostOverlayView @JvmOverloads constructor(
     private var opacityScale = 1f
 
     private var animator: ValueAnimator? = null
+    private var lastFrameTimeMs = 0L
+    private var flakeRandom = Random(seed)
 
     init {
         setWillNotDraw(false)
         isClickable = false
         isFocusable = false
         alpha = 0f
+    }
+
+    /** Проверяет, включены ли аниматоры в системе (developer options / battery saver). */
+    private fun areAnimatorsGloballyEnabled(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            ValueAnimator.areAnimatorsEnabled()
+        } else {
+            true
+        }
+    }
+
+    /** Нужен ли непрерывный цикл отрисовки падающего снега прямо сейчас. */
+    private fun isFallingAnimationActive(): Boolean {
+        return progress > 0f &&
+            layerAlpha > 0f &&
+            isAttachedToWindow &&
+            visibility == VISIBLE &&
+            windowVisibility == VISIBLE &&
+            flakes.isNotEmpty() &&
+            areAnimatorsGloballyEnabled()
     }
 
     /** Касания проходят насквозь: это украшение, а не элемент управления. */
@@ -205,7 +267,10 @@ class FrostOverlayView @JvmOverloads constructor(
         for (zone in zones) {
             clearPath.addPath(zone.path)
         }
-        built = false
+        // Вырезы — только клип при отрисовке (и дыры в кэше); пересобирать фигуры
+        // незачем. Раньше здесь стоял `built = false`, и при каждой смене подписи
+        // кнопки снег прыгал обратно на исходные места.
+        releaseStaticCache()
         invalidate()
     }
 
@@ -218,6 +283,7 @@ class FrostOverlayView @JvmOverloads constructor(
             addUpdateListener {
                 layerAlpha = it.animatedValue as Float
                 alpha = layerAlpha * opacityScale
+                if (layerAlpha <= 0f) releaseBitmaps()
                 invalidate()
             }
             start()
@@ -231,7 +297,23 @@ class FrostOverlayView @JvmOverloads constructor(
         progress = 0f
         layerAlpha = 0f
         alpha = 0f
+        lastFrameTimeMs = 0L
+        releaseBitmaps()
         invalidate()
+    }
+
+    private fun releaseStaticCache() {
+        staticCache?.recycle()
+        staticCache = null
+        staticCacheFailed = false
+    }
+
+    /** Отдаёт память спрайтов и кэша; следующая отрисовка соберёт всё заново. */
+    private fun releaseBitmaps() {
+        releaseStaticCache()
+        for (flake in flakes) flake.sprite.recycle()
+        flakes.clear()
+        built = false
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
@@ -240,16 +322,46 @@ class FrostOverlayView @JvmOverloads constructor(
         if (progress > 0f) rebuildIfNeeded()
     }
 
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        if (isFallingAnimationActive()) {
+            lastFrameTimeMs = 0L
+            postInvalidateOnAnimation()
+        }
+    }
+
     override fun onDetachedFromWindow() {
         animator?.cancel()
         animator = null
+        lastFrameTimeMs = 0L
+        Choreographer.getInstance().removeFrameCallback(snowFrameCallback)
+        snowFramePending = false
+        releaseBitmaps()
         super.onDetachedFromWindow()
+    }
+
+    override fun onVisibilityAggregated(isVisible: Boolean) {
+        super.onVisibilityAggregated(isVisible)
+        if (isVisible && isFallingAnimationActive()) {
+            lastFrameTimeMs = 0L
+            postInvalidateOnAnimation()
+        }
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        if (visibility == VISIBLE && isFallingAnimationActive()) {
+            lastFrameTimeMs = 0L
+            postInvalidateOnAnimation()
+        }
     }
 
     private fun rebuildIfNeeded() {
         if (built || width <= 0 || height <= 0) return
         built = true
+        releaseStaticCache()
         plates.clear()
+        for (flake in flakes) flake.sprite.recycle()
         flakes.clear()
         tendrils.clear()
 
@@ -317,52 +429,154 @@ class FrostOverlayView @JvmOverloads constructor(
     }
 
     /**
-     * Снежинки: шесть лучей, на каждом — боковые веточки двух уровней.
+     * Снежинки: шесть одинаковых фрактальных лучей, и у каждой снежинки свой луч.
      *
      * Настоящая шестилучевая симметрия, а не звёздочка: именно повтор одного
-     * луча шесть раз читается как снежинка, даже когда фигура мелкая.
+     * луча шесть раз читается как снежинка, даже когда фигура мелкая. Сам луч
+     * растёт рекурсивно — на ветке сидят ветки поменьше, на них ещё меньше, — и
+     * число, места, длины и углы веток выпадают заново на каждую снежинку,
+     * поэтому двух одинаковых нет.
      */
     private fun buildFlakes(w: Float, h: Float, random: Random) {
+        val density = resources.displayMetrics.density
+        val minSpeed = FLAKE_SPEED_MIN_DP_S * density / 1000f
+        val maxSpeed = FLAKE_SPEED_MAX_DP_S * density / 1000f
+        val minSwayAmp = SWAY_AMP_MIN_DP * density
+        val maxSwayAmp = SWAY_AMP_MAX_DP * density
+
         val count = (FLAKE_COUNT * flakeDensity).roundToInt().coerceAtLeast(0)
         repeat(count) {
             val cx = random.nextFloat() * w
             val cy = random.nextFloat() * h
             val size = FLAKE_MIN_PX + random.nextFloat() * FLAKE_SPREAD_PX
-            val rotation = random.nextFloat() * (Math.PI.toFloat() / 3f)
-            val path = Path()
-            for (arm in 0 until 6) {
-                val angle = rotation + arm * (Math.PI.toFloat() / 3f)
-                buildArm(path, cx, cy, angle, size)
-            }
+            val sizeFraction = ((size - FLAKE_MIN_PX) / FLAKE_SPREAD_PX).coerceIn(0f, 1f)
+            val sprite = renderFlakeSprite(size, sizeFraction, random) ?: return@repeat
+
+            // Скорость падения зависит от размера снежинки: крупные падают быстрее (параллакс).
+            val fallSpeed = minSpeed + sizeFraction * (maxSpeed - minSpeed)
+
+            // Покачивание по синусоиде: амплитуда 6..18 dp, период 3..7 с.
+            val swayAmp = minSwayAmp + random.nextFloat() * (maxSwayAmp - minSwayAmp)
+            val periodMs = (SWAY_PERIOD_MIN_S + random.nextFloat() * (SWAY_PERIOD_MAX_S - SWAY_PERIOD_MIN_S)) * 1000f
+            val swayOmega = (2f * PI.toFloat()) / periodMs
+            val swayPhase = random.nextFloat() * 2f * PI.toFloat()
+
+            // Медленное вращение: несколько градусов в секунду с индивидуальным направлением знака.
+            val rotSign = if (random.nextBoolean()) 1f else -1f
+            val rotSpeedDegS = ROTATION_SPEED_MIN_DEG_S + random.nextFloat() * (ROTATION_SPEED_MAX_DEG_S - ROTATION_SPEED_MIN_DEG_S)
+            val rotSpeedDegPerMs = rotSign * (rotSpeedDegS / 1000f)
+
             flakes.add(
                 Snowflake(
-                    path = path,
-                    centerX = cx,
-                    centerY = cy,
+                    sprite = sprite,
+                    half = sprite.width / 2f,
+                    currentX = cx,
+                    currentY = cy,
+                    currentRotation = random.nextFloat() * 60f,
                     distance = hypot(cx - originX, cy - originY),
                     alpha = FLAKE_ALPHA_MIN + random.nextInt(FLAKE_ALPHA_SPREAD),
+                    size = size,
+                    fallSpeedPxPerMs = fallSpeed,
+                    swayAmplitudePx = swayAmp,
+                    swayOmega = swayOmega,
+                    swayPhase = swayPhase,
+                    rotationSpeedDegPerMs = rotSpeedDegPerMs,
                 )
             )
         }
-        flakes.sortBy { it.distance }
+        flakeRandom = Random(seed xor 0x5DEECE66DL)
+        lastFrameTimeMs = 0L
     }
 
-    private fun buildArm(path: Path, cx: Float, cy: Float, angle: Float, size: Float) {
-        val tipX = cx + cos(angle) * size
-        val tipY = cy + sin(angle) * size
-        path.moveTo(cx, cy)
-        path.lineTo(tipX, tipY)
-        // Две пары боковых веточек: ближе к центру длиннее, у кончика короче.
-        for (step in 1..2) {
-            val at = size * (0.38f + 0.28f * step)
-            val branch = size * (0.30f - 0.10f * step)
-            val bx = cx + cos(angle) * at
-            val by = cy + sin(angle) * at
-            for (side in intArrayOf(-1, 1)) {
-                val branchAngle = angle + side * BRANCH_ANGLE
-                path.moveTo(bx, by)
-                path.lineTo(bx + cos(branchAngle) * branch, by + sin(branchAngle) * branch)
+    /**
+     * Правила роста одного луча — выпадают на снежинку целиком.
+     *
+     * [count], [at], [ratio] и [angle] — по уровню вложенности; веточки
+     * зеркальны относительно своей ветки, иначе симметрия снежинки теряется.
+     */
+    private class ArmGenome(
+        val depth: Int,
+        val count: IntArray,
+        val at: Array<FloatArray>,
+        val ratio: Array<FloatArray>,
+        val angle: FloatArray,
+    )
+
+    private fun randomGenome(sizeFraction: Float, random: Random): ArmGenome {
+        // Глубина от размера: у мелкой снежинки третий уровень сливается в пятно.
+        val depth = when {
+            sizeFraction > 0.55f -> 3
+            sizeFraction > 0.15f -> 2
+            else -> 1 + random.nextInt(2)
+        }
+        val count = IntArray(depth) { level -> if (level == 0) 1 + random.nextInt(3) else 1 + random.nextInt(2) }
+        val at = Array(depth) { level ->
+            FloatArray(count[level]) { 0.22f + random.nextFloat() * 0.62f }.also { it.sort() }
+        }
+        val ratio = Array(depth) { level ->
+            FloatArray(count[level]) { i ->
+                // Ближе к основанию ветки длиннее — так растёт настоящий дендрит.
+                val base = 0.26f + random.nextFloat() * 0.26f
+                base * (1f - 0.45f * at[level][i])
             }
+        }
+        val angle = FloatArray(depth) { (PI.toFloat() / 3f) + (random.nextFloat() - 0.5f) * 0.55f }
+        return ArmGenome(depth, count, at, ratio, angle)
+    }
+
+    private fun renderFlakeSprite(size: Float, sizeFraction: Float, random: Random): Bitmap? {
+        val genome = randomGenome(sizeFraction, random)
+        val path = Path()
+        val pad = FLAKE_WIDTH * 2f
+        val half = size + pad
+        for (arm in 0 until 6) {
+            val angle = arm * (PI.toFloat() / 3f)
+            growArm(path, half, half, angle, size, 0, genome)
+        }
+        // Изредка — шестиугольная пластинка в центре: у живых снежинок она бывает.
+        if (random.nextFloat() < 0.35f) {
+            val r = size * (0.12f + random.nextFloat() * 0.12f)
+            for (k in 0..6) {
+                val a = k * (PI.toFloat() / 3f)
+                val x = half + cos(a) * r
+                val y = half + sin(a) * r
+                if (k == 0) path.moveTo(x, y) else path.lineTo(x, y)
+            }
+        }
+        val side = (half * 2f).toInt().coerceAtLeast(2)
+        val bitmap = try {
+            Bitmap.createBitmap(side, side, Bitmap.Config.ALPHA_8)
+        } catch (_: Throwable) {
+            return null
+        }
+        flakePaint.color = ICE_HIGHLIGHT
+        flakePaint.alpha = 255
+        flakePaint.strokeWidth = FLAKE_WIDTH
+        Canvas(bitmap).drawPath(path, flakePaint)
+        return bitmap
+    }
+
+    private fun growArm(
+        path: Path,
+        x: Float,
+        y: Float,
+        angle: Float,
+        length: Float,
+        level: Int,
+        genome: ArmGenome,
+    ) {
+        val tipX = x + cos(angle) * length
+        val tipY = y + sin(angle) * length
+        path.moveTo(x, y)
+        path.lineTo(tipX, tipY)
+        if (level >= genome.depth) return
+        for (i in 0 until genome.count[level]) {
+            val child = length * genome.ratio[level][i]
+            if (child < MIN_BRANCH_PX) continue
+            val bx = x + cos(angle) * length * genome.at[level][i]
+            val by = y + sin(angle) * length * genome.at[level][i]
+            growArm(path, bx, by, angle + genome.angle[level], child, level + 1, genome)
+            growArm(path, bx, by, angle - genome.angle[level], child, level + 1, genome)
         }
     }
 
@@ -416,6 +630,8 @@ class FrostOverlayView @JvmOverloads constructor(
         rebuildIfNeeded()
         if (plates.isEmpty()) return
 
+        updateFlakes()
+
         val front = progress * maxDistance
         // Фронт «размазан», а не обрезан по окружности: резкая граница выглядит
         // как круг поверх экрана, а не как наступающий холод.
@@ -424,16 +640,140 @@ class FrostOverlayView @JvmOverloads constructor(
         // Вырезы делаются клипом, а не проверкой каждой фигуры: осколков
         // несколько сотен, и «не рисовать те, что пересекают кнопку» оставило бы
         // рваную дыру вместо ровного края.
-        val clipped = clearPath.isEmpty.not()
-        if (clipped) {
-            canvas.save()
-            canvas.clipOutPath(clearPath)
+        //
+        // Когда лёд лёг, вырезы уже пробиты в кэше, и клипа нет вовсе: контур
+        // букв — сложный путь, и клип по нему каждый кадр стоил на Redmi Note 9S
+        // около четверти ядра RenderThread. Снежинки не клипуются никогда —
+        // это падающий снег, ему можно пролететь и над надписью.
+        val cache = if (progress >= 1f) staticCacheOrNull() else null
+        if (cache != null) {
+            cachePaint.alpha = (255 * layerAlpha).toInt().coerceIn(0, 255)
+            canvas.drawBitmap(cache, 0f, 0f, cachePaint)
+        } else {
+            val clipped = clearPath.isEmpty.not()
+            if (clipped) {
+                canvas.save()
+                canvas.clipOutPath(clearPath)
+            }
+            drawStatic(canvas, front, feather)
+            if (clipped) canvas.restore()
         }
+        drawFlakes(canvas, front, feather)
+
+        if (isFallingAnimationActive()) {
+            scheduleSnowFrame()
+        }
+    }
+
+    private var snowFramePending = false
+    private var vsyncsToSkip = 0
+    private val snowFrameCallback = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            if (vsyncsToSkip > 0) {
+                vsyncsToSkip--
+                Choreographer.getInstance().postFrameCallback(this)
+            } else {
+                snowFramePending = false
+                invalidate()
+            }
+        }
+    }
+
+    /**
+     * Следующий кадр снега — не на каждый vsync, а примерно 30 раз в секунду.
+     *
+     * Каждый кадр снега заставляет окно перекомпоновать весь экран под слоем;
+     * на 60 Гц это стоило RenderThread'у почти ядро. Снег медленный (13..42
+     * dp/с, меньше полутора dp за кадр), и ровные 30 к/с — каждый второй vsync
+     * на 60 Гц, каждый четвёртый на 120 Гц — глазу неотличимы от 60, а
+     * перерисовок вдвое-вчетверо меньше. Пока лёд намерзает, кадры идут
+     * своим чередом от аниматора.
+     */
+    private fun scheduleSnowFrame() {
+        if (progress < 1f) {
+            postInvalidateOnAnimation()
+            return
+        }
+        if (snowFramePending) return
+        snowFramePending = true
+        val refresh = display?.refreshRate ?: 60f
+        vsyncsToSkip = ((refresh / SNOW_FPS).roundToInt() - 1).coerceAtLeast(0)
+        Choreographer.getInstance().postFrameCallback(snowFrameCallback)
+    }
+
+    private fun drawStatic(canvas: Canvas, front: Float, feather: Float) {
         drawVeil(canvas, front)
         drawPlates(canvas, front, feather)
         drawTendrils(canvas)
-        drawFlakes(canvas, front, feather)
-        if (clipped) canvas.restore()
+    }
+
+    /**
+     * Неподвижный слой, отрисованный один раз в битмап, — или `null`, если
+     * памяти не нашлось (тогда рисуем по-старому, каждый кадр).
+     */
+    private fun staticCacheOrNull(): Bitmap? {
+        staticCache?.let { return it }
+        if (staticCacheFailed || width <= 0 || height <= 0) return null
+        val bitmap = try {
+            Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        } catch (_: Throwable) {
+            staticCacheFailed = true
+            return null
+        }
+        // Прозрачность таяния накладывается при выводе битмапа, поэтому в кэш
+        // слой ложится непрозрачным.
+        val savedAlpha = layerAlpha
+        layerAlpha = 1f
+        val cacheCanvas = Canvas(bitmap)
+        drawStatic(cacheCanvas, maxDistance, maxDistance * FRONT_FEATHER)
+        if (!clearPath.isEmpty) cacheCanvas.drawPath(clearPath, eraserPaint)
+        layerAlpha = savedAlpha
+        staticCache = bitmap
+        return bitmap
+    }
+
+    /**
+     * Непрерывный пересчёт координат снежинок (падение, покачивание, вращение).
+     *
+     * Время — кадровое (vsync), дельта зажимается до 50 мс
+     * после паузы/сворачивания, чтобы снежинки не телепортировались сквозь экран.
+     */
+    private fun updateFlakes() {
+        // Время кадра (vsync), а не «сейчас»: иначе шаг движения дрожит вместе
+        // с тем, в какой момент кадра нас позвали, и снег идёт рывками.
+        val now = AnimationUtils.currentAnimationTimeMillis()
+        if (lastFrameTimeMs == 0L) {
+            lastFrameTimeMs = now
+            return
+        }
+        val deltaMs = (now - lastFrameTimeMs).coerceIn(0L, MAX_FRAME_DELTA_MS)
+        lastFrameTimeMs = now
+        if (deltaMs <= 0L || !areAnimatorsGloballyEnabled()) return
+
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+
+        for (flake in flakes) {
+            flake.currentY += flake.fallSpeedPxPerMs * deltaMs
+            flake.currentRotation += flake.rotationSpeedDegPerMs * deltaMs
+
+            // Респаун сверху при выходе за нижнюю границу (с запасом на размер снежинки).
+            val margin = flake.size * 1.5f
+            if (flake.currentY > h + margin) {
+                flake.currentY = -margin - flakeRandom.nextFloat() * (h * 0.15f)
+                flake.currentX = flakeRandom.nextFloat() * w
+            }
+
+            flake.swayPhase += flake.swayOmega * deltaMs
+            if (flake.swayPhase > TWO_PI) flake.swayPhase -= TWO_PI
+
+            // Расстояние до центра намерзания считается от текущей позиции снежинки,
+            // чтобы она органично проявлялась при приближении фронта холода.
+            val swayX = flake.swayAmplitudePx * sin(flake.swayPhase)
+            val renderX = flake.currentX + swayX
+            flake.distance = hypot(renderX - originX, flake.currentY - originY)
+        }
     }
 
     /**
@@ -491,22 +831,23 @@ class FrostOverlayView @JvmOverloads constructor(
     }
 
     private fun drawFlakes(canvas: Canvas, front: Float, feather: Float) {
+        spritePaint.color = ICE_HIGHLIGHT
         for (flake in flakes) {
-            if (flake.distance > front) break
             val local = localProgress(flake.distance, front, feather)
             if (local <= 0f) continue
             val alpha = (flake.alpha * local * layerAlpha).toInt().coerceIn(0, 255)
             if (alpha <= 0) continue
-            flakePaint.color = ICE_HIGHLIGHT
-            flakePaint.alpha = alpha
-            flakePaint.strokeWidth = FLAKE_WIDTH
+            spritePaint.alpha = alpha
+
+            val renderX = flake.currentX + flake.swayAmplitudePx * sin(flake.swayPhase)
             // Снежинка не появляется целиком, а вырастает: масштаб от точки её
             // центра, иначе фигуры «мигают» на месте.
             val scale = 0.35f + 0.65f * local
-            canvas.save()
-            canvas.scale(scale, scale, flake.centerX, flake.centerY)
-            canvas.drawPath(flake.path, flakePaint)
-            canvas.restore()
+            spriteMatrix.setTranslate(-flake.half, -flake.half)
+            spriteMatrix.postRotate(flake.currentRotation)
+            if (scale != 1f) spriteMatrix.postScale(scale, scale)
+            spriteMatrix.postTranslate(renderX, flake.currentY)
+            canvas.drawBitmap(flake.sprite, spriteMatrix, spritePaint)
         }
     }
 
@@ -529,9 +870,27 @@ class FrostOverlayView @JvmOverloads constructor(
         private const val FLAKE_ALPHA_MIN = 70
         private const val FLAKE_ALPHA_SPREAD = 90
         private const val FLAKE_COUNT = 26
-        private const val FLAKE_MIN_PX = 16f
-        private const val FLAKE_SPREAD_PX = 44f
-        private const val FLAKE_WIDTH = 1.4f
+
+        /** На 20 % мельче прежних 16..60 px (просил владелец). */
+        private const val FLAKE_MIN_PX = 12.8f
+        private const val FLAKE_SPREAD_PX = 35.2f
+        private const val FLAKE_WIDTH = 1.3f
+
+        /** Ветка короче — уже не рисуется: на экране она сливается в точку. */
+        private const val MIN_BRANCH_PX = 1.6f
+        private const val TWO_PI = (2.0 * PI).toFloat()
+
+        /** Параметры непрерывного падения снежинок: на 30 % медленнее прежних 18..60 dp/с. */
+        private const val FLAKE_SPEED_MIN_DP_S = 12.6f
+        private const val FLAKE_SPEED_MAX_DP_S = 42f
+        private const val SWAY_AMP_MIN_DP = 6f
+        private const val SWAY_AMP_MAX_DP = 18f
+        private const val SWAY_PERIOD_MIN_S = 3f
+        private const val SWAY_PERIOD_MAX_S = 7f
+        private const val ROTATION_SPEED_MIN_DEG_S = 4f
+        private const val ROTATION_SPEED_MAX_DEG_S = 12f
+        private const val MAX_FRAME_DELTA_MS = 50L
+        private const val SNOW_FPS = 30f
 
         private const val TENDRIL_COUNT = 9
         private const val TENDRIL_DEPTH = 4

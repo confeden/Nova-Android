@@ -8,7 +8,7 @@ class CountryDisplayOrderTest {
     @Test
     fun `the full preferred list in scrambled input order comes back in preferred order`() {
         val scrambled = listOf("SG", "US", "NL", "JP", "NO", "MX", "CA", "RO", "CH", "PL")
-        val expected = listOf("NL", "NO", "PL", "RO", "CH", "US", "CA", "MX", "JP", "SG")
+        val expected = listOf("NL", "NO", "PL", "RO", "CA", "MX", "US", "SG", "JP", "CH")
         assertEquals(expected, CountryDisplayOrder.order(scrambled))
     }
 
@@ -66,5 +66,17 @@ class CountryDisplayOrderTest {
         assertEquals(CountryDisplayOrder.CountryRegion.OTHER, CountryDisplayOrder.regionOf("ZA"))
         assertEquals(CountryDisplayOrder.CountryRegion.OTHER, CountryDisplayOrder.regionOf("XX"))
         assertEquals(CountryDisplayOrder.CountryRegion.OTHER, CountryDisplayOrder.regionOf("???"))
+    }
+    @Test
+    fun `measured countries go by ping, unmeasured keep the default order after them`() {
+        val available = listOf("NL", "US", "PL", "JP", "NO")
+        val ping = mapOf("US" to 120, "NL" to 180, "PL" to 0)
+        assertEquals(listOf("US", "NL", "NO", "PL", "JP"), CountryDisplayOrder.orderByPing(available, ping))
+    }
+
+    @Test
+    fun `a single measurement does not reorder anything`() {
+        val available = listOf("JP", "NL")
+        assertEquals(listOf("NL", "JP"), CountryDisplayOrder.orderByPing(available, mapOf("JP" to 50)))
     }
 }

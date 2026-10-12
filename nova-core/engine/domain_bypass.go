@@ -171,7 +171,79 @@ func getDomainBypassConfigAt() (domainBypassConfig, int64) {
 }
 
 func domainBypassActive() bool {
-	return domainBypassEnabledFlag.Load() && domainBypassLearnedSize.Load() > 0
+	return (domainBypassEnabledFlag.Load() && domainBypassLearnedSize.Load() > 0) ||
+		domainBypassPinnedSize.Load() > 0
+}
+
+// Закреплённые адреса: уходят мимо туннеля всегда, независимо от правил зон.
+//
+// Нужны для сервера «Частного DNS» владельца. Вырез маршрута для него делает адрес
+// «недостижимым» в LinkProperties, и netd остаётся без DoT-серверов (G147), а без
+// выреза система ходит к нему внутри туннеля — с адреса VPN-сервера. Закрепление
+// даёт третье: маршрут остаётся внутри TUN, а TCP-поток забирает релей и набирает
+// тот же адрес защищённым сокетом, то есть через провайдера.
+//
+// В отличие от выученных адресов, смена правил зон их не трогает.
+var domainBypassPinnedMu sync.RWMutex
+var domainBypassPinned = make(map[netip.Addr]struct{})
+var domainBypassPinnedSize atomic.Int64
+
+// SetDomainBypassPinned заменяет набор закреплённых адресов. Пустой список снимает всё.
+func SetDomainBypassPinned(addrsCSV string) {
+	next := make(map[netip.Addr]struct{})
+	for _, field := range strings.FieldsFunc(addrsCSV, isPinnedSeparator) {
+		addr, err := netip.ParseAddr(strings.TrimSpace(field))
+		if err != nil {
+			continue
+		}
+		addr = addr.Unmap()
+		if domainBypassRoutable(addr) {
+			next[addr] = struct{}{}
+		}
+	}
+	domainBypassPinnedMu.Lock()
+	previous := domainBypassPinned
+	domainBypassPinned = next
+	domainBypassPinnedSize.Store(int64(len(next)))
+	domainBypassPinnedMu.Unlock()
+
+	var released []netip.Addr
+	for addr := range previous {
+		if _, kept := next[addr]; !kept {
+			released = append(released, addr)
+		}
+	}
+	domainBypassReleaseAddrs(released)
+	if len(next) > 0 || len(previous) > 0 {
+		log.Printf("Domain bypass pinned addresses: %d (was %d)", len(next), len(previous))
+	}
+}
+
+func isPinnedSeparator(r rune) bool {
+	return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+}
+
+func domainBypassIsPinned(addr netip.Addr) bool {
+	if domainBypassPinnedSize.Load() == 0 {
+		return false
+	}
+	addr = addr.Unmap()
+	domainBypassPinnedMu.RLock()
+	_, exists := domainBypassPinned[addr]
+	domainBypassPinnedMu.RUnlock()
+	return exists
+}
+
+func domainBypassUnpin(addr netip.Addr) bool {
+	addr = addr.Unmap()
+	domainBypassPinnedMu.Lock()
+	_, exists := domainBypassPinned[addr]
+	if exists {
+		delete(domainBypassPinned, addr)
+		domainBypassPinnedSize.Store(int64(len(domainBypassPinned)))
+	}
+	domainBypassPinnedMu.Unlock()
+	return exists
 }
 
 // domainBypassLearnFromAnswer вызывается на каждый перехваченный DNS-ответ.
@@ -286,6 +358,10 @@ func domainBypassRemember(addr netip.Addr, generation int64) bool {
 // никогда не доходит до туннеля. Забыть адрес значит вернуть его туннелю.
 func domainBypassForget(addr netip.Addr) bool {
 	addr = addr.Unmap()
+	if domainBypassUnpin(addr) {
+		domainBypassReleaseAddrs([]netip.Addr{addr})
+		return true
+	}
 	domainBypassLearnedMu.Lock()
 	element, exists := domainBypassLearnedIndex[addr]
 	if exists {
@@ -306,6 +382,9 @@ func domainBypassForget(addr netip.Addr) bool {
 // соединения, а не на каждом пакете — иначе один поток на 443 порту
 // монополизировал бы запись в список.
 func domainBypassKnows(addr netip.Addr) bool {
+	if domainBypassIsPinned(addr) {
+		return true
+	}
 	if domainBypassLearnedSize.Load() == 0 {
 		return false
 	}

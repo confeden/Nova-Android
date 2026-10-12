@@ -267,7 +267,9 @@ func (p *domainBypassProxy) maybeHandle(packet []byte) (bool, error) {
 	if !ok {
 		return false, nil
 	}
-	if flow.port != 443 && flow.port != 80 {
+	// 853 — DoT системного «Частного DNS»; только для закреплённых адресов.
+	if flow.port != 443 && flow.port != 80 &&
+		!(flow.port == 853 && domainBypassIsPinned(flow.dst)) {
 		return false, nil
 	}
 	if !domainBypassKnows(flow.dst) {

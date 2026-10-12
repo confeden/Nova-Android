@@ -1539,6 +1539,9 @@ class NovaVpnService : OperaNativeVpnService() {
         /** Срок TCP-замера ([ProtonLatency]), которым меряется весь список. */
         private const val PROTON_PROBE_TCP_TIMEOUT_MS = 3_000
 
+        /** Окно после первого живого ответа замера: успевают узлы ещё быстрее. */
+        private const val PROTON_PROBE_FIRST_LIVE_GRACE_MS = 400L
+
         /** Сколько записей волны отдаётся другим странам, когда выбранная вся молчит. */
         private const val PROTON_FOREIGN_SLOTS = 2
 
@@ -1912,6 +1915,7 @@ class NovaVpnService : OperaNativeVpnService() {
                     startedHere = WarpProfileGenerator.run(
                         context = applicationContext,
                         force = force,
+                        tunnelLive = !wasIdle,
                         register = { onProgress ->
                             WarpClient(
                                 applicationContext,
@@ -8291,7 +8295,7 @@ class NovaVpnService : OperaNativeVpnService() {
         val defaultServers = if (plainServers.isEmpty() && userServers.isEmpty()) {
             emptyList()
         } else {
-            (userServers + priorityDohFallbackUpstreams(userPlan)).distinct()
+            applyOwnerDnsRoute(userServers + priorityDohFallbackUpstreams(userPlan), backendLabel).distinct()
         }
         val enableTargetedMediaDns =
             backendLabel == BACKEND_WARP && clientData.shouldEnableTargetedMediaDns(backendLabel, countryHint)
@@ -8537,7 +8541,10 @@ class NovaVpnService : OperaNativeVpnService() {
         if (current.isEmpty()) return
 
         val userPlan = runCatching { userDnsPlan() }.getOrDefault(UserDnsPlan(emptyList(), emptyList()))
-        val desired = (userPlan.upstreams + priorityDohFallbackUpstreams(userPlan)).distinct()
+        val desired = applyOwnerDnsRoute(
+            userPlan.upstreams + priorityDohFallbackUpstreams(userPlan),
+            currentBackendLabel,
+        ).distinct()
         if (desired == current) return
         LogManager.log(
             "Страна выхода определена как $country — обновляем порядок резолверов перехвата, без переподключения."
@@ -8712,6 +8719,7 @@ class NovaVpnService : OperaNativeVpnService() {
             bypassAddresses = directBypassDnsAddresses(
                 connectivityManager = connectivityManager,
                 underlyingNetwork = underlyingNetwork,
+                ownerDnsViaTunnel = ownerDnsViaTunnel(BACKEND_WARP),
             ) + domainBypassAddresses(underlyingNetwork),
         )
         applyUnderlyingNetworkHint(
@@ -8919,6 +8927,7 @@ class NovaVpnService : OperaNativeVpnService() {
                 coreInterceptHandlesDns = false,
                 connectivityManager = connectivityManager,
                 underlyingNetwork = underlyingNetwork,
+                ownerDnsViaTunnel = true,
             ) + domainBypassAddresses(underlyingNetwork),
         )
         applyUnderlyingNetworkHint(
@@ -8931,6 +8940,7 @@ class NovaVpnService : OperaNativeVpnService() {
             connectivityManager = connectivityManager,
             underlyingNetwork = underlyingNetwork,
             coreInterceptHandlesDns = false,
+            ownerDnsViaTunnel = true,
         )
         return builder.establish()
     }
@@ -9039,6 +9049,7 @@ class NovaVpnService : OperaNativeVpnService() {
                     coreInterceptHandlesDns = false,
                     connectivityManager = connectivityManager,
                     underlyingNetwork = underlyingNetwork,
+                    ownerDnsViaTunnel = true,
                 ) + domainBypassAddresses(underlyingNetwork)
             },
         )
@@ -25346,6 +25357,7 @@ class NovaVpnService : OperaNativeVpnService() {
         coreInterceptHandlesDns: Boolean = true,
         connectivityManager: android.net.ConnectivityManager? = null,
         underlyingNetwork: android.net.Network? = null,
+        ownerDnsViaTunnel: Boolean = false,
     ): Set<String> {
         // Сам DoH выводится наружу независимо от списка интерфейса: в `addDnsServer`
         // он попасть не может (там только IP), но идти обязан напрямую — иначе
@@ -25366,12 +25378,22 @@ class NovaVpnService : OperaNativeVpnService() {
         // вырез сильнее метки сокета, адрес с `excludeRoute` не попадает в TUN
         // вообще, и оставленный вырез сделал бы настройку недействующей.
         val userBypass = runCatching { userDnsPlan().bypass }.getOrDefault(emptyList())
+        val ownerAddresses = priorityDohAddresses().filter { it.isNotBlank() }.toSet()
+        // Proton, Opera, VLESS, TOR, DNS-VPN: решение владельца — запросы к DNS-AI
+        // идут через VPN, а не мимо него. Вырез для его адресов не делаем вовсе; в
+        // WARP/MASQUE действует прежнее правило (напрямую через провайдера).
         val priorityDoh = if (tunnelRouted) {
             emptySet()
         } else {
-            (priorityDohAddresses() + userBypass).filter { it.isNotBlank() }.toSet()
+            ((ownerAddresses + userBypass).filter { it.isNotBlank() }.toSet()) -
+                if (ownerDnsViaTunnel) ownerAddresses else emptySet()
         }
-        if (priorityDoh.isEmpty()) {
+        if (ownerDnsViaTunnel && ownerAddresses.isNotEmpty()) {
+            LogManager.log(
+                "DNS-AI в этом режиме идёт через туннель: адреса ${PriorityDns.HOST} " +
+                    "из маршрутов не выводим."
+            )
+        } else if (priorityDoh.isEmpty()) {
             // Молчать нельзя (I4): пустой список означает, что шифрованный резолвер
             // не развернулся, и весь DNS пойдёт внутрь туннеля — это рабочее
             // состояние, но другое, и различать их надо по журналу.
@@ -25404,6 +25426,7 @@ class NovaVpnService : OperaNativeVpnService() {
                     "DNS идёт через туннель по настройке: маршрут мимо туннеля не выводим " +
                         "ни для одного резолвера."
                 )
+                pinDirectResolverAddresses(emptySet())
                 return emptySet()
             }
             // G147. Адреса строгого «Частного DNS» из выреза убираем — подробности в
@@ -25424,8 +25447,16 @@ class NovaVpnService : OperaNativeVpnService() {
                         "Android сочтёт сервер недостижимым и оставит netd без DoT (G147). " +
                         "Мимо туннеля идёт: ${kept.joinToString(",").ifEmpty { "ничего" }}."
                 )
+                // Из выреза адрес убран (G147), но в туннеле его оставлять нельзя: DoT
+                // системы к серверу владельца ушёл бы с адреса VPN-сервера. Маршрут
+                // остаётся внутри TUN, а TCP-поток забирает релей ядра и набирает
+                // адрес защищённым сокетом — через провайдера.
+                pinDirectResolverAddresses(
+                    if (ownerDnsViaTunnel) emptySet() else collision.intersect(ownerAddresses)
+                )
                 return kept
             }
+            pinDirectResolverAddresses(emptySet())
             if (priorityDoh.isNotEmpty()) {
                 LogManager.log(
                     // Строка перечисляет то, что действительно выведено маршрутом:
@@ -25433,8 +25464,10 @@ class NovaVpnService : OperaNativeVpnService() {
                     // провайдера. Прежний текст утверждал «только шифрованный DNS»
                     // и печатал при этом весь список — то есть противоречил сам себе
                     // ровно в том месте, где его и читают при разборе утечки.
-                    "Мимо туннеля идут только резолвер ${PriorityDns.HOST} и, если ступень включена, " +
-                        "резолвер провайдера: ${priorityDoh.joinToString(",")}. " +
+                    (if (ownerDnsViaTunnel) "Мимо туннеля идёт только то, что включено правилами DNS" else
+                        "Мимо туннеля идут только резолвер ${PriorityDns.HOST} и, если ступень включена, " +
+                            "резолвер провайдера") +
+                        ": ${priorityDoh.joinToString(",")}. " +
                         "Bootstrap чужих шифрованных резолверов наружу не выводим."
                 )
             }
@@ -25459,6 +25492,56 @@ class NovaVpnService : OperaNativeVpnService() {
                 "Наружу при этом уходит одно имя — самого DoT-сервера."
         )
         return priorityDoh + plain
+    }
+
+    /**
+     * Должен ли DNS-AI идти через туннель, а не напрямую через провайдера.
+     *
+     * Решение владельца: в Proton, Opera, VLESS, TOR и DNS-VPN — через VPN; в
+     * WARP/MASQUE — напрямую. Proton ставит в службе то же ядро и тот же
+     * `establishTunnelInterface`, что и WARP, поэтому его отличает только источник
+     * профилей.
+     */
+    private fun ownerDnsViaTunnel(backendLabel: String?): Boolean {
+        if (isOperaBackendLabel(backendLabel) || isVlessBackendLabel(backendLabel) ||
+            isTorBackendLabel(backendLabel) || isDnsBackendLabel(backendLabel)
+        ) {
+            return true
+        }
+        return runCatching { ClientData(applicationContext).isProtonSourceActive() }.getOrDefault(false)
+    }
+
+    /**
+     * Дописывает `via=tunnel` апстримам DNS-AI в цепочке перехвата ядра, если в этом
+     * режиме он обязан идти через VPN. Чужие апстримы не трогаем.
+     */
+    private fun applyOwnerDnsRoute(upstreams: List<String>, backendLabel: String?): List<String> {
+        if (!ownerDnsViaTunnel(backendLabel)) return upstreams
+        return upstreams.map { entry ->
+            if (!entry.startsWith(PriorityDns.DOH_URL) && !entry.startsWith(PriorityDns.DOT_URL)) {
+                entry
+            } else {
+                entry.split('|').filter { !it.startsWith("via=") }.joinToString("|") + "|via=tunnel"
+            }
+        }
+    }
+
+    /**
+     * Закрепляет за релеем ядра адреса, которые обязаны идти напрямую, но не могут
+     * быть вырезаны из маршрутов (сервер строгого Private DNS, G147).
+     *
+     * Пустое множество снимает закрепление: ядро одно на процесс, и остаток от
+     * прошлого подключения не должен уводить трафик мимо туннеля сейчас (I4).
+     */
+    private fun pinDirectResolverAddresses(addresses: Set<String>) {
+        runCatching { Nova.setDomainBypassPinned(addresses.joinToString(",")) }
+            .onFailure { LogManager.log("Закрепление DNS-адресов в ядре не удалось: ${it.message}") }
+        if (addresses.isNotEmpty()) {
+            LogManager.log(
+                "Сервер Private DNS ${addresses.joinToString(",")} остаётся в маршрутах TUN, " +
+                    "но его TCP-поток уводит релей ядра напрямую через провайдера."
+            )
+        }
     }
 
     /** Разобранный список адресов вместе с ключом, по которому он посчитан. */
@@ -25704,6 +25787,7 @@ class NovaVpnService : OperaNativeVpnService() {
         connectivityManager: android.net.ConnectivityManager?,
         underlyingNetwork: android.net.Network?,
         coreInterceptHandlesDns: Boolean,
+        ownerDnsViaTunnel: Boolean = false,
         tunnelReachesPrivateDns: ((String) -> Boolean)? = null,
     ) {
         if (connectivityManager == null || underlyingNetwork == null) return
@@ -25754,6 +25838,18 @@ class NovaVpnService : OperaNativeVpnService() {
                 "Сервер Private DNS $privateDnsHost оставляем внутри туннеля: вырез маршрута " +
                     "сделал бы его «недостижимым» в LinkProperties, Android отдал бы netd пустой " +
                     "список DoT-серверов, и строгий режим отказал бы на каждом имени (G147)."
+            )
+            return
+        }
+
+        // Решение владельца: DNS-AI в Opera/VLESS идёт через туннель. Имя сервера при
+        // этом резолвится открытым DNS мимо туннеля (он уже выведен выше), а сам DoT
+        // к настоящему адресу — через прокси.
+        if (ownerDnsViaTunnel && tunnelReachesPrivateDns == null &&
+            privateDnsHost.equals(PriorityDns.HOST, ignoreCase = true)
+        ) {
+            LogManager.log(
+                "Private DNS $privateDnsHost остаётся внутри туннеля: DNS-AI в этом режиме идёт через VPN."
             )
             return
         }
@@ -26890,9 +26986,10 @@ class NovaVpnService : OperaNativeVpnService() {
             val tcpPool = java.util.concurrent.Executors.newFixedThreadPool(PROTON_PROBE_PARALLELISM)
             val done = java.util.concurrent.atomic.AtomicInteger(0)
             val alive = java.util.concurrent.atomic.AtomicInteger(0)
+            val completion = java.util.concurrent.ExecutorCompletionService<ProtonProfile>(tcpPool)
             val measured = try {
-                val futures = candidates.mapIndexed { index, candidate ->
-                    tcpPool.submit<ProtonProfile> {
+                candidates.forEachIndexed { index, candidate ->
+                    completion.submit {
                         val tcp = ProtonLatency.probeTcpRttMs(
                             host = candidate.entryIp,
                             timeoutMs = PROTON_PROBE_TCP_TIMEOUT_MS,
@@ -26941,11 +27038,37 @@ class NovaVpnService : OperaNativeVpnService() {
                         result
                     }
                 }
-                futures.mapNotNull {
-                    runCatching {
-                        it.get(PROTON_PROBE_TCP_TIMEOUT_MS * 4L, TimeUnit.MILLISECONDS)
-                    }.getOrNull()
+                // Ответы собираются по мере прихода, а не по порядку списка: первый
+                // ответивший узел открывает короткое окно [PROTON_PROBE_FIRST_LIVE_GRACE_MS]
+                // для тех, кто ещё быстрее, и на этом сбор кончается. Ждать таймаута
+                // каждого молчащего — это до трёх секунд на пустом месте перед тем,
+                // как очередь получит живую голову (просьба владельца: нашёлся живой
+                // узел — сразу к нему). Недомеренные узлы встают за ответившими как
+                // молчащие и домеряются следующим замером.
+                val collected = ArrayList<ProtonProfile>(total)
+                val hardDeadline = SystemClock.elapsedRealtime() + PROTON_PROBE_TCP_TIMEOUT_MS * 4L
+                var stopAt = hardDeadline
+                while (collected.size < total) {
+                    val waitMs = stopAt - SystemClock.elapsedRealtime()
+                    if (waitMs <= 0L) break
+                    val next = completion.poll(waitMs, TimeUnit.MILLISECONDS) ?: break
+                    val item = runCatching { next.get() }.getOrNull() ?: continue
+                    collected += item
+                    if (item.pingMs > 0 && stopAt == hardDeadline) {
+                        stopAt = minOf(hardDeadline, SystemClock.elapsedRealtime() + PROTON_PROBE_FIRST_LIVE_GRACE_MS)
+                    }
                 }
+                if (collected.size < total) {
+                    val seen = collected.mapTo(HashSet()) { it.entryIp to it.port }
+                    LogManager.log(
+                        "Proton probe: живой узел найден, ранжируем по ${collected.size} ответам из $total; " +
+                            "остальные встают за ними без ожидания таймаутов."
+                    )
+                    candidates.filter { (it.entryIp to it.port) !in seen }.forEach { rest ->
+                        collected += rest.copy(pingMs = -1, pingSource = ProtonLatency.SOURCE_NONE)
+                    }
+                }
+                collected
             } finally {
                 tcpPool.shutdownNow()
             }
@@ -27900,6 +28023,7 @@ class NovaVpnService : OperaNativeVpnService() {
                 WarpProfileGenerator.run(
                     context = applicationContext,
                     force = false,
+                    tunnelLive = true,
                     register = { onProgress ->
                         WarpClient(
                             applicationContext,
@@ -28160,6 +28284,14 @@ class NovaVpnService : OperaNativeVpnService() {
         // Входы [ExitAddress] в их порядке: основной, потом запасной. Поддоменов
         // `ipv4.`/`ipv6.` здесь больше нет — `/txt` у них отдаёт 404, то есть два
         // запроса из трёх были заведомо пустыми. Семейство приходит полем ответа.
+        // IPv4 — отдельным запросом, параллельно: основной источник отвечает
+        // семейством, которое выбрал стек, и при живом IPv6 IPv4 не появлялся
+        // никогда, кроме Tor ([ExitAddressV4]).
+        var v4: ExitAddress.Observation? = null
+        val v4Thread = Thread({ v4 = ExitAddressV4.overNetwork(network) }, "nova-exit-v4").apply {
+            isDaemon = true
+            start()
+        }
         var badge: ExitSnapshot? = null
         for ((index, url) in ExitAddress.URLS.withIndex()) {
             badge = fetchExitObservationFromUrl(network, url) ?: continue
@@ -28170,13 +28302,15 @@ class NovaVpnService : OperaNativeVpnService() {
             }
             break
         }
-        val ipv4 = badge?.ipv4.orEmpty()
-        val ipv6 = badge?.ipv6.orEmpty()
-        if (ipv4.isBlank() && ipv6.isBlank() && badge?.country.orEmpty().isBlank()) return null
+        v4Thread.join(4_500L)
+        val primary = badge?.let {
+            ExitAddress.Observation(it.ipv4.ifBlank { it.ipv6 }, "", it.country)
+        }?.takeIf { it.ip.isNotBlank() || it.country.isNotBlank() }
+        val merged = ExitAddressV4.merge(primary, v4) ?: return null
         return ExitSnapshot(
-            ipv4 = ipv4,
-            ipv6 = ipv6,
-            country = badge?.country.orEmpty(),
+            ipv4 = merged.ipv4,
+            ipv6 = merged.ipv6,
+            country = merged.country,
             // Узел Cloudflare этот источник не знает: его спрашивают отдельно и
             // только когда включён обход нежелательного узла ([observedExitColo]).
             colo = "",
@@ -28262,13 +28396,17 @@ class NovaVpnService : OperaNativeVpnService() {
         val socksPort = vlessSocksPort.takeIf { it in 1..65535 } ?: return null
         // `readTextThroughSocks` сам делает TLS на 443, поэтому имя [ExitAddress]
         // работает здесь без изменений: путь через узел остаётся тем же.
-        val body = readTextThroughSocks(socksPort, EXIT_ADDRESS_HOST, EXIT_ADDRESS_PATH) ?: return null
-        val parsed = ExitAddress.parse(body) ?: return null
-        val isV4 = ExitAddress.isIpv4(parsed.ip)
+        val parsed = readTextThroughSocks(socksPort, EXIT_ADDRESS_HOST, EXIT_ADDRESS_PATH)
+            ?.let { ExitAddress.parse(it) }
+        // Имя резолвит узел и выбирает семейство сам: IPv4 — отдельным запросом
+        // по литералу через тот же SOCKS ([ExitAddressV4.viaProxy]).
+        val v4 = if (parsed != null && ExitAddress.isIpv4(parsed.ip)) null else
+            ExitAddressV4.viaProxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", socksPort)))
+        val merged = ExitAddressV4.merge(parsed, v4) ?: return null
         return ExitSnapshot(
-            ipv4 = if (isV4) parsed.ip else "",
-            ipv6 = if (isV4) "" else parsed.ip,
-            country = parsed.country,
+            ipv4 = merged.ipv4,
+            ipv6 = merged.ipv6,
+            country = merged.country,
             colo = "",
         )
     }
@@ -28503,13 +28641,14 @@ class NovaVpnService : OperaNativeVpnService() {
 
     private fun fetchExitSnapshotViaOperaProxy(): ExitSnapshot? {
         val proxy = Proxy(Proxy.Type.HTTP, OperaProxyManager.getLoopbackProxyAddress(this))
-        val body = readTextFromUrlViaProxyForExit(proxy, ExitAddress.URL_ANY) ?: return null
-        val parsed = ExitAddress.parse(body) ?: return null
-        val isV4 = ExitAddress.isIpv4(parsed.ip)
+        val parsed = readTextFromUrlViaProxyForExit(proxy, ExitAddress.URL_ANY)
+            ?.let { ExitAddress.parse(it) }
+        val v4 = if (parsed != null && ExitAddress.isIpv4(parsed.ip)) null else ExitAddressV4.viaProxy(proxy)
+        val merged = ExitAddressV4.merge(parsed, v4) ?: return null
         return ExitSnapshot(
-            ipv4 = if (isV4) parsed.ip else "",
-            ipv6 = if (isV4) "" else parsed.ip,
-            country = parsed.country,
+            ipv4 = merged.ipv4,
+            ipv6 = merged.ipv6,
+            country = merged.country,
             colo = "",
         )
     }

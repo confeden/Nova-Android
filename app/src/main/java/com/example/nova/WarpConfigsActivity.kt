@@ -1143,7 +1143,18 @@ class WarpConfigsActivity : AppCompatActivity() {
                 val vlessConfigs = clientData.getVlessProfilesAsConfigs()
                 val allConfigs = clientData.getWarpVerifiedMergedConfigs() + vlessConfigs
                 val importedCount = allConfigs.count(::isVisibleImportedConfig)
-                val builtInItems = sortedVisibleConfigs(allConfigs, importedOnly = false)
+                // Свои профили Cloudflare (выпуск WarpProfileGenerator) — над
+                // встроенными и в том же порядке, что у очереди подключения:
+                // без единого отказа первыми, дальше по задержке. Раньше их на
+                // экране не было вовсе, и казалось, что живые узлы не в приоритете.
+                val generatedItems = runCatching {
+                    WarpGeneratedStore.toVerifiedConfigs(WarpGeneratedStore(this@WarpConfigsActivity).read(), "")
+                }.getOrDefault(emptyList()).sortedWith(
+                    compareBy<WarpVerifiedConfig> { it.qualityFailureCount > 0 }
+                        .thenBy { if (it.qualityAvgPingMs > 0.0) it.qualityAvgPingMs else Double.MAX_VALUE }
+                        .thenBy { it.seedOrder }
+                )
+                val builtInItems = generatedItems + sortedVisibleConfigs(allConfigs, importedOnly = false)
                 val importedItems = groupImportedByProtocol(
                     sortedVisibleConfigs(allConfigs, importedOnly = true)
                 )

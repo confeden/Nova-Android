@@ -1520,87 +1520,104 @@
                 android:textStyle="bold" />
 
 
-            <TextView
-                android:id="@+id/tv_split_section_title"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Какие приложения используют VPN"
-                android:textColor="?attr/novaTextHint"
-                android:textSize="14sp"
-                android:layout_marginBottom="8dp"/>
-
-            <TextView
-                android:id="@+id/tv_split_dns_hint"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text=""
-                android:textColor="?attr/novaAccent"
-                android:textSize="12sp"
-                android:visibility="gone"
-                android:layout_marginBottom="10dp"/>
-
-            <RadioGroup
-                android:id="@+id/rg_mode"
+            <!--
+                Раздел в карточке, как и все остальные: без неё переключатели и
+                поиск висели прямо на фоне, а «Системные приложения» выпирали за
+                поля соседних карточек.
+            -->
+            <LinearLayout
+                android:id="@+id/card_split_apps"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:layout_marginBottom="6dp">
-
-                <RadioButton
-                    android:id="@+id/rb_all"
+                android:background="?attr/novaCardBackground"
+                android:paddingLeft="16dp"
+                android:paddingTop="12dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp"
+                android:layout_marginBottom="8dp">
+                <TextView
+                    android:id="@+id/tv_split_section_title"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Все"
-                    android:textColor="?attr/novaTextTitle"
-                    android:buttonTint="?attr/novaAccent"/>
-
-                <RadioButton
-                    android:id="@+id/rb_allow"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Только выбранные"
-                    android:textColor="?attr/novaTextTitle"
-                    android:buttonTint="?attr/novaAccent"/>
-
-                <RadioButton
-                    android:id="@+id/rb_disallow"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Все, кроме выбранных"
-                    android:textColor="?attr/novaTextTitle"
-                    android:buttonTint="?attr/novaAccent"/>
-            </RadioGroup>
-
-            <EditText
-                android:id="@+id/et_search"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:hint="Поиск приложений..."
-                android:textColor="?attr/novaTextTitle"
-                android:textColorHint="?attr/novaTextHint"
-                android:layout_marginTop="4dp"
-                android:layout_marginBottom="8dp"
-                android:inputType="text"/>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="4dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
+                    android:text="Какие приложения используют VPN"
+                    android:textColor="?attr/novaTextHint"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="8dp"/>
 
                 <TextView
-                    android:layout_width="0dp"
+                    android:id="@+id/tv_split_dns_hint"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Системные приложения"
-                    android:textColor="?attr/novaTextTitle"
-                    android:textSize="14sp" />
+                    android:text=""
+                    android:textColor="?attr/novaAccent"
+                    android:textSize="12sp"
+                    android:visibility="gone"
+                    android:layout_marginBottom="10dp"/>
 
-                <Switch
-                    android:id="@+id/sw_show_system_apps"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content" />
+                <RadioGroup
+                    android:id="@+id/rg_mode"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:layout_marginBottom="6dp">
+
+                    <RadioButton
+                        android:id="@+id/rb_all"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Все"
+                        android:textColor="?attr/novaTextTitle"
+                        android:buttonTint="?attr/novaAccent"/>
+
+                    <RadioButton
+                        android:id="@+id/rb_allow"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Только выбранные"
+                        android:textColor="?attr/novaTextTitle"
+                        android:buttonTint="?attr/novaAccent"/>
+
+                    <RadioButton
+                        android:id="@+id/rb_disallow"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Все, кроме выбранных"
+                        android:textColor="?attr/novaTextTitle"
+                        android:buttonTint="?attr/novaAccent"/>
+                </RadioGroup>
+
+                <EditText
+                    android:id="@+id/et_search"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="Поиск приложений..."
+                    android:textColor="?attr/novaTextTitle"
+                    android:textColorHint="?attr/novaTextHint"
+                    android:layout_marginTop="4dp"
+                    android:layout_marginBottom="8dp"
+                    android:inputType="text"/>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="4dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Системные приложения"
+                        android:textColor="?attr/novaTextTitle"
+                        android:textSize="14sp" />
+
+                    <Switch
+                        android:id="@+id/sw_show_system_apps"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content" />
+                </LinearLayout>
             </LinearLayout>
 
             <androidx.recyclerview.widget.RecyclerView

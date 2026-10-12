@@ -1519,8 +1519,16 @@ class ClientData(context: Context) {
     }
 
     /** Страны, которые реально есть в выпущенных профилях Proton. */
-    fun getProtonAvailableCountries(): List<String> =
-        CountryDisplayOrder.order(ProtonProfileStore(appContext).readProfiles().map { it.country })
+    fun getProtonAvailableCountries(): List<String> {
+        val profiles = ProtonProfileStore(appContext).readProfiles()
+        // Страны — по задержке, которую намерил замер Proton на этой сети (медиана
+        // по узлам страны), чтобы ближние стояли первыми.
+        val pingByCountry = profiles
+            .filter { it.pingMs > 0 && it.country.isNotBlank() }
+            .groupBy { it.country.trim().uppercase() }
+            .mapValues { (_, items) -> items.map { it.pingMs }.sorted()[items.size / 2] }
+        return CountryDisplayOrder.orderByPing(profiles.map { it.country }, pingByCountry)
+    }
 
     private fun readExitRegionState(): JSONObject {
         readAtomicJson(exitRegionFile)?.let { return it }

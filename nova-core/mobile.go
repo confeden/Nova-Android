@@ -99,6 +99,13 @@ func SetDomainBypassPolicy(enabled bool, zonesCSV string, domainsCSV string, cyr
 	novaengine.SetDomainBypassPolicy(enabled, zonesCSV, domainsCSV, cyrillic)
 }
 
+// SetDomainBypassPinned replaces the set of addresses whose TCP flows (80, 443
+// and 853) always leave through a protected socket, whatever the zone rules say.
+// Comma, space or newline separated; empty clears the set.
+func SetDomainBypassPinned(addrsCSV string) {
+	novaengine.SetDomainBypassPinned(addrsCSV)
+}
+
 // GetDomainBypassStats returns newline-separated key=value counters:
 // learned, relayed, installed, listeners, dropped, quicSkipped.
 func GetDomainBypassStats() string {

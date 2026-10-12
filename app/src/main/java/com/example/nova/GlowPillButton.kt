@@ -17,7 +17,10 @@ class GlowPillButton @JvmOverloads constructor(
 
     private val blurPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val focusPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val rect = RectF()
+    private val focusRect = RectF()
+    private val focusGlowFilter by lazy { BlurMaskFilter(dp(6f), BlurMaskFilter.Blur.NORMAL) }
 
     private var fillColor: Int = Color.argb(54, 220, 208, 255)
     private var glowColor: Int = Color.argb(172, 220, 208, 255)
@@ -50,7 +53,45 @@ class GlowPillButton @JvmOverloads constructor(
 
     override fun onDraw(canvas: Canvas) {
         drawPill(canvas)
+        if (isFocused) drawFocusRing(canvas)
         super.onDraw(canvas)
+    }
+
+    override fun drawableStateChanged() {
+        super.drawableStateChanged()
+        // Фокус рисуется в onDraw, а не подложкой: подложки у кнопки нет вовсе.
+        invalidate()
+    }
+
+    /**
+     * Рамка фокуса для пульта (приставки и телевизоры).
+     *
+     * Указателя на телевизоре нет, и мягкий ореол кнопки не отличается от
+     * ореола в покое — пользователи приставок не видели, что выбрана главная
+     * кнопка. Поэтому рамка двойная и контрастная на любой теме: белая линия
+     * поверх зелёного свечения, снаружи от тела кнопки — цвет фона под ней
+     * не важен.
+     */
+    private fun drawFocusRing(canvas: Canvas) {
+        val gap = dp(3f)
+        focusRect.set(rect.left - gap, rect.top - gap, rect.right + gap, rect.bottom + gap)
+        if (focusRect.width() <= 0f || focusRect.height() <= 0f) return
+        val radius = focusRect.height() / 2f
+
+        focusPaint.reset()
+        focusPaint.isAntiAlias = true
+        focusPaint.style = Paint.Style.STROKE
+        focusPaint.strokeWidth = dp(6f)
+        focusPaint.color = FOCUS_GLOW
+        focusPaint.maskFilter = focusGlowFilter
+        canvas.drawRoundRect(focusRect, radius, radius, focusPaint)
+
+        focusPaint.reset()
+        focusPaint.isAntiAlias = true
+        focusPaint.style = Paint.Style.STROKE
+        focusPaint.strokeWidth = dp(3f)
+        focusPaint.color = Color.WHITE
+        canvas.drawRoundRect(focusRect, radius, radius, focusPaint)
     }
 
     private fun drawPill(canvas: Canvas) {
@@ -83,6 +124,11 @@ class GlowPillButton @JvmOverloads constructor(
     }
 
     private fun dp(value: Float): Float = value * resources.displayMetrics.density
+
+    private companion object {
+        /** Тот же зелёный, что у `tv_focus_stroke`: фокус пульта одного цвета во всём приложении. */
+        val FOCUS_GLOW = Color.rgb(0x32, 0xD7, 0x4B)
+    }
 
     // Текст переводится в момент показа: код ставит русский исходник (см. NovaLanguage).
     override fun setText(text: CharSequence?, type: BufferType?) = NovaLanguage.onSetText(this, text, type)

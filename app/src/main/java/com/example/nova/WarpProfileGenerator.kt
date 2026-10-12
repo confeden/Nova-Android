@@ -85,12 +85,20 @@ object WarpProfileGenerator {
      * Полный прогон. Зовётся из процесса `:vpn`.
      *
      * @param force заново регистрировать личность, даже если она уже есть.
+     * @param tunnelLive поднят ли в этот момент туннель. Сканер делает **настоящие
+     *        рукопожатия** ключом личности, а узел WARP держит одну сессию на ключ и
+     *        отдаёт её тому, кто поздоровался последним (I27). Рабочий туннель на
+     *        этой же личности замолкал бы на каждом ответившем адресе — в браузере
+     *        это «трафик встал, пока идёт выпуск». Поэтому при живом туннеле личность
+     *        всегда новая: старая остаётся в хранилище нетронутой, пока новая не
+     *        выпущена, а сканер работает ключом, которого туннель не знает.
      * @return true, если прогон начался. false — он уже идёт, и второй заводить
      *         нельзя: два сканера писали бы один файл наперегонки.
      */
     fun run(
         context: Context,
         force: Boolean,
+        tunnelLive: Boolean = false,
         register: (onProgress: (Int) -> Unit) -> WarpConfig?,
     ): Boolean {
         if (!running.compareAndSet(false, true)) {
@@ -103,10 +111,16 @@ object WarpProfileGenerator {
             publish(appContext, STATE_RUNNING, "WARP: готовлю личность", 0, TARGET_COUNT)
 
             val existing = store.read()
-            val identity = if (!force && existing.identity != null) {
+            val identity = if (!force && !tunnelLive && existing.identity != null) {
                 LogManager.log("WARP-генератор: личность уже есть, регистрацию пропускаем.")
                 existing.identity
             } else {
+                if (tunnelLive && existing.identity != null) {
+                    LogManager.log(
+                        "WARP-генератор: туннель поднят — сканируем новой личностью, чтобы не " +
+                            "отбирать сессию у рабочего ключа (I27)."
+                    )
+                }
                 publish(appContext, STATE_RUNNING, "WARP: регистрирую устройство", 0, TARGET_COUNT)
                 val config = register { }
                 if (config == null) {

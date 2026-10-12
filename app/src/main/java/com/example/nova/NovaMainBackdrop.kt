@@ -76,6 +76,44 @@ internal object NovaMainBackdrop {
      * перезапуска приложения. Обход дерева видов тут ни при чём — сравниваются
      * четыре значения.
      */
+    /** Сколько разных узоров чередует погружение; дальше они берутся из памяти. */
+    private const val DIVE_VARIANTS = 3
+
+    /** Сведённые слои погружения: ключ — подпись оформления и вариант. */
+    private val diveLayers = LinkedHashMap<String, Bitmap>()
+
+    /**
+     * Узор для очередного цикла погружения ([BackdropRevealImageView]).
+     *
+     * Половина размера экрана: слой всё равно растягивается до двух раз, и
+     * полный размер стоил бы вчетверо больше памяти и времени построения.
+     * Вариантов [DIVE_VARIANTS], по кругу: после первого круга новые узоры не
+     * строятся вовсе. Ответ — на главном потоке.
+     */
+    fun requestDiveLayer(context: Context, cycle: Int, onReady: (Bitmap) -> Unit) {
+        val app = context.applicationContext
+        val texture = NovaAppearance.texture(app)
+        if (texture == NovaAppearance.Texture.NONE) return
+        val variant = NovaAppearance.variant(app) + 1 + Math.floorMod(cycle, DIVE_VARIANTS)
+        val cacheKey = "${signature(app)}|$variant"
+        synchronized(diveLayers) { diveLayers[cacheKey] }?.let { onReady(it); return }
+        val accent = accent(context)
+        val size = displaySize(app)
+        val key = NovaTextureCache.keyFor(texture, size[0] / 2, size[1] / 2, variant)
+        val main = android.os.Handler(android.os.Looper.getMainLooper())
+        fun deliver(mask: Bitmap?) {
+            if (mask == null) return
+            val composed = compose(mask, accent)
+            synchronized(diveLayers) {
+                // Слои прошлого оформления больше не нужны: держим только свои.
+                diveLayers.keys.retainAll { it.startsWith(signature(app) + "|") }
+                diveLayers[cacheKey] = composed
+            }
+            main.post { onReady(composed) }
+        }
+        NovaTextureCache.request(key) { mask -> deliver(mask) }?.let { deliver(it) }
+    }
+
     fun signature(context: Context): String =
         "${NovaAppearance.texture(context).key}|${NovaAppearance.variant(context)}|" +
             "${NovaTheme.current(context)}|${NovaAppearance.temperature(context)}"

@@ -13,6 +13,20 @@
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
+        Фокус пульта (приставки, телевизоры): первым, чтобы перекрывать «выбрано».
+        Толстая светлая рамка и подсветка тела — выбор должен читаться с дивана.
+    -->
+    <item android:state_focused="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/tv_focus_fill" />
+            <stroke
+                android:width="3dp"
+                android:color="#FFFFFFFF" />
+            <corners android:radius="18dp" />
+        </shape>
+    </item>
+
+    <!--
         Обводку выбранной кнопки рисует `FlowRadioGroup` цветом акцента текущей
         темы (`novaAccent`) вместе с ореолом: тем десять, и прибитый здесь
         зелёный был бы верен ровно для одной. Здесь остаётся только тело кнопки,

@@ -11,7 +11,14 @@ object CountryDisplayOrder {
 
     enum class CountryRegion { EUROPE, AMERICA, ASIA, OTHER }
 
-    val PREFERRED: List<String> = listOf("NL", "NO", "PL", "RO", "CH", "US", "CA", "MX", "JP", "SG")
+    /**
+     * Порядок по умолчанию — по задержке из России, ближние первыми.
+     *
+     * Замер 2026-10-12, TCP-443, медиана по живому списку узлов Proton: NL 92, NO 112,
+     * PL 137, RO 148, CA 162, MX 187, US 189, SG 224, JP 316 мс; CH не ответил.
+     * Тот же список стоит в Nova PC (`resources/nova_vpn_slots.py`), меняются вместе.
+     */
+    val PREFERRED: List<String> = listOf("NL", "NO", "PL", "RO", "CA", "MX", "US", "SG", "JP", "CH")
 
     private val EUROPE_CODES: Set<String> = setOf(
         "AL", "AD", "AT", "BA", "BE", "BG", "BY", "CH", "CY", "CZ",
@@ -67,5 +74,21 @@ object CountryDisplayOrder {
         val other = remaining.filter { regionOf(it) == CountryRegion.OTHER }.sorted()
 
         return preferredPresent + europe + america + asia + other
+    }
+    /**
+     * Порядок по замерам этого устройства: страны с измеренной задержкой — по ней,
+     * от ближней; остальные — за ними в порядке [order].
+     *
+     * Своя сеть важнее общего замера: задержка из Владивостока и из Калининграда
+     * ставит страны по-разному, а умолчание снято из одной точки.
+     *
+     * @param pingByCountry медиана задержки по стране, мс; нет ключа или ≤ 0 — не мерено.
+     */
+    fun orderByPing(available: Collection<String>, pingByCountry: Map<String, Int>): List<String> {
+        val base = order(available)
+        val measured = base.filter { (pingByCountry[it] ?: 0) > 0 }
+        if (measured.size < 2) return base
+        val byPing = measured.sortedWith(compareBy({ pingByCountry.getValue(it) }, { base.indexOf(it) }))
+        return byPing + base.filterNot { it in measured }
     }
 }

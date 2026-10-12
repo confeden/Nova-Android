@@ -13,6 +13,11 @@
 # Почему это важно не только для F-Droid: без исходника любая правка в
 # opera-proxy была невозможна в принципе.
 #
+# С 1.32.8 исходник — живой форк `github.com/Alexey71/opera-proxy` (v1.30.0), тот
+# же, что у Nova PC (`bin/opera-proxy.windows-amd64.exe`): одна версия прокси на
+# обеих платформах, чтобы поведение Opera EU/US не расходилось. Все флаги и строки
+# журнала, которые разбирает `OperaProxyManager`, у него те же, что у v1.15.
+#
 # Внимание: файл называется `lib*.so`, но это **исполняемый файл**, а не
 # библиотека — Nova запускает его как процесс. Имя нужно, чтобы Android
 # распаковал его из APK и оставил исполняемым.
@@ -23,13 +28,13 @@
 #   ANDROID_NDK_HOME=~/Android/Sdk/ndk/27.2.12479018 tools/build_opera_proxy.sh
 set -euo pipefail
 
-REPO="${OPERA_PROXY_REPO:-https://github.com/snawoot-proxies-forks/opera-proxy}"
-# Тег закреплён: ровно та версия, что стояла в релизах Nova до перехода на
-# сборку из исходников.
-TAG="${OPERA_PROXY_TAG:-v1.15.0-fork}"
+REPO="${OPERA_PROXY_REPO:-https://github.com/Alexey71/opera-proxy}"
+# Тег закреплён и совпадает с версией Nova PC.
+TAG="${OPERA_PROXY_TAG:-v1.30.0}"
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-work_dir="${OPERA_PROXY_SRC:-$root_dir/build/deps/opera-proxy}"
+# Папка — под тег: старый клон с другим remote иначе молча собрал бы старую версию.
+work_dir="${OPERA_PROXY_SRC:-$root_dir/build/deps/opera-proxy-$TAG}"
 out_dir="$root_dir/app/src/main/jniLibs"
 
 if [ -z "${ANDROID_NDK_HOME:-}" ]; then

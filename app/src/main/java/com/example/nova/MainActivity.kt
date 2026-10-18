@@ -372,6 +372,22 @@ class MainActivity : AppCompatActivity() {
      * давно закончившегося прогона (его слушатель отдаёт сразу при подписке) не
      * показывается: только тот, который этот экран застал живым.
      */
+    /** Строка «Импортированные профили (N)» под регионом. Счёт читается в фоне, не на главном потоке. */
+    private fun refreshImportedProfilesField() {
+        val field = findViewById<TextView>(R.id.tv_imported_profiles) ?: return
+        showImportedBlock(clientData.isImportedConfigSourceActive())
+        if (!importedBlockShown) return
+        Thread {
+            val count = ImportedProfileCatalog.load(clientData).size
+            runOnUiThread {
+                if (!isFinishing) {
+                    field.text = NovaLanguage.tr(this, "Импортированные профили ({0})")
+                        .replace("{0}", count.toString()) + " ▾"
+                }
+            }
+        }.start()
+    }
+
     private fun renderMicroEvent() {
         val view = tvMicroEvent ?: return
         statusHandler.removeCallbacks(microEventTick)
@@ -563,6 +579,9 @@ class MainActivity : AppCompatActivity() {
                         clientData.getServiceState() == NovaVpnService.STATE_CONNECTING ||
                         isStartFlowActive
                     ) {
+                        1000L
+                    } else if (vpnState == NovaVpnService.STATE_CONNECTED) {
+                        // Шкала пинга идёт тактом в секунду: замер раз в секунду.
                         1000L
                     } else {
                         2000L
@@ -809,7 +828,11 @@ class MainActivity : AppCompatActivity() {
                 NovaVpnService.isPublishedTransport(activeTransport, NovaVpnService.TRANSPORT_MASQUE) ->
                     if (importedOnly) NovaVpnService.MANUAL_STEP_VLESS else NovaVpnService.MANUAL_STEP_OPERA_EU
                 NovaVpnService.isPublishedTransport(activeTransport, NovaVpnService.TRANSPORT_OPERA) ->
-                    if (activeBackend.endsWith("US")) null else NovaVpnService.MANUAL_STEP_OPERA_US
+                    when {
+                        activeBackend.endsWith("-AS") -> null
+                        activeBackend.endsWith("US") -> NovaVpnService.MANUAL_STEP_OPERA_AS
+                        else -> NovaVpnService.MANUAL_STEP_OPERA_US
+                    }
                 else -> null
             }
             if (nextChainStep != null) {
@@ -1263,6 +1286,7 @@ class MainActivity : AppCompatActivity() {
     private var landscapeInsetLeft = 0
     private var landscapeInsetTop = 0
     private var landscapeInsetRight = 0
+    private var landscapeInsetBottom = 0
 
     private val isLandscapeLayout: Boolean
         get() = appliedLandscape == true
@@ -1289,7 +1313,8 @@ class MainActivity : AppCompatActivity() {
                 androidx.core.view.WindowInsetsCompat.Type.systemBars() or
                     androidx.core.view.WindowInsetsCompat.Type.displayCutout()
             )
-            if (bars.left != landscapeInsetLeft || bars.top != landscapeInsetTop || bars.right != landscapeInsetRight) {
+            if (bars.left != landscapeInsetLeft || bars.top != landscapeInsetTop || bars.right != landscapeInsetRight || bars.bottom != landscapeInsetBottom) {
+                landscapeInsetBottom = bars.bottom
                 landscapeInsetLeft = bars.left
                 landscapeInsetTop = bars.top
                 landscapeInsetRight = bars.right
@@ -1343,14 +1368,16 @@ class MainActivity : AppCompatActivity() {
             }
             set.constrainWidth(R.id.tvStatus, ConstraintSet.MATCH_CONSTRAINT)
             set.constrainWidth(R.id.tv_dns_mode_notice, ConstraintSet.MATCH_CONSTRAINT)
-            set.clear(R.id.tvStatus, bottom)
             set.connect(R.id.tvStatus, top, R.id.ll_micro_log, bottom, 0)
             set.setMargin(R.id.tv_dns_mode_notice, bottom, dp(8))
-            set.clear(R.id.btnConnect, top)
-            set.clear(R.id.btnConnect, bottom)
-            set.connect(R.id.btnConnect, top, R.id.tvStatus, bottom, 0)
+            // Кнопка стоит по вертикальному центру, статус прижат над ней, бейдж под
+            // ней: на широком экране колонка не жмётся к верху.
+            set.connect(R.id.btnConnect, top, parent, top, 0)
+            set.connect(R.id.btnConnect, bottom, parent, bottom, 0)
+            set.setVerticalBias(R.id.btnConnect, 0.42f)
+            set.connect(R.id.tvStatus, bottom, R.id.btnConnect, top, 0)
+            set.setVerticalBias(R.id.tvStatus, 1f)
             // 236 dp кнопки и 68 dp «след. профиля» в среднюю колонку не входят.
-            set.constrainWidth(R.id.btnConnect, dp(200))
             // Зазор до правой колонки: подпись «след. профиль» шире кнопки и без
             // него ложилась на чипы селектора.
             set.connect(R.id.btnNextProfile, end, split, start, dp(16))
@@ -1369,10 +1396,25 @@ class MainActivity : AppCompatActivity() {
             set.connect(R.id.sv_exit_region_main, end, parent, end, landscapeInsetRight + dp(12))
             set.connect(R.id.tv_exit_last, start, split, start, dp(8))
             set.connect(R.id.tv_exit_last, end, parent, end, landscapeInsetRight + dp(12))
-            set.clear(R.id.btn_settings, bottom)
+            // «Настройки» и язык прижаты к низу правой колонки; селектор растёт сверху
+            // и до них не доходит (их верх ограничивает низ `tv_exit_last`).
+            set.clear(R.id.btn_settings, top)
             set.clear(R.id.btn_settings, start)
-            set.connect(R.id.btn_settings, top, R.id.tv_exit_last, bottom, dp(10))
+            set.connect(R.id.btn_settings, bottom, parent, bottom, landscapeInsetBottom + dp(14))
             set.connect(R.id.btn_settings, start, split, start, dp(16))
+        }
+        // Размеры подгоняются под экран: на планшете кнопки и промежутки крупнее.
+        val scale = uiScale()
+        set.constrainWidth(R.id.btnConnect, dp(if (landscape) (200 * scale).toInt() else (236 * scale).toInt()))
+        set.constrainHeight(R.id.btnConnect, dp((68 * scale).toInt()))
+        set.constrainHeight(R.id.btn_settings, dp((38 * scale).toInt()))
+        set.constrainHeight(R.id.btn_language, dp((38 * scale).toInt()))
+        set.constrainMinWidth(R.id.btn_settings, dp((112 * scale).toInt()))
+        set.constrainMinWidth(R.id.btn_language, dp((64 * scale).toInt()))
+        set.setMargin(R.id.btn_language, start, dp((8 * scale).toInt()))
+        if (landscape) {
+            set.constrainHeight(R.id.graph_latency, dp((48 * scale).toInt()))
+            set.setMargin(R.id.tv_country_badge, top, dp((10 * scale).toInt()))
         }
         // `applyTo` переносит не только привязки, но и видимость, прозрачность и
         // сдвиги — из снимка, сделанного при создании экрана. Без этого поворот
@@ -1390,6 +1432,10 @@ class MainActivity : AppCompatActivity() {
             set.setRotation(child.id, child.rotation)
         }
         set.applyTo(mainRoot)
+        val textScale = uiScale()
+        findViewById<android.widget.TextView>(R.id.btnConnect).textSize = 18f * textScale
+        findViewById<android.widget.TextView>(R.id.btn_settings).textSize = 13f * textScale
+        findViewById<android.widget.TextView>(R.id.btn_language).textSize = 13f * textScale
         if (landscape) {
             // Портретный воздух под статусом держит расстояние до кнопки; в
             // горизонтали высоты на него нет. Снизу остаётся строка под пояснение
@@ -1434,6 +1480,13 @@ class MainActivity : AppCompatActivity() {
     private fun loadBackdropArtSafely() {
         val signature = NovaMainBackdrop.signature(this)
         appliedBackdropSignature = signature
+        // Живой дождь: тот же drawable, что на экранах настроек. Кадры заказывает
+        // сам drawable, а вид останавливает их при отсоединении (BackdropRevealImageView).
+        val live = NovaMainBackdrop.liveDrawable(this)
+        if (live != null) {
+            ivBackgroundArt.setImageDrawable(live)
+            return
+        }
         val ready = NovaMainBackdrop.request(this) { bitmap ->
             // Приходит из фонового потока: виды живут на главном.
             runOnUiThread {
@@ -1449,6 +1502,22 @@ class MainActivity : AppCompatActivity() {
 
     /** Выбор оформления, под который собран текущий фон. */
     private var appliedBackdropSignature: String? = null
+
+    /**
+     * Фон анимируется только пока главный экран на переднем плане: уход на настройки
+     * или в фон останавливает общие часы и кадры, возврат запускает их с того же места.
+     */
+    private fun pauseBackdropAnimation() {
+        NovaAnimationClock.suspend()
+        if (::ivBackgroundArt.isInitialized) ivBackgroundArt.pauseLiveAnimation()
+    }
+
+    private fun resumeBackdropAnimation() {
+        NovaAnimationClock.resume()
+        if (::ivBackgroundArt.isInitialized) ivBackgroundArt.resumeLiveAnimation()
+        if (::tronBackdrop.isInitialized) tronBackdrop.resumeAnimation()
+        if (::networkBackground.isInitialized) networkBackground.startAnimation()
+    }
 
     /**
      * Пересобирает фон, если в настройках сменили фактуру или тему.
@@ -1529,6 +1598,8 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         isActivityResumed = true
+        resumeBackdropAnimation()
+        refreshImportedProfilesField()
         // Слушатель добавляется здесь, а не в onCreate: добавление сразу отдаёт
         // текущий шаг, и вернувшийся на экран пользователь видит происходящее, а не
         // ждёт следующего.
@@ -1585,6 +1656,7 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         isActivityResumed = false
+        pauseBackdropAnimation()
         ProtonProfileManager.removeListener(protonProgressListener)
         statusHandler.removeCallbacks(microEventTick)
         refreshKeepScreenAwake()
@@ -1957,7 +2029,7 @@ class MainActivity : AppCompatActivity() {
                 .orEmpty()
                 .trim()
                 .lowercase()
-                .let { if (it == "us") "us" else "eu" }
+                .let { if (it == "us" || it == "as") it else "eu" }
             val backend = "${NovaVpnService.BACKEND_OPERA}-${region.uppercase()}"
             pendingStatusText = "ПОДКЛЮЧЕНИЕ... ${region.uppercase()}"
             markServiceConnectingLocally(backend)
@@ -2000,6 +2072,80 @@ class MainActivity : AppCompatActivity() {
     private var mainRegionGroup: RadioGroup? = null
     private var mainRegionButtons: List<RadioButton> = emptyList()
     private var mainRegionNotice: TextView? = null
+    /** Контейнер кнопок регионов (HorizontalScrollView): в режиме импорта прячется, сама колонка остаётся. */
+    private var mainRegionChips: View? = null
+    private var mainImportedProtocolGroup: FlowRadioGroup? = null
+    private var mainImportedProfilesRow: View? = null
+    private var importedBlockShown = false
+    private var importedProtocolOptions: List<String> = emptyList()
+    private var suppressImportedProtocolCallback = false
+
+    /**
+     * Блок импортированных конфигураций под селектором: выбор протокола и строка
+     * «Импортированные профили». Виден ровно тогда, когда активен источник импорта.
+     */
+    private fun showImportedBlock(active: Boolean) {
+        importedBlockShown = active
+        val visibility = if (active) View.VISIBLE else View.GONE
+        mainImportedProfilesRow?.visibility = visibility
+        mainImportedProtocolGroup?.visibility = visibility
+    }
+
+    /**
+     * Кнопки протокола строятся по доступным семьям и отмечают ту же настройку, что
+     * и «Настройки» → «Конфигурации». Пересобираются только при смене набора семей.
+     */
+    private fun refreshImportedProtocolGroup() {
+        val group = mainImportedProtocolGroup ?: return
+        val options = buildList {
+            add(ImportedSourcePolicy.AUTO)
+            addAll(clientData.getAvailableImportedProtocolFamilies())
+        }.distinct()
+        if (options != importedProtocolOptions) {
+            importedProtocolOptions = options
+            suppressImportedProtocolCallback = true
+            group.removeAllViews()
+            options.forEach { value ->
+                val chip = layoutInflater.inflate(R.layout.item_imported_protocol_chip, group, false) as RadioButton
+                chip.id = View.generateViewId()
+                chip.tag = value
+                chip.text = clientData.formatImportedProtocolDisplay(value)
+                group.addView(chip)
+            }
+            suppressImportedProtocolCallback = false
+        }
+        val preference = clientData.getImportedProtocolPreference().takeIf { it in options } ?: ImportedSourcePolicy.AUTO
+        val wanted = (0 until group.childCount).map { group.getChildAt(it) }
+            .firstOrNull { it.tag == preference }?.id ?: View.NO_ID
+        if (wanted != View.NO_ID && group.checkedRadioButtonId != wanted) {
+            suppressImportedProtocolCallback = true
+            group.check(wanted)
+            suppressImportedProtocolCallback = false
+        }
+    }
+
+    /** Выбор протокола на главном экране: та же настройка и тот же реаплай, что в «Настройках». */
+    private fun onImportedProtocolPicked(value: String) {
+        if (value == clientData.getImportedProtocolPreference()) return
+        clientData.setImportedProtocolPreference(value)
+        LogManager.log("Главный экран: протокол импортированных профилей изменён на $value.")
+        val label = clientData.formatImportedProtocolDisplay(value)
+        if (!hasLiveSessionToReapply()) {
+            Toast.makeText(this, NovaLanguage.tr(this, "Выбрано: $label"), Toast.LENGTH_SHORT).show()
+            return
+        }
+        val started = SessionReapply.applyToLiveSession(this, clientData)
+        if (started) {
+            Toast.makeText(this, NovaLanguage.tr(this, "Переключаем VPN на $label..."), Toast.LENGTH_SHORT).show()
+            updateUiByState(NovaVpnService.STATE_CONNECTING)
+        } else {
+            Toast.makeText(
+                this,
+                "Не удалось переключить на $label — выбор сохранён, примените переподключением.",
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
 
     // -- четвёртая строка: подрегион выбранного транспорта --------------------
 
@@ -2069,7 +2215,12 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 profileIssueReadInFlight.set(false)
                 if (isFinishing || isDestroyed) return@runOnUiThread
-                val running = progress?.state == WarpProfileGenerator.STATE_RUNNING
+                // Состояние «идёт» без свежей отметки времени — след оборванного прогона
+                // (процесс `:vpn` умер, не успев записать конец): строка висела вечно.
+                // Сканер теперь пишет раз в 0,7 с, так что две минуты — с запасом.
+                val running = progress?.state == WarpProfileGenerator.STATE_RUNNING &&
+                    progress.atMs > 0L &&
+                    System.currentTimeMillis() - progress.atMs < 120_000L
                 val terminalFresh = progress != null &&
                     progress.state != WarpProfileGenerator.STATE_IDLE &&
                     progress.atMs > 0L &&
@@ -2131,7 +2282,7 @@ class MainActivity : AppCompatActivity() {
         // В горизонтали «Настройки» стоят под селектором, а не ограничивают его
         // снизу: граница — низ экрана за вычетом их строки и строки пояснений.
         val settingsTop = if (isLandscapeLayout) {
-            mainRoot.height - (LANDSCAPE_SELECTOR_FOOTER_DP * resources.displayMetrics.density).toInt()
+            mainRoot.height - (LANDSCAPE_SELECTOR_FOOTER_DP * uiScale() * resources.displayMetrics.density).toInt()
         } else {
             findViewById<View>(R.id.btn_settings)?.top ?: 0
         }
@@ -2168,7 +2319,7 @@ class MainActivity : AppCompatActivity() {
         )
         val height = (pitch - gap).coerceIn(
             (MIN_CHIP_HEIGHT_DP * density).toInt(),
-            (MAX_CHIP_HEIGHT_DP * density).toInt(),
+            (MAX_CHIP_HEIGHT_DP * uiScale() * density).toInt(),
         )
         if (height == regionChipHeightPx && gap == regionChipGapPx) return
         regionChipHeightPx = height
@@ -2179,7 +2330,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Во сколько раз крупнее телефона рисуем кнопки и промежутки: 1 на телефоне, до 1,3 на планшете. */
+    private fun uiScale(): Float = (1f + (resources.configuration.smallestScreenWidthDp - 400) * 0.00075f).coerceIn(1f, 1.3f)
+
+    private var chipBaseTextPx = 0f
+
     private fun applyChipMetrics(view: View?, height: Int, gap: Int) {
+        if (view is TextView) {
+            if (chipBaseTextPx <= 0f) chipBaseTextPx = view.textSize
+            val target = chipBaseTextPx * uiScale()
+            if (view.textSize != target) view.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, target)
+        }
         val params = view?.layoutParams ?: return
         val margins = params as? ViewGroup.MarginLayoutParams
         if (params.height == height && (margins == null || margins.bottomMargin == gap)) return
@@ -2190,7 +2351,28 @@ class MainActivity : AppCompatActivity() {
 
     private fun bindMainRegionSelector() {
         mainRegionScroll = findViewById(R.id.sv_exit_region_main)
+        mainRegionChips = findViewById(R.id.hsv_exit_region)
         mainRegionGroup = findViewById(R.id.rg_exit_region)
+        mainImportedProfilesRow = findViewById<TextView>(R.id.tv_imported_profiles)?.also { row ->
+            row.setOnClickListener {
+                ImportedProfilesSheet(
+                    activity = this,
+                    clientData = clientData,
+                    activeIdProvider = { currentActiveImportedProfileId() },
+                    onSelect = { picked -> connectImportedProfile(picked) },
+                    onClosed = { refreshImportedProfilesField() },
+                ).show()
+            }
+        }
+        mainImportedProtocolGroup = findViewById<FlowRadioGroup>(R.id.rg_imported_protocol)?.also { group ->
+            group.alignRowsToStart = true
+            group.uniformItemWidth = true
+            group.setOnCheckedChangeListener { _, checkedId ->
+                if (suppressImportedProtocolCallback) return@setOnCheckedChangeListener
+                val value = group.findViewById<View>(checkedId)?.tag as? String ?: return@setOnCheckedChangeListener
+                onImportedProtocolPicked(value)
+            }
+        }
         frostOverlay = findViewById(R.id.frost_overlay)
         if (::btnConnect.isInitialized) {
             btnConnect.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> refreshFrostClearZones() }
@@ -2575,10 +2757,17 @@ class MainActivity : AppCompatActivity() {
         if (frostShownForDns) return
         frostShownForDns = true
         val origin = dnsChipCenterIn(overlay)
+        // Без анимации — возврат на экран или пересоздание вида: лёд тот же, что и был.
         if (animate) {
-            overlay.freezeFrom(origin[0], origin[1])
+            overlay.freezeFrom(origin[0], origin[1], seedKey = FrostOverlayView.SEED_MAIN_DNS)
         } else {
-            overlay.freezeFrom(origin[0], origin[1], durationMs = 1L)
+            overlay.freezeFrom(
+                origin[0],
+                origin[1],
+                durationMs = 1L,
+                seedKey = FrostOverlayView.SEED_MAIN_DNS,
+                reuseSeed = true,
+            )
         }
     }
 
@@ -2720,17 +2909,22 @@ class MainActivity : AppCompatActivity() {
         val notice = mainRegionNotice
 
         // В режиме импортированных профилей выбор делают не регионы, а семейства
-        // протоколов, и те же шесть кнопок в настройках перекрашиваются и
-        // переименовываются под них. Показать здесь подписи регионов над
-        // импортированной семантикой значило бы соврать, поэтому селектор
-        // прячется, а вход в «Конфигурации» остаётся — там выбор и живёт.
-        if (clientData.isImportedConfigSourceActive()) {
-            mainRegionScroll?.visibility = View.GONE
-            notice?.visibility = View.VISIBLE
-            notice?.text =
-                "Активны импортированные конфигурации — протокол выбирается в «Настройках» → «Конфигурации»"
+        // протоколов. Регионы прячутся, а под селектором появляется выбор протокола
+        // и строка импортированных профилей (та же настройка, что в «Настройках»).
+        // Колонка `mainRegionScroll` остаётся видимой: в ней живёт этот блок.
+        val importedActive = clientData.isImportedConfigSourceActive()
+        if (importedActive) {
+            val wasShown = importedBlockShown
+            mainRegionChips?.visibility = View.GONE
+            mainSubRegionRow?.visibility = View.GONE
+            notice?.visibility = View.GONE
+            showImportedBlock(true)
+            if (!wasShown) refreshImportedProfilesField()
+            refreshImportedProtocolGroup()
             return
         }
+        showImportedBlock(false)
+        mainRegionChips?.visibility = View.VISIBLE
         mainRegionScroll?.visibility = View.VISIBLE
 
         // Предпочтение читается **один раз** за проход: это чтение `AtomicFile`, а
@@ -3134,7 +3328,7 @@ class MainActivity : AppCompatActivity() {
         val shouldPreferPersisted = isTunnelConnected() ||
             persistedState == NovaVpnService.STATE_CONNECTED ||
             persistedState == NovaVpnService.STATE_CONNECTING
-        if (activeVpn != null && selectedRegion in setOf("eu", "us")) {
+        if (activeVpn != null && selectedRegion in setOf("eu", "us", "as")) {
             return listOf(
                 restartSessionBackend.takeIf(::isOperaBackend).orEmpty(),
                 preferredOperaBackend,
@@ -3440,7 +3634,7 @@ class MainActivity : AppCompatActivity() {
             val restartRegion = restartSession.region.trim().uppercase().ifBlank { clientData.getPreferredOperaLabel() }
             return "${NovaVpnService.BACKEND_OPERA}-$restartRegion"
         }
-        if (selectedRegion in setOf("eu", "us")) {
+        if (selectedRegion in setOf("eu", "us", "as")) {
             return "${NovaVpnService.BACKEND_OPERA}-${selectedRegion.uppercase()}"
         }
         if (tunnelNetwork != null && isOperaProxyLoopbackAlive()) {
@@ -4025,6 +4219,7 @@ class MainActivity : AppCompatActivity() {
             NovaVpnService.MANUAL_STEP_MASQUE -> "MASQUE"
             NovaVpnService.MANUAL_STEP_OPERA_EU -> "Opera EU"
             NovaVpnService.MANUAL_STEP_OPERA_US -> "Opera US"
+            NovaVpnService.MANUAL_STEP_OPERA_AS -> "Opera AS"
             NovaVpnService.MANUAL_STEP_VLESS -> "VLESS"
             else -> step
         }
@@ -4044,6 +4239,77 @@ class MainActivity : AppCompatActivity() {
                 putExtra(NovaVpnService.EXTRA_MANUAL_TRANSPORT_STEP, step)
             }
         )
+    }
+
+    /**
+     * Профиль, на котором держится туннель, — для подсветки в списке импортированных.
+     * Без живого туннеля подсветки нет. VLESS: активная ссылка. WARP/AWG: импортированная
+     * запись с самым свежим `promotedAt` — её ставит и выбор пользователя, и перебор.
+     */
+    private fun currentActiveImportedProfileId(): String? {
+        val state = clientData.getServiceState()
+        if (state != NovaVpnService.STATE_CONNECTED && state != NovaVpnService.STATE_CONNECTING) return null
+        if (clientData.shouldUseVlessTransport()) {
+            return VlessConfig.parse(clientData.getVlessConfigLink())
+                ?.let { ClientData.VLESS_CONFIG_ID_PREFIX + it.identity }
+        }
+        return clientData.getWarpVerifiedConfigs()
+            .filter { it.userImported && it.promotedAt > 0L }
+            .maxByOrNull { it.promotedAt }
+            ?.id
+    }
+
+    /**
+     * Подключение к профилю, выбранному в списке. Тот же выбор, что у «следующего»
+     * профиля: VLESS — активная ссылка и первое место в порядке перебора, WARP/AWG —
+     * `promotedAt`. Живой туннель перезапускается тем же путём, что и кнопка
+     * подключения: отключение, дождаться остановки, подключение. Переключение на месте
+     * («следующий» по ротации службы) выбрало бы не тот узел.
+     */
+    private fun connectImportedProfile(row: ImportedProfileRow) {
+        if (row.id.startsWith(ClientData.VLESS_CONFIG_ID_PREFIX)) {
+            val link = clientData.getVlessProfilesAsConfigs().firstOrNull { it.id == row.id }?.rawConfig
+            if (link.isNullOrBlank()) {
+                Toast.makeText(this, NovaLanguage.tr(this, "Профиль не найден"), Toast.LENGTH_SHORT).show()
+                return
+            }
+            clientData.setVlessConfigLink(link)
+            clientData.promoteVlessProfileLink(link)
+        } else {
+            clientData.promoteWarpVerifiedConfig(row.id)
+        }
+        val state = clientData.getServiceState()
+        if (row.id.startsWith(ClientData.VLESS_CONFIG_ID_PREFIX) && clientData.shouldUseVlessTransport() &&
+            (state == NovaVpnService.STATE_CONNECTED || state == NovaVpnService.STATE_CONNECTING)
+        ) {
+            // Смена узла на ходу: полный stop/start убивает процесс :vpn (tun2proxy_stop).
+            updateUiByState(NovaVpnService.STATE_CONNECTING)
+            ContextCompat.startForegroundService(
+                this,
+                Intent(this, NovaVpnService::class.java).apply {
+                    action = NovaVpnService.ACTION_SWITCH_VLESS_PROFILE
+                    putExtra(NovaVpnService.EXTRA_VLESS_TARGET_LINK, clientData.getVlessConfigLink())
+                    applyCurrentPreferenceExtras(this)
+                }
+            )
+        } else if (state == NovaVpnService.STATE_CONNECTED || state == NovaVpnService.STATE_CONNECTING) {
+            stopVpn()
+            connectWhenStopped(attemptsLeft = 40)
+        } else {
+            startConnectFromPrimaryAction()
+        }
+    }
+
+    private fun connectWhenStopped(attemptsLeft: Int) {
+        if (clientData.getServiceState() == NovaVpnService.STATE_STOPPED) {
+            startConnectFromPrimaryAction()
+            return
+        }
+        if (attemptsLeft <= 0) {
+            Toast.makeText(this, NovaLanguage.tr(this, "Не удалось переключить профиль"), Toast.LENGTH_SHORT).show()
+            return
+        }
+        window.decorView.postDelayed({ connectWhenStopped(attemptsLeft - 1) }, 250L)
     }
 
     private fun switchToNextVlessProfile() {
@@ -4472,7 +4738,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun measureLatency(minIntervalMs: Long = 2_000L) {
+    private fun measureLatency(minIntervalMs: Long = 1_000L) {
         if (isDnsSessionActive()) {
             // Пинг в режиме DNS выключен насовсем, а не отложен.
             //
@@ -4511,7 +4777,7 @@ class MainActivity : AppCompatActivity() {
         val refreshGeneration = latencyRefreshGeneration.incrementAndGet()
         latencyExecutor.execute {
             try {
-                val timeout = 3000
+                val timeout = 1000
                 var latency = -1
 
                 val tunnelNetwork = if (isTunnelConnected()) {
@@ -4922,7 +5188,7 @@ class MainActivity : AppCompatActivity() {
         return when {
             !clientData.shouldUseWarpTransport() && clientData.shouldAllowOperaTransport() ->
                 "${NovaVpnService.BACKEND_OPERA}-${clientData.getPreferredOperaLabel()}"
-            preference == "eu" || preference == "us" ->
+            preference == "eu" || preference == "us" || preference == "as" ->
                 "${NovaVpnService.BACKEND_OPERA}-${preference.uppercase()}"
             preference == "vless" -> NovaVpnService.BACKEND_VLESS
             // Остаточный бэкенд прошлой сессии годится только там, где выбор не назван
@@ -5374,6 +5640,7 @@ class MainActivity : AppCompatActivity() {
             preference == "ru" -> "ПОДКЛЮЧЕНИЕ... WARP"
             preference == "eu" -> "ПОДКЛЮЧЕНИЕ... EU"
             preference == "us" -> "ПОДКЛЮЧЕНИЕ... US"
+            preference == "as" -> "ПОДКЛЮЧЕНИЕ... AS"
             preference == "masque" -> "ПОДКЛЮЧЕНИЕ... MASQUE"
             preference == "tor" -> "ПОДКЛЮЧЕНИЕ... TOR"
             preference == "vless" -> "ПОДКЛЮЧЕНИЕ... VLESS"
@@ -6113,7 +6380,7 @@ class MainActivity : AppCompatActivity() {
      * ([applyNextProfileButtonVisibility]), потому что «профиль» у Tor ничего не
      * значит.
      */
-    private val NEXT_PROFILE_HIDDEN_REGIONS = setOf("eu", "us", "masque")
+    private val NEXT_PROFILE_HIDDEN_REGIONS = setOf("eu", "us", "as", "masque")
 
     /**
      * Подпись «след. профиль» над кнопкой «&gt;».

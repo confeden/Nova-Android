@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.View
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -33,13 +34,14 @@ class LocalProxyActivity : AppCompatActivity() {
     private lateinit var attemptsContainer: LinearLayout
     private lateinit var endpointsContainer: LinearLayout
     private lateinit var tvGatewayEmpty: TextView
-    private lateinit var tvPortalUrl: TextView
-    private lateinit var tvPacUrl: TextView
     private lateinit var btnToggleOpenTethered: TextView
     private lateinit var tvOpenTetheredHint: TextView
     private lateinit var btnToggleAllowDirect: TextView
     private lateinit var tvAllowDirectHint: TextView
     private lateinit var tvGatewayLead: TextView
+    private lateinit var wgDevicesContainer: LinearLayout
+    private lateinit var btnWgAddDevice: TextView
+    private var wgDevicesSignature = ""
 
     private var cachedEndpoints: List<GatewayEndpoint> = emptyList()
     private var cachedEndpointsAt = 0L
@@ -75,25 +77,34 @@ class LocalProxyActivity : AppCompatActivity() {
         attemptsContainer = findViewById(R.id.container_unauthorized_attempts)
         endpointsContainer = findViewById(R.id.container_gateway_endpoints)
         tvGatewayEmpty = findViewById(R.id.tv_gateway_empty)
-        tvPortalUrl = findViewById(R.id.tv_portal_url)
-        tvPacUrl = findViewById(R.id.tv_pac_url)
         btnToggleOpenTethered = findViewById(R.id.btn_toggle_open_tethered)
         tvOpenTetheredHint = findViewById(R.id.tv_open_tethered_hint)
         btnToggleAllowDirect = findViewById(R.id.btn_toggle_allow_direct)
         tvAllowDirectHint = findViewById(R.id.tv_allow_direct_hint)
         tvGatewayLead = findViewById(R.id.tv_gateway_lead)
+        wgDevicesContainer = findViewById(R.id.container_wg_devices)
+        btnWgAddDevice = findViewById(R.id.btn_wg_add_device)
         TvFocusHelper.install(
             this,
             btnToggle,
-            tvPortalUrl,
-            tvPacUrl,
             tvHostPort,
             tvUsername,
             tvPassword,
             btnRegenerate,
             btnToggleOpenTethered,
             btnToggleAllowDirect,
+            btnWgAddDevice,
         )
+        btnWgAddDevice.setOnClickListener {
+            val device = GatewayWireGuard.addDevice(this, "")
+            if (device == null) {
+                Toast.makeText(this, "Достигнут предел устройств", Toast.LENGTH_SHORT).show()
+            } else {
+                requestProxySyncIfNeeded()
+                renderWgDevices()
+                showWgDeviceDialog(device)
+            }
+        }
 
         btnToggleAllowDirect.setOnClickListener {
             val enabled = !clientData.isGatewayAllowDirectWithoutVpn()
@@ -111,14 +122,6 @@ class LocalProxyActivity : AppCompatActivity() {
             ).show()
         }
 
-        tvPortalUrl.setOnClickListener {
-            val url = portalUrl()
-            if (url.isNotBlank()) copyToClipboard("Адрес страницы настройки", url)
-        }
-        tvPacUrl.setOnClickListener {
-            val url = pacUrl()
-            if (url.isNotBlank()) copyToClipboard("PAC", url)
-        }
         btnToggleOpenTethered.setOnClickListener {
             val enabled = !clientData.isGatewayOpenForTethered()
             clientData.setGatewayOpenForTethered(enabled)
@@ -266,8 +269,7 @@ class LocalProxyActivity : AppCompatActivity() {
                 val opening = if (enabled) "На" else "Нажмите «Включить», а затем на"
                 "$opening другом устройстве укажите в настройках прокси адрес " +
                     "${primary.host} и порт $port — и его трафик пойдёт через VPN этого телефона. " +
-                    "Подробная инструкция для Windows, macOS, iOS, Android и телевизоров " +
-                    "откроется по ссылке ниже."
+                    "Логин и пароль покажет и адрес http://${primary.host}:$port/ в браузере."
             }
         }
         renderEndpoints(endpoints)
@@ -299,6 +301,111 @@ class LocalProxyActivity : AppCompatActivity() {
             else android.graphics.Color.parseColor("#50C878")
         )
         renderUnauthorizedAttempts(attempts)
+        renderWgDevices()
+    }
+
+    private fun renderWgDevices() {
+        val devices = GatewayWireGuard.devices(this)
+        val host = primaryEndpoint()?.host.orEmpty()
+        val signature = devices.joinToString("|") { "${it.id}:${it.name}" } + "@" + host
+        if (signature == wgDevicesSignature) return
+        wgDevicesSignature = signature
+        wgDevicesContainer.removeAllViews()
+        devices.forEach { device ->
+            val row = TextView(this).apply {
+                text = "${device.name} · ${device.address4}"
+                textSize = 14f
+                setTextColor(android.graphics.Color.parseColor("#DDDDDD"))
+                setPadding(0, 6, 0, 14)
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { showWgDeviceDialog(device) }
+            }
+            wgDevicesContainer.addView(row)
+        }
+    }
+
+    private fun showWgDeviceDialog(device: GatewayWireGuard.Device) {
+        val host = primaryEndpoint()?.host
+        if (host == null) {
+            Toast.makeText(
+                this,
+                "Нет адреса раздачи: включите точку доступа или подключитесь к Wi-Fi",
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
+        val config = GatewayWireGuard.clientConfig(GatewayWireGuard.ensure(this), device, host)
+        val density = resources.displayMetrics.density
+        val pad = (16 * density).toInt()
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad, pad, 0)
+        }
+        content.addView(
+            ImageView(this).apply {
+                setImageBitmap(qrBitmap(config))
+                adjustViewBounds = true
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            },
+            LinearLayout.LayoutParams((260 * density).toInt(), (260 * density).toInt()).apply {
+                gravity = android.view.Gravity.CENTER_HORIZONTAL
+            },
+        )
+        content.addView(
+            TextView(this).apply {
+                text = NovaLanguage.tr(this@LocalProxyActivity, "Адрес сервера $host, UDP ${GatewayWireGuard.PORT}. Если точка доступа сменит адрес, конфиг нужно показать снова.")
+                textSize = 12f
+                setPadding(0, pad / 2, 0, pad / 2)
+            },
+        )
+        content.addView(
+            TextView(this).apply {
+                text = config
+                textSize = 11f
+                typeface = NovaFontHelper.monospace(context)
+                tag = NovaFontHelper.KEEP_FACE_TAG
+                setTextIsSelectable(true)
+            },
+        )
+        val scroll = android.widget.ScrollView(this).apply { addView(content) }
+        android.app.AlertDialog.Builder(this)
+            .setTitle(device.name)
+            .setView(scroll)
+            .setPositiveButton("Копировать") { _, _ -> copyToClipboard("Конфиг WireGuard", config) }
+            .setNeutralButton("Поделиться") { _, _ ->
+                startActivity(
+                    Intent.createChooser(
+                        Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_TEXT, config)
+                        },
+                        device.name,
+                    ),
+                )
+            }
+            .setNegativeButton("Удалить") { _, _ ->
+                GatewayWireGuard.removeDevice(this, device.id)
+                requestProxySyncIfNeeded()
+                renderWgDevices()
+            }
+            .showNova()
+    }
+
+    private fun qrBitmap(text: String): android.graphics.Bitmap {
+        val modules = QrCode.encode(text)
+        val quiet = 4
+        val scale = 8
+        val side = (modules.size + quiet * 2) * scale
+        val pixels = IntArray(side * side) { android.graphics.Color.WHITE }
+        for (y in modules.indices) for (x in modules.indices) {
+            if (!modules[y][x]) continue
+            for (dy in 0 until scale) {
+                val row = ((y + quiet) * scale + dy) * side
+                for (dx in 0 until scale) pixels[row + (x + quiet) * scale + dx] = android.graphics.Color.BLACK
+            }
+        }
+        return android.graphics.Bitmap.createBitmap(pixels, side, side, android.graphics.Bitmap.Config.ARGB_8888)
     }
 
     /**
@@ -344,24 +451,10 @@ class LocalProxyActivity : AppCompatActivity() {
             }
             endpointsContainer.addView(row)
         }
-        val portal = portalUrl()
-        tvPortalUrl.text = if (portal.isBlank()) "Страница настройки: —" else "Страница настройки: $portal"
-        val pac = pacUrl()
-        tvPacUrl.text = if (pac.isBlank()) "PAC: —" else "PAC: $pac"
     }
 
     private fun primaryEndpoint(): GatewayEndpoint? {
         return cachedEndpoints.firstOrNull { it.downstream } ?: cachedEndpoints.firstOrNull()
-    }
-
-    private fun portalUrl(): String {
-        val endpoint = primaryEndpoint() ?: return ""
-        return "http://${endpoint.host}:${clientData.getGatewayPortalPort()}/"
-    }
-
-    private fun pacUrl(): String {
-        val endpoint = primaryEndpoint() ?: return ""
-        return "http://${endpoint.host}:${clientData.getGatewayPortalPort()}/nova.pac"
     }
 
     private fun renderUnauthorizedAttempts(attempts: List<LocalProxyUnauthorizedAttempt>) {

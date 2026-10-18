@@ -30,25 +30,51 @@ object ProtonNodeCatalog {
     const val ASSET_NAME = "proton_nodes.json"
 
     @Volatile
-    private var cached: List<ProtonApi.Server>? = null
+    private var cachedBundled: List<ProtonApi.Server>? = null
 
     /**
-     * @return узлы из прошивки; пустой список, если актива нет или он не разобрался.
-     * Пустой список — это не «узлов нет», а «встроенного списка нет», и звать эту
-     * функцию имеет смысл только там, где живой список уже не получен.
+     * @return узлы для пула: сначала свежая лента ([ProtonNodeFeed]), затем узлы из
+     * прошивки, чьих адресов в ленте нет. Пустой список — это не «узлов нет», а
+     * «ни ленты, ни встроенного списка», и звать эту функцию имеет смысл только там,
+     * где живой список уже не получен. Ленту читаем при каждом вызове (файл мал), а
+     * прошивочный список кэшируем: лента может обновиться посреди сеанса.
      */
     fun load(context: Context): List<ProtonApi.Server> {
-        cached?.let { return it }
-        val parsed = runCatching { parse(context) }.getOrElse { error ->
+        val bundled = loadBundled(context)
+        val feed = ProtonNodeFeed.loadCached(context)
+        return merge(feed, bundled)
+    }
+
+    private fun loadBundled(context: Context): List<ProtonApi.Server> {
+        cachedBundled?.let { return it }
+        val parsed = runCatching {
+            parseNodes(context.assets.open(ASSET_NAME).bufferedReader().use { it.readText() })
+        }.getOrElse { error ->
             LogManager.log("Proton: встроенный список узлов не прочитался — ${error.message}")
             emptyList()
         }
-        cached = parsed
+        cachedBundled = parsed
         return parsed
     }
 
-    private fun parse(context: Context): List<ProtonApi.Server> {
-        val raw = context.assets.open(ASSET_NAME).bufferedReader().use { it.readText() }
+    /**
+     * Лента первой, затем встроенные узлы, чей адрес в ленте не встречается.
+     *
+     * Внутри ленты свежее выше: узел, виденный генератором в последнем прогоне, стоит
+     * перед тем, что держится из прежних лент до двух недель. Сортировка устойчивая,
+     * поэтому раскладка по кругу стран, заданная генератором, у равных сохраняется.
+     */
+    internal fun merge(
+        feed: List<ProtonApi.Server>,
+        bundled: List<ProtonApi.Server>,
+    ): List<ProtonApi.Server> {
+        if (feed.isEmpty()) return bundled
+        val feedHosts = feed.map { it.entryIp.trim().lowercase() }.toSet()
+        return feed.sortedByDescending { it.lastSeen } + bundled.filter { it.entryIp.trim().lowercase() !in feedHosts }
+    }
+
+    /** Разбор того же JSON, что у актива и у ленты; чистая функция, без Context. */
+    internal fun parseNodes(raw: String): List<ProtonApi.Server> {
         val nodes = JSONObject(raw).optJSONArray("nodes") ?: return emptyList()
         val out = ArrayList<ProtonApi.Server>(nodes.length())
         for (index in 0 until nodes.length()) {
@@ -69,6 +95,7 @@ object ProtonNodeCatalog {
                     // Ставим середину, чтобы порядок задавал замер, а не выдумка.
                     load = 50,
                     score = 0.0,
+                    lastSeen = node.optLong("last_seen", 0L).coerceAtLeast(0L),
                 )
             )
         }

@@ -68,7 +68,7 @@
             android:fontFamily="sans-serif-medium"
             android:gravity="center"
             android:singleLine="true"
-            android:text="Адаптация к условиям сети"
+            android:text="Перепроверить профили"
             android:textColor="?attr/novaTextTitle" />
 
         <!--

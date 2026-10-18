@@ -288,9 +288,9 @@ object ConnectionSelectorPolicy {
      * Список зашит в трёх местах службы (`normalizeOperaCountry`,
      * `OperaEndpointFeed.KNOWN_REGIONS`, `normalizeOperaRegionCode`) и никогда не
      * приходит из ленты: лента публикует **адреса** по регионам, а не сами
-     * регионы. Здесь он ровно для подписи, значения те же `eu`/`us`.
+     * регионы. Здесь он ровно для подписи, значения те же `eu`/`us`/`as`.
      */
-    val OPERA_SUB_REGIONS: List<Pair<String, String>> = listOf("eu" to "EU", "us" to "US")
+    val OPERA_SUB_REGIONS: List<Pair<String, String>> = listOf("eu" to "EU", "us" to "US", "as" to "AS")
 
     /** Что подставить, если пользователь ещё не выбирал регион Opera. */
     const val DEFAULT_OPERA_SUB_REGION: String = "eu"
@@ -336,7 +336,7 @@ object ConnectionSelectorPolicy {
      */
     fun indexOf(region: String?): Int {
         val normalized = RegionTransportPolicy.normalizeKnown(region)
-        if (normalized == "eu" || normalized == "us") return ORDER.indexOf(CHIP_OPERA)
+        if (normalized == "eu" || normalized == "us" || normalized == "as") return ORDER.indexOf(CHIP_OPERA)
         val index = ORDER.indexOf(normalized)
         // `vless` знает `RegionTransportPolicy`, но кнопки у него нет: он
         // выбирается как семейство импортированных протоколов, а не как регион.
@@ -466,7 +466,7 @@ object ConnectionSelectorPolicy {
             enabled = ORDER.map { it != CHIP_OPERA },
             // Переписываем, только если пользователь стоял именно на недоступном:
             // иначе безобидный заход на экран менял бы чужой выбор (I1).
-            rewriteStoredTo = if (normalized == "eu" || normalized == "us") "auto" else null,
+            rewriteStoredTo = if (normalized == "eu" || normalized == "us" || normalized == "as") "auto" else null,
             lockReason = "",
         )
     }

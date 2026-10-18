@@ -44,12 +44,18 @@ object NovaTheme {
      * APK, а F-Droid пересобирает дерево побайтово (I15). Берутся ближайшие
      * встроенные семейства Android, они есть на любом устройстве и не весят ничего.
      *
-     * `DEFAULT` — штатный Roboto. `MONOSPACE` — терминал. `SERIF` — с засечками,
-     * ближайшее к Exocet и Fontin. `CONDENSED` — узкий гротеск, ближайшее к
-     * интерфейсу Path of Exile 2. `HEAVY` — самое жирное, что есть в проекте
-     * (Roboto Black), под «надутые» надписи GTA.
+     * `DEFAULT` — штатный Roboto. `MONOSPACE` — терминал (PT Mono). `SERIF_SC` —
+     * антиквенные капители, похожие на Fontin (Path of Exile 1). `ROMAN` —
+     * надписная антиква Forum (Path of Exile 2). `OLD_STYLE` — старая книжная
+     * антиква Old Standard TT (Diablo II). `TECHNO` — гротеск Play (Cyber neon).
+     * `HEAVY` — самое жирное в проекте: Roboto Black и Rubik Mono One под
+     * «надутые» надписи GTA.
+     *
+     * Все файлы лежат в `res/font` под лицензией SIL OFL 1.1; перечень и
+     * источники — в `THIRD-PARTY.md`. У каждого семейства кириллица обязательна:
+     * интерфейс русскоязычный.
      */
-    enum class Face { DEFAULT, MONOSPACE, SERIF, CONDENSED, HEAVY }
+    enum class Face { DEFAULT, MONOSPACE, SERIF_SC, ROMAN, OLD_STYLE, TECHNO, HEAVY }
 
     /**
      * @param face начертание всего интерфейса. Это не цвет и поэтому не живёт в
@@ -95,16 +101,17 @@ object NovaTheme {
         Option(
             "neon", "Cyber neon", R.style.Theme_Nova_Settings_Cyberneon,
             "Матовая ночь, бирюза и маджента — свечение только у заголовков",
+            face = Face.TECHNO,
         ),
         Option(
             "poe1", "Path of Exile 1", R.style.Theme_Nova_Settings_PathofExile1,
             "Тёплый чёрный, золотая обводка, прямые углы",
-            face = Face.SERIF,
+            face = Face.SERIF_SC,
         ),
         Option(
             "poe2", "Path of Exile 2", R.style.Theme_Nova_Settings_PathofExile2,
             "Оружейная сталь и расплавленная медь, панель светлее сверху",
-            face = Face.CONDENSED,
+            face = Face.ROMAN,
         ),
         Option(
             "gta6sunset", "GTA VI Vice Sunset", R.style.Theme_Nova_Settings_GTAVIViceSunset,
@@ -123,8 +130,8 @@ object NovaTheme {
         ),
         Option(
             "diablo2", "Diablo II", R.style.Theme_Nova_Settings_DiabloII,
-            "Камень и золотая филигрань: кнопка — плита с самоцветами, шрифт с засечками",
-            face = Face.SERIF,
+            "Камень и золотая филигрань: кнопка — плита с самоцветами, книжная антиква",
+            face = Face.OLD_STYLE,
         ),
     )
 
@@ -152,7 +159,10 @@ object NovaTheme {
         val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val previous = prefs.getString(KEY, DEFAULT_KEY)
         prefs.edit().putString(KEY, chosen).apply()
-        if (previous != chosen) NovaNotificationPalette.onThemeStored(context, chosen)
+        if (previous != chosen) {
+            NovaNotificationPalette.onThemeStored(context, chosen)
+            runCatching { NovaWidgetProvider.refreshAll(context.applicationContext) }
+        }
     }
 
     /**

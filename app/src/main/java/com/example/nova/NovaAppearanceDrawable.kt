@@ -12,6 +12,7 @@ import android.graphics.PorterDuffColorFilter
 import android.graphics.Rect
 import android.graphics.Shader
 import android.graphics.drawable.Drawable
+import android.os.SystemClock
 import kotlin.math.abs
 
 /**
@@ -65,11 +66,27 @@ class NovaAppearanceDrawable(
     private val temperature: Int,
     private val accent: Int,
     private val variant: Int,
+    /** Залить чёрным под дождём: главный экран так и делал растром. */
+    private val blackBase: Boolean = false,
+    /** Прозрачность дождя; по умолчанию как у вуали на экранах настроек. */
+    private val rainAlpha: Int = TEXTURE_ALPHA,
+    /**
+     * Живой дождь: кадры заказывает сам drawable, время идёт по часам. Экраны
+     * настроек оставляют `false` и рисуют один кадр в зафиксированном времени: без
+     * заказов кадров и без CPU, пока экран открыт.
+     */
+    val animated: Boolean = false,
 ) : Drawable() {
+
+    private val blackPaint = Paint().apply { color = Color.BLACK }
 
     private val texturePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val washPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val rainPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private var washShader: Shader? = null
+
+    /** Следующий кадр живого дождя. */
+    private val frameTick = Runnable { invalidateSelf() }
 
     private var pattern: Bitmap? = null
 
@@ -103,6 +120,11 @@ class NovaAppearanceDrawable(
     override fun draw(canvas: Canvas) {
         val bounds = bounds
         if (bounds.isEmpty) return
+        if (texture == NovaAppearance.Texture.MATRIX) {
+            drawMatrixLayer(canvas, 1f, 0f, 0f, 255, frameTime())
+            requestNextRainFrame()
+            return
+        }
         // Границы могли приехать до первой отрисовки, а могли и нет: у окна
         // фон выставляют раньше, чем измеряют. Заказ здесь стоит одно сравнение
         // и снимает зависимость от порядка.
@@ -114,6 +136,15 @@ class NovaAppearanceDrawable(
             washPaint.shader = shader
             canvas.drawRect(bounds, washPaint)
         }
+    }
+
+    /**
+     * Останавливает заказ следующего кадра. Зовёт вид, когда его отсоединяют или
+     * прячут: без этого дождь продолжал бы заказывать кадры в пустоту. Возврат
+     * подхватывает то же место — время живёт в [NovaAnimationClock].
+     */
+    fun stopAnimation() {
+        unscheduleSelf(frameTick)
     }
 
     override fun setAlpha(alpha: Int) = Unit
@@ -132,8 +163,70 @@ class NovaAppearanceDrawable(
      * — это доли секунды, то есть десятки пропущенных кадров ровно в тот момент,
      * когда человек нажал на фактуру.
      */
+    /**
+     * Время кадра: живой дождь берёт его из часов, статичный — фиксированное.
+     * Статичный кадр часов не двигает: открыть настройки не сдвигает дождь на главном.
+     */
+    fun frameTime(): Double = if (animated) NovaAnimationClock.now() else NovaAnimationClock.peek()
+
+    /**
+     * Рисует весь слой «Matrix» (чёрная основа, дождь, температурная заливка) с
+     * масштабом и прозрачностью — тем же преобразованием, что погружение применяет
+     * к растровым слоям ([BackdropRevealImageView]). Кадры не заказывает: это делает
+     * [requestNextRainFrame] по желанию вызывающего.
+     *
+     * [pivotX]/[pivotY] — центр масштаба; [alpha] 0..255 — слой целиком, как
+     * `Paint.alpha` у растра, через offscreen-слой, а не по отдельным элементам.
+     */
+    fun drawMatrixLayer(
+        canvas: Canvas,
+        scale: Float,
+        pivotX: Float,
+        pivotY: Float,
+        alpha: Int,
+        time: Double,
+    ) {
+        val bounds = bounds
+        if (bounds.isEmpty || alpha <= 0 || texture != NovaAppearance.Texture.MATRIX) return
+        val checkpoint = canvas.save()
+        if (scale != 1f) canvas.scale(scale, scale, pivotX, pivotY)
+        // Слой без границ: масштабированное содержимое выходит за прямоугольник вида.
+        if (alpha < 255) canvas.saveLayerAlpha(null, alpha)
+        if (blackBase) canvas.drawRect(bounds, blackPaint)
+        drawRain(canvas, bounds, time)
+        washShader?.let { shader ->
+            washPaint.shader = shader
+            canvas.drawRect(bounds, washPaint)
+        }
+        canvas.restoreToCount(checkpoint)
+    }
+
+    /**
+     * Заказывает следующий кадр живого дождя. Без `animated` и на остановленных
+     * часах ничего не заказывает: пауза и статичные экраны не тратят CPU.
+     */
+    fun requestNextRainFrame() {
+        if (!animated || !NovaAnimationClock.isRunning()) return
+        unscheduleSelf(frameTick)
+        scheduleSelf(frameTick, SystemClock.uptimeMillis() + RAIN_FRAME_MS)
+    }
+
+    /**
+     * Живой дождь «Matrix»: кадр рисуется по времени, которое дал вызывающий. Сам
+     * заказ следующего кадра — в [requestNextRainFrame].
+     */
+    private fun drawRain(canvas: Canvas, bounds: Rect, time: Double) {
+        val rain = NovaMatrixRain.shared(bounds.width(), bounds.height(), variant)
+        rainPaint.color = accent
+        canvas.save()
+        canvas.translate(bounds.left.toFloat(), bounds.top.toFloat())
+        rain.draw(canvas, rainPaint, time, rainAlpha / 255f)
+        canvas.restore()
+    }
+
     private fun requestPattern(bounds: Rect) {
         if (texture == NovaAppearance.Texture.NONE) return
+        if (texture == NovaAppearance.Texture.MATRIX) return
         val width = bounds.width()
         val height = bounds.height()
         if (width <= 0 || height <= 0) return
@@ -188,6 +281,9 @@ class NovaAppearanceDrawable(
 
         private const val TEXTURE_ALPHA = 56
         private const val WASH_MAX_ALPHA = 36f
+
+        /** Около пятнадцати кадров в секунду: дождю не нужна плавность выше, а CPU нужен экономный. */
+        private const val RAIN_FRAME_MS = 66L
 
         private val WARM_TINT = Color.rgb(255, 168, 74)
         private val COLD_TINT = Color.rgb(96, 170, 255)

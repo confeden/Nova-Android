@@ -57,6 +57,10 @@ object AwgI1Adaptation {
         val profiles: List<Profile>,
         /** Имена в порядке предпочтения: сверху `white.sni`, дальше российский список. */
         val sniPool: List<String>,
+        /** Домены, подведшие на текущей сети ([NetworkI1Memory.demoted]); шаг их пропускает. */
+        val avoidSni: Set<String> = emptySet(),
+        /** Запомненный лучший домен текущей сети ([NetworkI1Memory.best]); шаг ставит его первым. */
+        val preferredSni: String? = null,
     )
 
     /** Что сделать на этом шаге. */
@@ -186,12 +190,24 @@ object AwgI1Adaptation {
      * Отрицательный счётчик тоже нормализуется — остаток от деления в Kotlin
      * сохраняет знак, и без этого выбор ушёл бы за границы списка.
      */
-    fun nextSniForProfile(pool: List<String>, adaptedSni: String, attempts: Int): String? {
+    fun nextSniForProfile(
+        pool: List<String>,
+        adaptedSni: String,
+        attempts: Int,
+        avoid: Set<String> = emptySet(),
+        preferred: String? = null,
+    ): String? {
         if (pool.isEmpty()) return null
+        // Запомненный для этой сети домен идёт раньше ротации по профилю — если он ещё
+        // не выдан профилю и не числится негодным на этой же сети.
+        preferred?.takeIf { it.isNotBlank() && it != adaptedSni && it !in avoid }?.let { return it }
         val start = ((attempts % pool.size) + pool.size) % pool.size
+        // Известно негодные на этой сети пропускаются. Если пропустить пришлось бы всё —
+        // лучше повторить негодное, чем остановить подбор насовсем: сеть могла измениться.
+        val skip = if (pool.all { it == adaptedSni || it in avoid }) emptySet() else avoid
         for (offset in pool.indices) {
             val candidate = pool[(start + offset) % pool.size]
-            if (candidate != adaptedSni) return candidate
+            if (candidate != adaptedSni && candidate !in skip) return candidate
         }
         // Весь список состоит из уже выданного имени — предлагать нечего.
         return null
@@ -246,7 +262,13 @@ object AwgI1Adaptation {
 
         // Имена идут сверху списка, но уже выданное этому профилю пропускается:
         // повторно подставить то же самое значит потратить шаг впустую.
-        val chosen = nextSniForProfile(pool, target.adaptedSni, target.attempts) ?: return null
+        val chosen = nextSniForProfile(
+            pool = pool,
+            adaptedSni = target.adaptedSni,
+            attempts = target.attempts,
+            avoid = inputs.avoidSni,
+            preferred = inputs.preferredSni,
+        ) ?: return null
         return Step(profileId = target.id, sni = chosen)
     }
 }

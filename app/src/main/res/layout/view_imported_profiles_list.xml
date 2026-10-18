@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Список импортированных профилей (ImportedProfilesSheet). Полоса прокрутки
+    постоянная (без затухания) и стоит справа от колонки задержки: режим
+    outsideInset отводит ей собственную полосу, а не накладывает на строки.
+    Цвет ползунка — акцент темы.
+-->
+<androidx.recyclerview.widget.RecyclerView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rv_imported_profiles"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:fadeScrollbars="false"
+    android:scrollbarStyle="outsideInset"
+    android:scrollbarSize="4dp"
+    android:scrollbarThumbVertical="@drawable/bg_imported_scroll_thumb"
+    android:scrollbars="vertical" />

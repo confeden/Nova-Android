@@ -3,13 +3,18 @@ package com.example.nova
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.Typeface
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.floor
 import kotlin.math.hypot
+import kotlin.math.ln
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -87,7 +92,6 @@ internal object NovaTexturePatterns {
             NovaAppearance.Texture.NONE -> Unit
             NovaAppearance.Texture.BASALT -> basalt(sheet)
             NovaAppearance.Texture.MARBLE -> marble(sheet)
-            NovaAppearance.Texture.MICA -> mica(sheet)
             NovaAppearance.Texture.WOOD -> wood(sheet)
             NovaAppearance.Texture.SAND -> sand(sheet)
             NovaAppearance.Texture.GRASS -> grass(sheet)
@@ -98,9 +102,10 @@ internal object NovaTexturePatterns {
             NovaAppearance.Texture.SLIME -> slime(sheet)
             NovaAppearance.Texture.SHARDS -> shards(sheet)
             NovaAppearance.Texture.SPLATTER -> splatter(sheet)
-            NovaAppearance.Texture.GLOW -> glow(sheet)
             NovaAppearance.Texture.LIGHTNING -> lightning(sheet)
             NovaAppearance.Texture.SNOW -> snow(sheet)
+            NovaAppearance.Texture.FRACTAL -> fractal(sheet)
+            NovaAppearance.Texture.MATRIX -> matrix(sheet)
         }
         return bitmap
     }
@@ -568,112 +573,90 @@ private fun marble(s: Sheet) {
 }
 
 /**
- * Слюда: смятый слоистый сланец, по которому рассыпаны блёстки.
+ * Дерево: продольный распил доски, а не мишень из колец.
  *
- * Прежний вариант набирал слюду россыпью нарисованных линз. На плитке 256 точек
- * это читалось, на целом экране — нет: линзы оказались мелким конфетти без
- * общего строя, и владелец назвал фактуру недостаточно красивой.
+ * Прежний вариант строил кольца вокруг близкой сердцевины и сыпал по ним клеточные
+ * поры, поэтому читался пузырчатым: круглые пятна пор и сучка на фоне дуг. У
+ * настоящей доски рисунок другой — длинные линии, текущие через весь лист, и
+ * держится он на четырёх вещах, все они здесь есть:
  *
- * Теперь фактура изображает то, чем слюда и является в природе: тонко
- * расслоенную породу. Слои — дробная часть поля, которое само согнуто двумя
- * суммами октав, поэтому пласт идёт складкой, а не по линейке; ламина —
- * подчёркнутая граница между слоями. Блёстки берутся клеточным полем: каждая
- * чешуйка получает собственную ориентацию из хеша своей ячейки, и к свету
- * повёрнута лишь часть из них — именно поэтому слюда искрится, а не светится
- * целиком.
- *
- * Поле сжато по горизонтали и растянуто по вертикали: пласт лежит.
- */
-private fun mica(s: Sheet) {
-    val seed = s.random.nextInt()
-    s.fill {
-        val cell = Cellular()
-        return@fill { u: Float, v: Float ->
-            val fold = fbm(u * 0.9f, v * 0.34f, 5, seed)
-            val fold2 = fbm(u * 2.1f + 3.1f, v * 0.7f + 7.7f, 4, seed + 13)
-            val layer = v * 9.5f + 2.6f * fold + 0.85f * fold2
-
-            val t = layer - floor(layer)
-            // Ламина: яркая узкая граница пласта плюс мягкое тело под ней.
-            val edge = smoothstep(0.88f, 1f, t) + smoothstep(0.12f, 0f, t)
-            val bed = 0.35f + 0.65f * smoothstep(0f, 0.6f, t)
-
-            val body = fbm01(u * 3.2f, v * 1.4f, 5, seed + 29)
-
-            // Чешуйки: сетка вытянута поперёк слоёв — слюда колется вдоль них.
-            cell.at(u * 26f, v * 17f, seed + 101)
-            val plate = smoothstep(0.36f, 0.04f, cell.f1)
-            val facing = cell.tone()
-            val glint = if (facing > 0.70f) plate * (facing - 0.70f) * 3.3f else 0f
-
-            0.035f + 0.13f * body * bed + 0.24f * edge * (0.35f + 0.65f * body) + 0.70f * glint
-        }
-    }
-}
-
-/**
- * Дерево: годовые кольца как линии уровня искривлённого радиального поля.
- *
- * Окружность рисунка не даёт. Древесиной кольцо делают три вещи сразу, и все три
- * здесь есть: искривление радиуса суммой октав на двух масштабах (кольцо гнётся
- * и целиком, и в мелочах), узкая поздняя древесина вместо синуса (граница
- * годового слоя — тонкая тёмная полоса, а не половина периода) и сучок — тот же
- * ствол в миниатюре, который расталкивает вокруг себя кольца.
- *
- * Сверх того две подробности, ради которых доска и выглядит доской: сердцевинные
- * лучи — тонкие штрихи поперёк колец — и сосуды, мелкие поры, которые у
- * кольцесосудистых пород сидят только в ранней древесине. Их отсутствие и делало
- * прежний вариант похожим на мишень.
+ * 1. **Сердцевина далеко за краем.** Кольца приходят на лист пологими дугами
+ *    («кафедральный» рисунок), а не замкнутыми кругами. Поле сплющено вдоль
+ *    волокна, поэтому дуги почти горизонтальны.
+ * 2. **Профиль годового слоя — пила.** Ранняя древесина плавно темнеет к поздней и
+ *    обрывается резкой границей; синус давал бы равномерную рябь. Ширина слоя
+ *    плывёт, потому что к фазе добавлена сумма октав.
+ * 3. **Волокна.** Тонкие нити вдоль доски: шум, растянутый по волокну в десятки раз.
+ *    Поры — не клетки, а короткие штрихи той же ориентации, и сидят они только в
+ *    ранней древесине.
+ * 4. **Сучки.** Вокруг сучка линии не рвутся, а обтекают его: координата поперёк
+ *    волокна растягивается вблизи сучка, а внутри него кольца идут уже вокруг
+ *    самого сучка, часто и вытянуто вдоль волокна.
  */
 private fun wood(s: Sheet) {
     val seed = s.random.nextInt()
-    // Сердцевина вынесена за край: доска пилена не через центр ствола.
-    val pithX = -0.35f - s.random.nextFloat() * 0.25f
-    val pithY = s.h * (0.35f + s.random.nextFloat() * 0.3f)
-    val knotX = s.w * (0.3f + s.random.nextFloat() * 0.45f)
-    val knotY = s.h * (0.2f + s.random.nextFloat() * 0.6f)
-    val knotR = 0.075f + s.random.nextFloat() * 0.035f
+    val random = s.random
+    val pithX = -1.8f - random.nextFloat() * 1.6f
+    val pithY = s.h * (0.15f + random.nextFloat() * 0.7f)
+    val tilt = (random.nextFloat() - 0.5f) * 0.3f
+    val knots = Array(2 + random.nextInt(2)) {
+        floatArrayOf(
+            s.w * (0.1f + random.nextFloat() * 0.8f),
+            s.h * (0.1f + random.nextFloat() * 0.8f),
+            0.022f + random.nextFloat() * 0.03f,
+        )
+    }
 
     s.fill {
-        val cell = Cellular()
         return@fill { u: Float, v: Float ->
-            val warp = 0.052f * fbm(u * 2.1f, v * 2.1f, 5, seed) +
-                0.016f * fbm(u * 7.3f, v * 7.3f, 4, seed + 31)
+            // Длинные волны всего полотна плюс мелкая рябь поперёк волокна.
+            val wave = 0.05f * fbm(u * 0.8f + 3f, v * 0.5f, 4, seed) +
+                0.012f * fbm(u * 2.4f, v * 9f, 3, seed + 31)
+            var vv = v + wave + tilt * u
 
-            // Кольца ствола: поле сплющено по x — доска пилена вдоль, и дуги
-            // приходят на неё пологими.
-            val dx = (u - pithX) * 0.42f
-            val dy = (v - pithY) * 1.25f
-            val core = hypot(dx, dy)
+            var knotMask = 0f
+            var knotPhase = 0f
+            var knotCore = 0f
+            for (k in knots) {
+                val kx = (u - k[0]) * 0.5f
+                val ky = vv - k[1]
+                val kr = hypot(kx, ky)
+                val reach = k[2] * 3.6f
+                // Линии обтекают сучок: поперечная координата растягивается.
+                if (kr < reach * 2f) {
+                    val q = 1f - kr / (reach * 2f)
+                    vv += ky * q * q * 0.9f
+                }
+                val m = 1f - smoothstep(k[2] * 0.8f, k[2] * 2.4f, kr)
+                if (m > knotMask) {
+                    knotMask = m
+                    knotPhase = kr * 46f + 1.3f * wave * 20f
+                }
+                val c = smoothstep(k[2] * 1.1f, k[2] * 0.35f, kr)
+                if (c > knotCore) knotCore = c
+            }
 
-            // Сучок и мягкая шапка его влияния.
-            val kx = u - knotX
-            val ky = (v - knotY) * 1.3f
-            val kr = hypot(kx, ky)
-            val mask = clamp01(1f - smoothstep(knotR * 0.9f, knotR * 3.4f, kr))
+            // Кольца ствола: поле сплющено вдоль волокна, сердцевина далеко.
+            val dx = (u - pithX) * 0.10f
+            val dy = vv - pithY
+            val trunk = hypot(dx, dy)
+            val mainPhase = trunk * 17f + 1.4f * fbm(u * 0.6f, vv * 0.9f, 3, seed + 7)
+            val phase = mainPhase + (knotPhase - mainPhase) * knotMask
 
-            // Рядом с сучком радиус искусственно больше: кольца обходят его, и
-            // это читается как «кафедральный» рисунок доски.
-            val trunkPhase = (core + warp + mask * 0.16f) * 12.5f
-            val knotPhase = (kr + warp * 0.4f) * 44f
-            val phase = trunkPhase + (knotPhase - trunkPhase) * mask
+            // Пила: плавный подъём к поздней древесине и резкий обрыв.
+            val t = phase - floor(phase)
+            val ring = t * t * t * (1f - smoothstep(0.94f, 1f, t))
+            val contrast = 0.55f + 0.45f * fbm01(u * 1.1f, vv * 0.7f, 2, seed + 13)
 
-            val ring = 0.5f + 0.5f * sin(TAU * phase)
-            val r2 = ring * ring
-            val late = r2 * r2 * r2                       // узкая поздняя древесина
-            val early = 1f - late
+            // Волокна: шум, вытянутый вдоль доски.
+            val streak = smoothstep(0.35f, 0.75f, fbm01(u * 2.3f, vv * 150f, 2, seed + 97))
 
-            // Сердцевинные лучи: штрихи вдоль радиуса, то есть поперёк колец.
-            val ang = atan2(dy, dx)
-            val rays = clamp01(fbm01(ang * 26f, core * 2.6f, 3, seed + 57) * 1.6f - 0.75f)
+            // Поры: короткие штрихи вдоль волокна, только в ранней древесине.
+            val porous = smoothstep(0.35f, 0.6f, fbm01(u * 1.5f, v * 1.5f, 2, seed + 41))
+            val dash = smoothstep(0.38f, 0.6f, perlin(u * 38f, vv * 210f, seed + 83)) * porous
 
-            // Сосуды ранней древесины.
-            cell.at(u * 46f, v * 21f, seed + 83)
-            val pore = smoothstep(0.26f, 0.06f, cell.f1) * (if (cell.tone() > 0.45f) 1f else 0f)
-
-            val fibre = fbm01(u * 9f, v * 44f, 3, seed + 97)
-            0.05f + 0.30f * late + 0.10f * early * fibre + 0.11f * rays * early +
-                0.16f * pore * early
+            0.05f + 0.27f * ring * contrast + 0.09f * streak * (0.45f + 0.55f * (1f - t)) +
+                0.13f * dash * (1f - t) + 0.20f * knotCore * (0.5f + 0.5f * ring)
         }
     }
 }
@@ -737,99 +720,271 @@ private fun sand(s: Sheet) {
 }
 
 /**
- * Трава: поле отдельных травинок.
+ * Луг: несколько сотен цельных растений вместо десятков тысяч травинок.
  *
- * Здесь стояла рекурсивная вайя папоротника. Фрактально — да, травой — нет:
- * владелец так и сказал, «должна быть именно как трава». У травы самоподобия в
- * форме листа нет вовсе, она берёт другим: травинка — простая дуга, а поле
- * набирается тем, что травинок много, они разной высоты и разного наклона, и
- * плотность их меняется пятнами.
+ * Прежняя трава клала на полотно десятки тысяч тонких травинок, и каждая шла
+ * отдельным контуром: дорого и читается как шум. Здесь растений немного, зато
+ * каждое крупное и узнаваемое:
  *
- * Поэтому травинка здесь — залитая фигура из двух дуг, сходящихся в остриё:
- * лист сужается к кончику и валится под собственным весом тем сильнее, чем он
- * длиннее. Ровная линия постоянной ширины читалась бы щёткой.
+ * - **куртинки** — пучки из четырёх-шести широких листьев, веером из одного основания;
+ * - **клевер** — три овальных листочка на черешке;
+ * - **папоротник** — стебель с парами перистых листочков;
+ * - **цветы** — ромашка (восемь лепестков и сердцевина), мак (четыре округлых
+ *   лепестка), лютик (пять мелких), василёк (шесть узких лепестков на тонкой ножке).
  *
- * Три яруса по высоте рисуются от дальнего к ближнему и разной яркостью — это
- * даёт глубину, без которой поле выглядит плоской штриховкой. Дальний ярус
- * гуще и тусклее, ближний реже и ярче, как и бывает на просвет.
- *
- * Плотность решает поле октав: где оно провисло — проплешина, где поднялось —
- * куртина. Порог «расти или нет» здесь допустим ровно потому, что травинок
- * тысяча: пустое место читается проплешиной, а не забытым куском экрана.
+ * Растения одного яруса сливаются в один [Path], поэтому кадр получает несколько
+ * вызовов `drawPath`, а не десятки тысяч. Ярусы различаются прозрачностью: дальние
+ * тусклее, ближние ярче. Фактура окрашивается акцентом темы, поэтому виды различаются
+ * формой, а не оттенком.
  */
 private fun grass(s: Sheet) {
-    val seed = s.random.nextInt()
     val random = s.random
-    val tiers = 3
+    val seed = random.nextInt()
+    // Число растений считается от площади листа; единица — лист телефона примерно 1 x 2.2.
+    val area = s.w * s.h / 2.2f
 
+    // Подстилка: земля и прель; у нижнего края она сгущается, скрывая основания.
     s.fill {
         return@fill { u: Float, v: Float ->
-            // Подстилка: земля и прель, по которым растёт куртина.
-            val soil = fbm01(u * 3.6f, v * 3.6f, 5, seed)
-            val litter = fbm01(u * 17f, v * 26f, 3, seed + 41)
-            0.02f + 0.07f * soil * soil + 0.04f * litter * soil
+            val soil = fbm01(u * 3.6f, v * 3.6f, 3, seed)
+            val root = smoothstep(s.h - 0.26f, s.h + 0.02f, v)
+            0.03f + 0.07f * soil * soil + root * 0.16f
         }
     }
 
-    val blades = Array(tiers) { Path() }
+    val far = Path()
+    val mid = Path()
+    val near = Path()
+    val stems = Path()
+    val flowers = Path()
+    val leaf = Path()
+    val matrix = Matrix()
 
-    // Травинка: две дуги от основания к общему острию. Управляющая точка обеих
-    // вынесена по ходу листа, поэтому у основания он идёт прямо, а валится ближе
-    // к кончику — так гнётся лист, нагруженный собственным весом.
-    fun blade(x: Float, y: Float, height: Float, lean: Float, tier: Int) {
-        val bend = lean * (0.55f + random.nextFloat() * 0.5f)
-        val midX = x + sin(lean * 0.45f) * height * 0.5f
-        val midY = y - cos(lean * 0.45f) * height * 0.55f
-        val tipX = x + sin(lean + bend) * height
-        val tipY = y - cos(lean + bend) * height * 0.92f
-        val half = height * 0.055f + 0.0016f
-        val path = blades[tier]
-        path.moveTo(x - half, y)
-        path.quadTo(midX - half * 0.55f, midY, tipX, tipY)
-        path.quadTo(midX + half * 0.55f, midY, x + half, y)
-        path.close()
+    // Овал в точке (cx, cy) с полуосями rx, ry, повёрнутый на угол `angle` (радианы).
+    fun oval(dst: Path, cx: Float, cy: Float, rx: Float, ry: Float, angle: Float) {
+        leaf.reset()
+        leaf.addOval(-rx, -ry, rx, ry, Path.Direction.CW)
+        matrix.reset()
+        matrix.setRotate(Math.toDegrees(angle.toDouble()).toFloat(), 0f, 0f)
+        matrix.postTranslate(cx, cy)
+        dst.addPath(leaf, matrix)
     }
 
-    // Сетка со сдвигом, а не случайные броски: при тысяче травинок случайные
-    // броски оставляют заметные прорехи и сгустки, которых в дернине не бывает.
-    val step = 0.028f
-    var row = 0
-    while (row * step < s.h + step) {
-        var col = 0
-        while (col * step < s.w + step) {
-            val bx = (col + random.nextFloat()) * step
-            val by = (row + random.nextFloat()) * step
-            col++
-            val density = fbm01(bx * 3.1f, by * 3.1f, 4, seed + 7)
-            if (density < 0.36f) continue
-            val tier = random.nextInt(tiers)
-            // Ближний ярус выше и его меньше: два броска из трёх уходят в дальний.
-            val scale = when (tier) {
-                0 -> 0.055f + random.nextFloat() * 0.035f
-                1 -> 0.085f + random.nextFloat() * 0.055f
-                else -> 0.13f + random.nextFloat() * 0.085f
-            }
-            if (tier == 2 && random.nextFloat() > 0.45f) continue
-            blade(
-                bx, by,
-                scale * (0.7f + density * 0.6f),
-                (random.nextFloat() - 0.5f) * 1.15f,
-                tier,
+    // Лист, уходящий от основания (x, y); `angle` — отклонение от вертикали.
+    // Нормаль всегда берётся одним поворотом, поэтому все листья в одном Path
+    // имеют одинаковую ориентацию и не гасят друг друга при заливке.
+    fun leafBlade(dst: Path, x: Float, y: Float, len: Float, halfWidth: Float, angle: Float, bend: Float) {
+        val dx = sin(angle)
+        val dy = -cos(angle)
+        val nx = -dy
+        val ny = dx
+        val tipX = x + dx * len + nx * bend
+        val tipY = y + dy * len + ny * bend
+        val midX = x + dx * len * 0.5f + nx * bend * 0.35f
+        val midY = y + dy * len * 0.5f + ny * bend * 0.35f
+        val bulge = halfWidth * 1.1f
+        dst.moveTo(x - nx * halfWidth, y - ny * halfWidth)
+        dst.quadTo(midX - nx * bulge, midY - ny * bulge, tipX, tipY)
+        dst.quadTo(midX + nx * bulge, midY + ny * bulge, x + nx * halfWidth, y + ny * halfWidth)
+        dst.close()
+    }
+
+    fun wind(x: Float, y: Float): Float = 0.35f * fbm(x * 1.4f, y * 1.4f, 2, seed + 5)
+
+    // Куртинка: 4-6 широких листьев, веером из одной точки.
+    fun tuft(dst: Path, x: Float, y: Float, len: Float, halfWidth: Float) {
+        val lean = wind(x, y)
+        val blades = 4 + random.nextInt(3)
+        for (i in 0 until blades) {
+            val spread = (i.toFloat() / (blades - 1) - 0.5f) * 0.9f
+            val angle = lean + spread + (random.nextFloat() - 0.5f) * 0.2f
+            val l = len * (0.7f + 0.3f * random.nextFloat()) * (if (abs(spread) < 0.2f) 1f else 0.85f)
+            leafBlade(
+                dst,
+                x + (random.nextFloat() - 0.5f) * halfWidth * 2f,
+                y,
+                l,
+                halfWidth * (0.8f + 0.4f * random.nextFloat()),
+                angle,
+                (random.nextFloat() - 0.5f) * len * 0.4f,
             )
         }
-        row++
+    }
+
+    // Клевер: три листочка на черешке.
+    fun clover(x: Float, y: Float, size: Float) {
+        val lean = (random.nextFloat() - 0.5f) * 0.6f + wind(x, y)
+        val tipX = x + sin(lean) * size * 1.4f
+        val tipY = y - cos(lean) * size * 1.4f
+        stems.moveTo(x, y)
+        stems.lineTo(tipX, tipY)
+        for (i in 0 until 3) {
+            val a = lean + (i - 1) * 2.1f
+            oval(
+                mid,
+                tipX + sin(a) * size * 0.45f,
+                tipY - cos(a) * size * 0.45f,
+                size * 0.42f,
+                size * 0.36f,
+                a - HALF_PI,
+            )
+        }
+    }
+
+    // Папоротник: изогнутый стебель с парами перистых листочков, короче кверху.
+    fun fern(x: Float, y: Float, len: Float) {
+        val lean = (random.nextFloat() - 0.5f) * 0.5f + wind(x, y)
+        val tipX = x + sin(lean) * len
+        val tipY = y - cos(lean) * len
+        val ctrlX = x + sin(lean * 0.4f) * len * 0.5f
+        val ctrlY = y - len * 0.5f
+        stems.moveTo(x, y)
+        stems.quadTo(ctrlX, ctrlY, tipX, tipY)
+        val pairs = 5 + random.nextInt(3)
+        for (j in 1..pairs) {
+            val t = j.toFloat() / (pairs + 1)
+            val px = x + (tipX - x) * t
+            val py = y + (tipY - y) * t
+            val size = len * (0.3f - 0.14f * t)
+            for (side in intArrayOf(-1, 1)) {
+                val a = lean + side * 0.95f
+                oval(
+                    mid,
+                    px + sin(a) * size * 0.5f,
+                    py - cos(a) * size * 0.5f,
+                    size * 0.5f,
+                    size * 0.16f,
+                    a - HALF_PI,
+                )
+            }
+        }
+    }
+
+    // Цветок на ножке: вырастает из земли и кончается головкой.
+    fun stalked(x: Float, y: Float, stemLen: Float): Float {
+        val headY = y - stemLen
+        stems.moveTo(x, y)
+        stems.lineTo(x, headY)
+        return headY
+    }
+
+    fun daisy(x: Float, y: Float, r: Float) {
+        for (i in 0 until 8) {
+            val a = i * TAU / 8f
+            oval(flowers, x + cos(a) * r, y + sin(a) * r, r * 0.55f, r * 0.22f, a)
+        }
+        oval(flowers, x, y, r * 0.3f, r * 0.3f, 0f)
+    }
+
+    fun poppy(x: Float, y: Float, r: Float) {
+        val turn = random.nextFloat() * TAU
+        for (i in 0 until 4) {
+            val a = turn + i * HALF_PI
+            oval(flowers, x + cos(a) * r * 0.5f, y + sin(a) * r * 0.5f, r * 0.7f, r * 0.62f, a)
+        }
+    }
+
+    fun buttercup(x: Float, y: Float, r: Float) {
+        val turn = random.nextFloat() * TAU
+        for (i in 0 until 5) {
+            val a = turn + i * TAU / 5f
+            oval(flowers, x + cos(a) * r * 0.6f, y + sin(a) * r * 0.6f, r * 0.5f, r * 0.36f, a)
+        }
+    }
+
+    fun cornflower(x: Float, y: Float, r: Float) {
+        val turn = random.nextFloat() * TAU
+        for (i in 0 until 6) {
+            val a = turn + i * TAU / 6f
+            oval(flowers, x + cos(a) * r * 0.7f, y + sin(a) * r * 0.7f, r * 0.6f, r * 0.2f, a)
+        }
+        oval(flowers, x, y, r * 0.22f, r * 0.22f, 0f)
+    }
+
+    // Дальний ярус: мелкие и тусклые, растут выше.
+    repeat((220f * area).toInt()) {
+        val x = random.nextFloat() * s.w
+        val y = s.h * (0.22f + 0.5f * random.nextFloat())
+        tuft(far, x, y, 0.05f + 0.035f * random.nextFloat(), 0.006f)
+    }
+
+    // Средний ярус: куртинки, клевер и папоротник, ниже.
+    repeat((130f * area).toInt()) {
+        val x = random.nextFloat() * s.w
+        val y = s.h * (0.45f + 0.47f * random.nextFloat())
+        tuft(mid, x, y, 0.09f + 0.05f * random.nextFloat(), 0.008f)
+    }
+    repeat((26f * area).toInt()) {
+        val x = random.nextFloat() * s.w
+        val y = s.h * (0.5f + 0.4f * random.nextFloat())
+        clover(x, y, 0.035f + 0.02f * random.nextFloat())
+    }
+    repeat((22f * area).toInt()) {
+        val x = random.nextFloat() * s.w
+        val y = s.h * (0.55f + 0.4f * random.nextFloat())
+        fern(x, y, 0.12f + 0.06f * random.nextFloat())
+    }
+
+    // Ближний ярус: крупные и яркие, основания у нижней кромки.
+    repeat((70f * area).toInt()) {
+        val x = random.nextFloat() * s.w
+        val y = s.h * (0.78f + 0.27f * random.nextFloat())
+        tuft(near, x, y, 0.16f + 0.08f * random.nextFloat(), 0.011f)
+    }
+
+    // Цветы: ножка в стебли, головка — в отдельный Path.
+    repeat((34f * area).toInt()) {
+        val x = random.nextFloat() * s.w
+        val y = s.h * (0.4f + 0.5f * random.nextFloat())
+        daisy(x, stalked(x, y, 0.05f + 0.04f * random.nextFloat()), 0.02f)
+    }
+    repeat((12f * area).toInt()) {
+        val x = random.nextFloat() * s.w
+        val y = s.h * (0.4f + 0.5f * random.nextFloat())
+        poppy(x, stalked(x, y, 0.04f + 0.04f * random.nextFloat()), 0.025f)
+    }
+    repeat((18f * area).toInt()) {
+        val x = random.nextFloat() * s.w
+        val y = s.h * (0.4f + 0.5f * random.nextFloat())
+        buttercup(x, stalked(x, y, 0.03f + 0.03f * random.nextFloat()), 0.016f)
+    }
+    repeat((14f * area).toInt()) {
+        val x = random.nextFloat() * s.w
+        val y = s.h * (0.4f + 0.5f * random.nextFloat())
+        cornflower(x, stalked(x, y, 0.06f + 0.04f * random.nextFloat()), 0.018f)
     }
 
     s.drawing { canvas ->
         val paint = s.paint
         paint.style = Paint.Style.FILL
-        for (tier in 0 until tiers) {
-            paint.alpha = 34 + tier * 30
-            canvas.drawPath(blades[tier], paint)
-        }
+        paint.alpha = FAR_ALPHA
+        canvas.drawPath(far, paint)
+        paint.alpha = MID_ALPHA
+        canvas.drawPath(mid, paint)
+        paint.alpha = NEAR_ALPHA
+        canvas.drawPath(near, paint)
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeCap = Paint.Cap.ROUND
+        paint.strokeWidth = 0.0032f
+        paint.alpha = STEM_ALPHA
+        canvas.drawPath(stems, paint)
+
+        paint.style = Paint.Style.FILL
+        paint.alpha = FLOWER_ALPHA
+        canvas.drawPath(flowers, paint)
+
         paint.alpha = 255
+        paint.strokeCap = Paint.Cap.BUTT
     }
 }
+
+private const val FAR_ALPHA = 70
+private const val MID_ALPHA = 130
+private const val NEAR_ALPHA = 205
+private const val STEM_ALPHA = 170
+private const val FLOWER_ALPHA = 240
+private const val HALF_PI = 1.5707964f
 
 /**
  * Трещины: кракелюр состарившегося покрытия.
@@ -937,95 +1092,64 @@ private fun water(s: Sheet) {
 }
 
 /**
- * Звёздное небо: туманность плюс мультипликативный каскад звёзд.
+ * Звёздное небо: Млечный Путь, галактики и звёзды всех масштабов.
  *
- * Прежний вариант был одними звёздами, и на весь экран их не хватало: небо
- * выглядело россыпью точек по пустоте. Здесь сначала строится туманность —
- * искривлённое поле с нитями (гребневой мультифрактал) и пустотами (облако,
- * поджатое порогом), — и уже по ней раскладываются звёзды.
+ * Прежнее небо было туманностью и горстью точек: на весь экран звёзд не хватало,
+ * и читалось оно россыпью одиночек по пустоте. Теперь небо слоистое, и каждый
+ * слой отвечает за свой масштаб:
  *
- * Каскад остался прежним и остаётся правильным: небо неоднородно не «в среднем»,
- * а на всех масштабах сразу — скопления сидят в сверхскоплениях, между ними
- * пустоты крупнее самих скоплений. Квадрат делится на четыре, каждая четверть
- * получает свой множитель плотности, множители перемножаются вниз по уровням.
- * Множитель подобран так, что его среднее ровно 1: сколько ветвей потеряло,
- * столько же другие приобрели, и общее число звёзд не зависит от глубины.
+ * 1. **Фон** — туманность по искривлённому домену, а поперёк листа проходит полоса
+ *    Млечного Пути: облако, прожилки гребневого мультифрактала и тёмные
+ *    пылевые рукава, вычитаемые из неё. Из-за рукавов полоса пёстрая по тону, а не
+ *    ровное светлое пятно.
+ * 2. **Галактики** — три крупные (спиральные и эллиптические, под своим углом
+ *    и наклоном, с яркими ядрами), несколько средних и россыпь мелких размытых
+ *    пятнышек. Спираль набрана точками вдоль логарифмической спирали с разбросом, а
+ *    не нарисована линией: у настоящих рукавов края рваные.
+ * 3. **Звёзды** — четыре класса. Пыль из тысяч слабых точек, мелкие, средние с
+ *    ореолом и несколько ярких с дифракционными лучами. Плотность следит за
+ *    полосой Млечного Пути: в ней звёзд втрое больше, чем вне её.
  *
- * У самых ярких звёзд рисуются лучи. Это не украшение, а то, по чему глаз
- * отличает звезду от точки: луч даёт диафрагма, и он есть на любом снимке неба.
+ * Всё белое с альфой: цвет даёт акцент темы. Богатство тона достигается разбросом
+ * яркости и размеров, а не цветом.
  */
 private fun starfield(s: Sheet) {
     val seed = s.random.nextInt()
     val random = s.random
 
+    // Полоса Млечного Пути под случайным углом через середину листа.
+    val bandAngle = 0.75f + random.nextFloat() * 0.7f
+    val ca = cos(bandAngle)
+    val sa = sin(bandAngle)
+    val bandOffset = -(s.w * 0.5f + (random.nextFloat() - 0.5f) * 0.3f) * sa +
+        (s.h * 0.5f + (random.nextFloat() - 0.5f) * 0.3f) * ca
+
+    fun band(u: Float, v: Float): Float {
+        val along = u * ca + v * sa
+        val across = -u * sa + v * ca - bandOffset
+        val bend = 0.16f * fbm(along * 1.2f, 0.7f, 3, seed + 3)
+        return 1f - smoothstep(0.03f, 0.36f, abs(across + bend))
+    }
+
     s.fill {
         return@fill { u: Float, v: Float ->
-            val qx = fbm(u * 1.3f, v * 1.3f, 5, seed)
-            val qy = fbm(u * 1.3f + 4.7f, v * 1.3f + 8.9f, 5, seed + 13)
-            val wx = u + 0.45f * qx
-            val wy = v + 0.45f * qy
+            val qx = fbm(u * 1.3f, v * 1.3f, 4, seed)
+            val qy = fbm(u * 1.3f + 4.7f, v * 1.3f + 8.9f, 4, seed + 13)
+            val wx = u + 0.4f * qx
+            val wy = v + 0.4f * qy
 
-            val cloud = fbm01(wx * 1.7f, wy * 1.7f, 6, seed + 41)
+            val cloud = fbm01(wx * 1.7f, wy * 1.7f, 5, seed + 41)
             val clear = smoothstep(0.38f, 0.72f, cloud)
-            val filament = ridged(wx * 2.6f, wy * 2.6f, 6, seed + 29)
-            val dust = fbm01(u * 9f, v * 9f, 4, seed + 59)
+            val filament = ridged(wx * 2.6f, wy * 2.6f, 5, seed + 29)
+            val b = band(u, v)
+            val grain = fbm01(wx * 9f, wy * 9f, 4, seed + 59)
+            // Пылевые рукава: гребни вычитаются из полосы.
+            val lane = smoothstep(0.55f, 0.85f, ridged(wx * 4.2f + 1.7f, wy * 4.2f, 4, seed + 71))
+            val milky = b * (0.08f + 0.22f * grain * cloud + 0.10f * filament * filament) *
+                (1f - 0.8f * lane * b)
 
-            0.012f + 0.10f * clear * cloud + 0.17f * filament * filament * clear +
-                0.03f * dust * clear
+            0.010f + 0.07f * clear * cloud + 0.12f * filament * filament * clear + milky
         }
-    }
-
-    // Звезда — четыре числа: x, y, радиус, альфа. Список считается целиком до
-    // отрисовки: холст трогается один раз.
-    val stars = ArrayList<FloatArray>(1024)
-
-    fun cascade(x: Float, y: Float, size: Float, depth: Int, weight: Float) {
-        if (weight < 0.06f) return
-        if (x > s.w || y > s.h || x + size < 0f || y + size < 0f) return
-        if (depth == 0) {
-            val exact = weight * 0.5f
-            var count = exact.toInt()
-            // Вероятностное округление: без него дробная часть веса терялась бы
-            // на каждом листе, и слабые ветви не давали бы вообще ничего.
-            if (random.nextFloat() < exact - count) count++
-            repeat(if (count > 10) 10 else count) {
-                // Произведение двух равномерных: ярких звёзд мало, тусклых много —
-                // как в настоящей функции светимости.
-                val q = random.nextFloat() * random.nextFloat()
-                val lift = if (weight > 8f) 8f else weight
-                stars += floatArrayOf(
-                    x + random.nextFloat() * size,
-                    y + random.nextFloat() * size,
-                    0.0007f + q * (0.0022f + lift * 0.00022f),
-                    (44f + q * 196f + lift * 12f).coerceAtMost(240f),
-                )
-            }
-            return
-        }
-        val half = size * 0.5f
-        for (quadrant in 0 until 4) {
-            val m = 0.15f + 2.55f * random.nextFloat().let { it * it }
-            cascade(
-                x + (quadrant and 1) * half,
-                y + (quadrant shr 1) * half,
-                half,
-                depth - 1,
-                weight * m,
-            )
-        }
-    }
-
-    val root = if (s.w > s.h) s.w else s.h
-    cascade(0f, 0f, root, 6, 1.7f)
-
-    // Смещение общим полем, а не каждой звезде своё: соседи по листу получают
-    // почти одинаковый сдвиг, поэтому скопление остаётся скоплением, а
-    // прямоугольная решётка деления исчезает.
-    for (star in stars) {
-        val x0 = star[0]
-        val y0 = star[1]
-        star[0] = x0 + fbm(x0 * 1.1f, y0 * 1.1f, 3, seed + 211) * 0.09f
-        star[1] = y0 + fbm(x0 * 1.1f + 3.7f, y0 * 1.1f, 3, seed + 223) * 0.09f
     }
 
     val halo = android.graphics.RadialGradient(
@@ -1034,39 +1158,249 @@ private fun starfield(s: Sheet) {
         Color.argb(0, 255, 255, 255),
         android.graphics.Shader.TileMode.CLAMP,
     )
+    // Профили галактик: спиральный диск, эллиптическая и ядро.
+    val white = Color.argb(255, 255, 255, 255)
+    val diskShader = android.graphics.RadialGradient(
+        0f, 0f, 1f,
+        intArrayOf(Color.argb(90, 255, 255, 255), Color.argb(55, 255, 255, 255), Color.argb(22, 255, 255, 255), Color.argb(0, 255, 255, 255)),
+        floatArrayOf(0f, 0.25f, 0.6f, 1f),
+        android.graphics.Shader.TileMode.CLAMP,
+    )
+    val bulgeShader = android.graphics.RadialGradient(
+        0f, 0f, 1f,
+        intArrayOf(white, Color.argb(150, 255, 255, 255), Color.argb(0, 255, 255, 255)),
+        floatArrayOf(0f, 0.35f, 1f),
+        android.graphics.Shader.TileMode.CLAMP,
+    )
+    val ellipticalShader = android.graphics.RadialGradient(
+        0f, 0f, 1f,
+        intArrayOf(white, Color.argb(200, 255, 255, 255), Color.argb(100, 255, 255, 255), Color.argb(30, 255, 255, 255), Color.argb(0, 255, 255, 255)),
+        floatArrayOf(0f, 0.12f, 0.35f, 0.7f, 1f),
+        android.graphics.Shader.TileMode.CLAMP,
+    )
+
+    // Звёзды заранее: холст трогается один раз. Звезда — x, y, радиус, альфа.
+    fun rnd(lo: Float, hi: Float) = lo + (hi - lo) * random.nextFloat()
+    fun accept(x: Float, y: Float): Boolean = random.nextFloat() < 0.25f + 0.75f * band(x, y)
+
+    val area = s.w * s.h
+    val dust = Array(3) { FloatArray(2 * (14000 * area).toInt() + 8) }
+    val dustCount = IntArray(3)
+    repeat((14000 * area).toInt()) {
+        val x = s.pointX()
+        val y = s.pointY()
+        if (!accept(x, y)) return@repeat
+        val c = random.nextInt(3)
+        dust[c][dustCount[c] * 2] = x
+        dust[c][dustCount[c] * 2 + 1] = y
+        dustCount[c]++
+    }
+
+    val small = ArrayList<FloatArray>(2048)
+    repeat((3500 * area).toInt()) {
+        val x = s.pointX()
+        val y = s.pointY()
+        if (!accept(x, y)) return@repeat
+        val q = random.nextFloat()
+        small += floatArrayOf(x, y, 0.0009f + q * q * 0.0012f, 90f + q * 110f)
+    }
+    val medium = ArrayList<FloatArray>(256)
+    repeat((420 * area).toInt()) {
+        val x = s.pointX()
+        val y = s.pointY()
+        if (!accept(x, y)) return@repeat
+        val q = random.nextFloat()
+        medium += floatArrayOf(x, y, 0.0016f + q * q * 0.002f, 150f + q * 80f)
+    }
+    val bright = ArrayList<FloatArray>(32)
+    repeat(10 + random.nextInt(8)) {
+        bright += floatArrayOf(s.pointX(), s.pointY(), rnd(0.003f, 0.0055f), 255f)
+    }
 
     s.drawing { canvas ->
         val paint = s.paint
-        // Ореолы первым слоем: они шире звезды, и ядро должно лечь поверх.
+
+        // Галактика в собственной системе: единичный круг, повёрнутый и сплюснутый.
+        fun galaxy(cx: Float, cy: Float, r: Float, rot: Float, ratio: Float, spiral: Boolean, force: Float) {
+            canvas.save()
+            canvas.translate(cx, cy)
+            canvas.rotate(rot)
+            canvas.scale(r, r * ratio)
+            paint.style = Paint.Style.FILL
+            if (spiral) {
+                paint.shader = diskShader
+                paint.alpha = (255 * force).toInt()
+                canvas.drawCircle(0f, 0f, 1f, paint)
+                paint.shader = null
+
+                val tight = rnd(0.17f, 0.28f)
+                val turn = ln(11f) / tight
+                val flip = if (random.nextBoolean()) 1f else -1f
+                for (arm in 0 until 2) {
+                    val off = arm * 3.1416f
+                    // Мягкая дымка вдоль рукава.
+                    paint.shader = halo
+                    repeat(70) {
+                        val th = random.nextFloat() * turn
+                        val rr = 0.09f * exp(tight * th)
+                        val a = flip * th + off
+                        val rad = rnd(0.05f, 0.12f)
+                        paint.alpha = (rnd(12f, 22f) * force).toInt()
+                        canvas.save()
+                        canvas.translate(cos(a) * rr, sin(a) * rr)
+                        canvas.scale(rad, rad)
+                        canvas.drawCircle(0f, 0f, 1f, paint)
+                        canvas.restore()
+                    }
+                    paint.shader = null
+                    // Звёзды рукава с разбросом поперёк.
+                    repeat(450) {
+                        val th = random.nextFloat() * turn
+                        val rr = 0.09f * exp(tight * th)
+                        val a = flip * th + off
+                        val spread = (random.nextFloat() + random.nextFloat() - 1f) * 0.07f * (0.4f + rr)
+                        val x = cos(a) * rr + spread * cos(a + 1.5708f)
+                        val y = sin(a) * rr + spread * sin(a + 1.5708f)
+                        val q = random.nextFloat()
+                        paint.alpha = ((35f + 90f * random.nextFloat()) * (1f - 0.5f * rr) * force).toInt()
+                        canvas.drawCircle(x, y, 0.006f + q * q * q * 0.02f, paint)
+                    }
+                    // Яркие узлы звёздообразования.
+                    repeat(18) {
+                        val th = random.nextFloat() * turn
+                        val rr = 0.09f * exp(tight * th)
+                        val a = flip * th + off
+                        paint.alpha = (rnd(120f, 210f) * force).toInt()
+                        canvas.drawCircle(cos(a) * rr, sin(a) * rr, rnd(0.008f, 0.016f), paint)
+                    }
+                }
+                paint.shader = bulgeShader
+                paint.alpha = (255 * force).toInt()
+                canvas.save()
+                canvas.scale(0.28f, 0.28f)
+                canvas.drawCircle(0f, 0f, 1f, paint)
+                canvas.restore()
+                paint.shader = null
+                paint.alpha = 255
+                canvas.drawCircle(0f, 0f, 0.03f, paint)
+
+                // Пылевая полоса у почти ребром повёрнутых: вычитается из свечения.
+                if (ratio < 0.45f) {
+                    val dustPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+                    dustPaint.xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DST_OUT)
+                    dustPaint.style = Paint.Style.STROKE
+                    dustPaint.strokeWidth = 0.05f
+                    dustPaint.alpha = 130
+                    canvas.drawLine(-0.85f, 0f, 0.85f, 0f, dustPaint)
+                }
+            } else {
+                paint.shader = ellipticalShader
+                paint.alpha = (255 * force).toInt()
+                canvas.drawCircle(0f, 0f, 1f, paint)
+                paint.shader = null
+            }
+            canvas.restore()
+            paint.alpha = 255
+        }
+
+        // Три крупные галактики подальше друг от друга.
+        val placed = ArrayList<FloatArray>(4)
+        var tries = 0
+        while (placed.size < 3 && tries < 60) {
+            tries++
+            val x = s.w * rnd(0.12f, 0.88f)
+            val y = s.h * rnd(0.08f, 0.92f)
+            if (placed.any { hypot(it[0] - x, it[1] - y) < 0.3f }) continue
+            placed += floatArrayOf(x, y)
+            galaxy(
+                x, y, rnd(0.07f, 0.13f), rnd(0f, 180f), rnd(0.22f, 0.9f),
+                random.nextFloat() < 0.7f, rnd(0.75f, 1f),
+            )
+        }
+        // Средние.
+        repeat(4) {
+            galaxy(
+                s.pointX(), s.pointY(), rnd(0.025f, 0.05f), rnd(0f, 180f), rnd(0.3f, 0.85f),
+                random.nextFloat() < 0.5f, rnd(0.5f, 0.85f),
+            )
+        }
+        // Мелкие размытые пятнышки далёких галактик.
+        repeat(14) {
+            galaxy(
+                s.pointX(), s.pointY(), rnd(0.008f, 0.02f), rnd(0f, 180f), rnd(0.3f, 0.9f),
+                false, rnd(0.25f, 0.6f),
+            )
+        }
+
+        // Ореолы средних и ярких звёзд.
         paint.shader = halo
-        for (star in stars) {
-            if (star[2] < 0.0019f) continue
-            paint.alpha = (star[3] * 0.16f).toInt()
+        for (star in medium) {
+            paint.alpha = (star[3] * 0.18f).toInt()
             canvas.save()
             canvas.translate(star[0], star[1])
-            val k = star[2] * 6.5f
+            val k = star[2] * 6f
+            canvas.scale(k, k)
+            canvas.drawCircle(0f, 0f, 1f, paint)
+            canvas.restore()
+        }
+        for (star in bright) {
+            paint.alpha = 130
+            canvas.save()
+            canvas.translate(star[0], star[1])
+            val k = star[2] * 9f
             canvas.scale(k, k)
             canvas.drawCircle(0f, 0f, 1f, paint)
             canvas.restore()
         }
         paint.shader = null
 
-        // Лучи у самых ярких.
+        // Дифракционные лучи ярких: четыре длинных и четыре короткие по диагоналям.
+        val needle = Path()
+        paint.style = Paint.Style.FILL
+        for (star in bright) {
+            val len = rnd(0.035f, 0.085f)
+            val tilt = rnd(-12f, 12f)
+            for (pass in 0 until 2) {
+                val reach = if (pass == 0) len else len * 0.45f
+                val base = reach * 0.014f
+                paint.alpha = if (pass == 0) 190 else 110
+                for (arm in 0 until 4) {
+                    canvas.save()
+                    canvas.translate(star[0], star[1])
+                    canvas.rotate(tilt + arm * 90f + pass * 45f)
+                    needle.reset()
+                    needle.moveTo(0f, -base)
+                    needle.lineTo(reach, 0f)
+                    needle.lineTo(0f, base)
+                    needle.close()
+                    canvas.drawPath(needle, paint)
+                    canvas.restore()
+                }
+            }
+        }
+
+        // Пыль: три класса яркости точками.
         paint.style = Paint.Style.STROKE
         paint.strokeCap = Paint.Cap.ROUND
-        for (star in stars) {
-            if (star[3] < 190f || star[2] < 0.0024f) continue
-            val reach = star[2] * 7f
-            paint.strokeWidth = star[2] * 0.5f
-            paint.alpha = (star[3] * 0.5f).toInt()
-            canvas.drawLine(star[0] - reach, star[1], star[0] + reach, star[1], paint)
-            canvas.drawLine(star[0], star[1] - reach, star[0], star[1] + reach, paint)
+        paint.strokeWidth = 0.0011f
+        val dustAlpha = intArrayOf(40, 70, 105)
+        for (c in 0 until 3) {
+            paint.alpha = dustAlpha[c]
+            canvas.drawPoints(dust[c], 0, dustCount[c] * 2, paint)
         }
         paint.style = Paint.Style.FILL
         paint.strokeCap = Paint.Cap.BUTT
 
-        for (star in stars) {
+        for (star in small) {
             paint.alpha = star[3].toInt()
+            canvas.drawCircle(star[0], star[1], star[2], paint)
+        }
+        for (star in medium) {
+            paint.alpha = star[3].toInt()
+            canvas.drawCircle(star[0], star[1], star[2], paint)
+        }
+        for (star in bright) {
+            paint.alpha = 255
             canvas.drawCircle(star[0], star[1], star[2], paint)
         }
         paint.alpha = 255
@@ -1359,30 +1693,26 @@ private fun shards(s: Sheet) {
 }
 
 /**
- * Брызги: удар капли о поверхность.
+ * Брызги: разные удары, а не одинаковые застывшие капли.
  *
- * Прежний вариант («Кровь») пускал потёки вниз, и владелец прочёл их ровно так,
- * как они выглядели, — «сопли или застывший воск». Потёк и брызги — разные
- * явления: потёк течёт под своим весом, брызги разлетаются от удара, и рисунок
- * у них радиальный, а не отвесный.
+ * Прежний вариант размножал одно и то же пятно: ядро, пучок лучей, спутники.
+ * Глаз быстро видел повтор. Теперь пятно выбирается из пяти видов, у каждого свой
+ * характер, и размер тоже гуляет:
  *
- * Отсюда устройство каждого пятна, и все три части обязательны — без любой из
- * них выходит клякса, а не брызги:
+ * 1. **Клякса с нитями** — неровное ядро из лопастей, вокруг нити разной длины,
+ *    изогнутые, с бусинами, развилками и каплями на концах;
+ * 2. **Косой удар** — вытянутая голова и узкий хвост в одну сторону, за хвостом
+ *    цепочка отрывающихся капель, мельчающая и редеющая;
+ * 3. **Корона** — неровное кольцо с зубцами, у каждого шарик на конце, часть шариков
+ *    оторвалась; в центре иногда остаётся столбик-капля;
+ * 4. **Мазок** — длинный изогнутый след переменной ширины с пальцами по бокам;
+ * 5. **Мелочь** — россыпь капель разного размера по всему листу: чем мельче, тем
+ *    больше.
  *
- * 1. **Ядро** — неровное пятно в точке удара, набранное несколькими кружками;
- * 2. **Лучи** — цепочки, убегающие от ядра и сужающиеся к концу, с набухшей
- *    каплей на конце: жидкость уходит нитью, нить рвётся, и её головка
- *    собирается в шарик;
- * 3. **Спутники** — отдельные капли дальше лучей, оторвавшиеся совсем.
- *
- * Как и у прежней фактуры, ничего не рисуется кистью: всё набивается в поле
- * толщины кружками с носителем `(1 − d²/R²)²`, а поверхность — линия уровня
- * суммы. Только сумма даёт слияние (луч, вышедший из ядра, — одно тело с ним) и
- * валик по кромке, которого у обведённого контура не бывает.
- *
- * Отличие от потёка в шейдере — резкость. У брызг плёнка тонкая, край
- * оканчивается валиком почти сразу, поэтому полоса перехода узкая, кромка ярче,
- * а тело темнее: света возвращает край, а не заливка.
+ * Техника прежняя и по-прежнему нужна: всё набирается кружками в поле толщины с
+ * носителем `(1 − d²/R²)²`, поверхность — линия уровня суммы. Только сумма даёт
+ * слияние нити с ядром и валик по кромке, которого у обведённого контура нет.
+ * Цепочка кружков по отрезку ([chain]) даёт вытянутые тела с плавным сужением.
  */
 private fun splatter(s: Sheet) {
     val seed = s.random.nextInt()
@@ -1420,65 +1750,214 @@ private fun splatter(s: Sheet) {
         }
     }
 
-    fun burst(cx: Float, cy: Float, radius: Float) {
-        // Ядро: несколько кружков вразброс — у пятна от удара край рваный, а не
-        // круглый.
-        repeat(6) {
-            val a = random.nextFloat() * TAU
-            val d = radius * random.nextFloat() * 0.55f
-            splat(cx + cos(a) * d, cy + sin(a) * d, radius * (0.55f + random.nextFloat() * 0.5f), 1f)
-        }
+    fun rnd(lo: Float, hi: Float) = lo + (hi - lo) * random.nextFloat()
 
-        val arms = 5 + random.nextInt(6)
+    // Цепочка кружков по отрезку с линейным сужением: вытянутое тело.
+    fun chain(x0: Float, y0: Float, x1: Float, y1: Float, r0: Float, r1: Float, weight: Float) {
+        val len = hypot(x1 - x0, y1 - y0)
+        val rMin = if (r0 < r1) r0 else r1
+        val n = (len / ((if (rMin < 0.0008f) 0.0008f else rMin) * 0.5f)).toInt().coerceIn(2, 70)
+        for (i in 0..n) {
+            val t = i.toFloat() / n
+            splat(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, r0 + (r1 - r0) * t, weight)
+        }
+    }
+
+    // Спутники: оторвавшиеся капли; чем дальше, тем мельче.
+    fun satellites(cx: Float, cy: Float, r: Float, count: Int) {
+        repeat(count) {
+            val a = random.nextFloat() * TAU
+            val q = random.nextFloat()
+            val d = r * (1.5f + 11f * q * q)
+            val size = r * (0.05f + 0.28f * (1f - q) * random.nextFloat() * random.nextFloat())
+            splat(cx + cos(a) * d, cy + sin(a) * d, size, 1.15f)
+        }
+    }
+
+    // Нить: изогнутая цепочка от (cx, cy) под углом, сужается, с бусинами и шариком.
+    fun filament(cx: Float, cy: Float, angle: Float, reach: Float, width0: Float, curve: Float, beads: Boolean) {
+        val steps = 12
+        var px = cx
+        var py = cy
+        var prevW = width0
+        var endA = angle
+        for (i in 1..steps) {
+            val t = i.toFloat() / steps
+            val a = angle + curve * t * t
+            endA = a
+            val x = cx + cos(a) * reach * t + cos(a + 1.5708f) * sin(t * 9f) * reach * 0.015f
+            val y = cy + sin(a) * reach * t + sin(a + 1.5708f) * sin(t * 9f) * reach * 0.015f
+            val w = width0 * (1f - t) + width0 * 0.1f
+            chain(px, py, x, y, prevW, w, 1f)
+            if (beads && i in 4..9 && random.nextFloat() < 0.22f) {
+                splat(x, y, width0 * rnd(0.35f, 0.6f), 1.2f)
+            }
+            px = x
+            py = y
+            prevW = w
+        }
+        splat(px, py, width0 * rnd(0.25f, 0.6f), 1.3f)
+        // Иногда головка отрывается совсем.
+        if (random.nextFloat() < 0.4f) {
+            splat(px + cos(endA) * width0 * 1.8f, py + sin(endA) * width0 * 1.8f, width0 * rnd(0.12f, 0.3f), 1.3f)
+        }
+    }
+
+    fun blob(cx: Float, cy: Float, r: Float) {
+        repeat(4 + random.nextInt(4)) {
+            val a = random.nextFloat() * TAU
+            val d = r * random.nextFloat() * 0.6f
+            splat(cx + cos(a) * d, cy + sin(a) * d, r * rnd(0.45f, 0.95f), 1f)
+        }
+        val arms = 4 + random.nextInt(8)
         repeat(arms) {
             val angle = random.nextFloat() * TAU
-            val reach = radius * (1.7f + random.nextFloat() * 3.6f)
-            val curve = (random.nextFloat() - 0.5f) * 0.5f
-            val steps = 14
-            var endX = cx
-            var endY = cy
-            for (i in 1..steps) {
-                val t = i.toFloat() / steps
+            val reach = r * rnd(1.3f, 5.2f)
+            val width0 = r * rnd(0.25f, 0.55f)
+            val curve = (random.nextFloat() - 0.5f) * 1.1f
+            filament(cx, cy, angle, reach, width0, curve, true)
+            // Развилка: ещё одна нить из середины.
+            if (reach > r * 3f && random.nextFloat() < 0.5f) {
+                val t = 0.55f
                 val a = angle + curve * t * t
-                val d = reach * t
-                endX = cx + cos(a) * d
-                endY = cy + sin(a) * d
-                // Нить сужается к концу почти до нуля: ровная ширина читается
-                // как лапа, а не как летящая капля.
-                splat(endX, endY, radius * (0.5f * (1f - t) + 0.06f), 1f)
+                val side = if (random.nextBoolean()) 0.7f else -0.7f
+                filament(
+                    cx + cos(a) * reach * t, cy + sin(a) * reach * t,
+                    a + side, reach * rnd(0.25f, 0.45f), width0 * 0.5f, side * 0.3f, false,
+                )
             }
-            // Головка оторвавшейся нити собирается в шарик.
-            splat(endX, endY, radius * (0.22f + random.nextFloat() * 0.22f), 1.3f)
         }
+        satellites(cx, cy, r, arms * 2)
+    }
 
-        // Спутники: капли, улетевшие дальше лучей.
-        repeat(arms * 3) {
-            val angle = random.nextFloat() * TAU
-            val d = radius * (1.9f + random.nextFloat() * 5.2f)
-            splat(
-                cx + cos(angle) * d,
-                cy + sin(angle) * d,
-                radius * (0.06f + random.nextFloat() * 0.20f),
-                1.15f,
-            )
+    fun streak(cx: Float, cy: Float, r: Float) {
+        val dir = random.nextFloat() * TAU
+        val dx = cos(dir)
+        val dy = sin(dir)
+        val side = dir + 1.5708f
+        chain(cx, cy, cx + dx * r * 1.8f, cy + dy * r * 1.8f, r * 0.9f, r * 0.65f, 1f)
+        val tail = r * rnd(4f, 9f)
+        val bow = r * rnd(-0.8f, 0.8f)
+        var px = cx + dx * r * 1.8f
+        var py = cy + dy * r * 1.8f
+        repeat(5) { i ->
+            val t = (i + 1) / 5f
+            val x = cx + dx * tail * t + cos(side) * bow * sin(t * 3.1416f)
+            val y = cy + dy * tail * t + sin(side) * bow * sin(t * 3.1416f)
+            chain(px, py, x, y, r * (0.6f - 0.5f * i / 5f), r * (0.6f - 0.5f * t), 1f)
+            px = x
+            py = y
         }
+        // Боковые шипы у головы.
+        repeat(3 + random.nextInt(4)) {
+            val a = dir + rnd(-1.2f, 1.2f) + (if (random.nextFloat() < 0.3f) 3.1416f else 0f)
+            filament(cx, cy, a, r * rnd(1f, 2.8f), r * rnd(0.2f, 0.4f), rnd(-0.3f, 0.3f), false)
+        }
+        // Цепочка капель за хвостом: мельчает и редеет.
+        val drops = 6 + random.nextInt(8)
+        var d = tail
+        for (i in 0 until drops) {
+            d += r * rnd(0.6f, 2.0f) * (1f + i * 0.15f)
+            val lat = r * rnd(-0.5f, 0.5f)
+            var size = r * (0.4f * (1f - i.toFloat() / drops)) * rnd(0.5f, 1.2f)
+            if (size < r * 0.04f) size = r * 0.04f
+            val x = cx + dx * d + cos(side) * lat
+            val y = cy + dy * d + sin(side) * lat
+            chain(x, y, x + dx * size * 1.6f, y + dy * size * 1.6f, size, size * 0.6f, 1.1f)
+        }
+    }
+
+    fun crown(cx: Float, cy: Float, r: Float) {
+        val ring = r * rnd(1.4f, 2.1f)
+        val n = 18 + random.nextInt(8)
+        for (i in 0 until n) {
+            if (random.nextFloat() < 0.1f) continue
+            val a = i * TAU / n
+            val rr = ring * rnd(0.88f, 1.12f)
+            splat(cx + cos(a) * rr, cy + sin(a) * rr, r * rnd(0.28f, 0.42f), 1f)
+        }
+        // Зубцы неровно по кольцу, на концах шарики; часть оторвана.
+        val spikes = 9 + random.nextInt(8)
+        repeat(spikes) {
+            val a = random.nextFloat() * TAU
+            val len = r * rnd(0.7f, 2.6f)
+            val x0 = cx + cos(a) * ring
+            val y0 = cy + sin(a) * ring
+            val x1 = cx + cos(a) * (ring + len)
+            val y1 = cy + sin(a) * (ring + len)
+            chain(x0, y0, x1, y1, r * 0.3f, r * 0.12f, 1f)
+            val ball = r * rnd(0.18f, 0.34f)
+            if (random.nextFloat() < 0.35f) {
+                splat(cx + cos(a) * (ring + len * 1.4f), cy + sin(a) * (ring + len * 1.4f), ball, 1.3f)
+            } else {
+                splat(x1, y1, ball, 1.3f)
+            }
+        }
+        if (random.nextFloat() < 0.55f) splat(cx, cy, r * rnd(0.3f, 0.6f), 1.2f)
+        satellites(cx, cy, ring, 10 + random.nextInt(8))
+    }
+
+    fun smear(cx: Float, cy: Float, r: Float) {
+        var heading = random.nextFloat() * TAU
+        val turn = rnd(-0.12f, 0.12f)
+        val length = r * rnd(6f, 14f)
+        val n = 16
+        var px = cx
+        var py = cy
+        var prevW = r * 0.25f
+        for (i in 1..n) {
+            val t = i.toFloat() / n
+            heading += turn + rnd(-0.05f, 0.05f)
+            val x = px + cos(heading) * length / n
+            val y = py + sin(heading) * length / n
+            val bulge = Math.pow(sin(t * 3.1416f).toDouble(), 0.6).toFloat()
+            val w = r * (0.25f + 0.6f * bulge) * rnd(0.85f, 1.15f)
+            chain(px, py, x, y, prevW, w, 1f)
+            // Пальцы по бокам.
+            if (i % 4 == 0 && random.nextFloat() < 0.7f) {
+                val a = heading + (if (random.nextBoolean()) 1f else -1f) * rnd(0.6f, 1.2f)
+                filament(x, y, a, r * rnd(0.8f, 2.2f), w * 0.5f, rnd(-0.4f, 0.4f), false)
+            }
+            px = x
+            py = y
+            prevW = w
+        }
+        splat(px, py, r * rnd(0.15f, 0.3f), 1.3f)
+        satellites(px, py, r, 6)
     }
 
     // Пятна по сетке со сдвигом: случайные броски на такой площади сбиваются в
     // кучу и оставляют пустые углы.
-    val cellSize = 0.47f
+    val cellSize = 0.28f
     var row = 0
     while (row * cellSize < s.h + cellSize) {
         var col = 0
         while (col * cellSize < s.w + cellSize) {
-            burst(
-                (col + 0.15f + random.nextFloat() * 0.7f) * cellSize,
-                (row + 0.15f + random.nextFloat() * 0.7f) * cellSize,
-                0.016f + random.nextFloat() * 0.020f,
-            )
+            val count = if (random.nextFloat() < 0.35f) 2 else 1
+            repeat(count) {
+                val cx = (col + 0.1f + random.nextFloat() * 0.8f) * cellSize
+                val cy = (row + 0.1f + random.nextFloat() * 0.8f) * cellSize
+                val q = random.nextFloat()
+                val r = 0.011f + 0.03f * q * sqrt(q)
+                when (random.nextFloat()) {
+                    in 0f..0.30f -> blob(cx, cy, r)
+                    in 0.30f..0.55f -> streak(cx, cy, r)
+                    in 0.55f..0.75f -> crown(cx, cy, r * 0.8f)
+                    else -> smear(cx, cy, r)
+                }
+            }
             col++
         }
         row++
+    }
+
+    // Мелочь по всему листу, гуще там, где поле шума повыше.
+    repeat((380 * s.w * s.h).toInt()) {
+        val x = s.pointX()
+        val y = s.pointY()
+        if (fbm01(x * 3.5f, y * 3.5f, 3, seed + 3) < 0.4f * random.nextFloat() + 0.2f) return@repeat
+        val q = random.nextFloat()
+        splat(x, y, 0.0018f + 0.009f * q * q * q, 1.15f)
     }
 
     s.fill {
@@ -1561,79 +2040,6 @@ private fun smoke(s: Sheet) {
             // уводить нельзя, иначе верх экрана пустеет.
             val rise = 0.35f + 0.65f * (v / sheetHeight)
             0.02f + 0.62f * puff * rise + 0.16f * wisp * wisp * puff
-        }
-    }
-}
-
-/**
- * Сияние: свет как поле, а не как набор кругов.
- *
- * Основа — гребневой мультифрактал по искривлённому домену. Сама сумма октав —
- * это дымка; свет даёт не она, а её гребни: крупная жила ветвится нитями вдвое
- * тоньше, те — ещё вдвое, и так до предела октав. Это и есть искомая рекурсия:
- * узор одинаково устроен и вблизи, и издали.
- *
- * Очаги света входят в ту же формулу слагаемыми, а не ложатся друг на друга
- * готовыми кругами: пересечение двух очагов ярче каждого из них. Очаги идут
- * тремя масштабами по тому же закону, что октавы, — каждый следующий вдвое
- * мельче и вдвое многочисленнее.
- *
- * Насыщение мягкое (`x/(1+x)`), а не обрезкой: у самых ярких мест остаётся
- * градиент, а не плоское белое пятно.
- */
-private fun glow(s: Sheet) {
-    val seed = s.random.nextInt()
-    val random = s.random
-
-    val pools = ArrayList<FloatArray>(28)
-    var count = 2
-    var radius = 0.55f
-    var force = 1f
-    repeat(3) {
-        repeat(count) {
-            pools += floatArrayOf(
-                s.pointX(),
-                s.pointY(),
-                radius * (0.7f + random.nextFloat() * 0.6f),
-                force * (0.6f + random.nextFloat() * 0.5f),
-            )
-        }
-        count *= 2
-        radius *= 0.5f
-        force *= 0.75f
-    }
-    // Массив, а не список: лямбда ниже вызывается на каждую точку, и обход
-    // списка заводил бы итератор миллион раз.
-    val lamps = pools.toTypedArray()
-
-    s.fill {
-        return@fill { u: Float, v: Float ->
-            var pool = 0f
-            for (p in lamps) {
-                val dx = u - p[0]
-                if (dx > p[2] || dx < -p[2]) continue
-                val dy = v - p[1]
-                if (dy > p[2] || dy < -p[2]) continue
-                val q = (dx * dx + dy * dy) / (p[2] * p[2])
-                if (q >= 1f) continue
-                val t = 1f - q
-                // Купол без exp: он здесь в горячем цикле, а квадрат даёт такой
-                // же гладкий край и втрое дешевле.
-                pool += t * t * p[3]
-            }
-
-            val qx = fbm(u * 1.5f, v * 1.5f, 4, seed)
-            val qy = fbm(u * 1.5f + 6.3f, v * 1.5f + 2.9f, 4, seed + 19)
-            val wx = u + 0.30f * qx
-            val wy = v + 0.30f * qy
-
-            val vein = ridged(wx * 3.0f, wy * 3.0f, 6, seed + 37)
-            val haze = fbm01(u * 0.9f, v * 0.9f, 2, seed + 53)
-
-            val light = (0.14f + pool) *
-                (vein * 0.80f + vein * vein * vein * 0.9f) *
-                (0.35f + 0.8f * haze)
-            0.92f * light / (1f + light)
         }
     }
 }
@@ -1876,5 +2282,308 @@ private fun snow(s: Sheet) {
         paint.strokeCap = Paint.Cap.BUTT
         paint.strokeJoin = Paint.Join.MITER
         paint.alpha = 255
+    }
+}
+
+/** Раздаёт строки `0 until rows` по потокам: `work(from, to)` на каждую полосу. */
+private fun parallelRows(rows: Int, work: (Int, Int) -> Unit) {
+    val cores = Runtime.getRuntime().availableProcessors().coerceIn(1, 8)
+    val bands = min(cores, rows)
+    if (bands <= 1) {
+        work(0, rows)
+        return
+    }
+    val step = (rows + bands - 1) / bands
+    val threads = ArrayList<Thread>(bands)
+    var start = 0
+    while (start < rows) {
+        val from = start
+        val to = min(rows, start + step)
+        threads += Thread({ work(from, to) }, "NovaTexture-rows-$from")
+        start = to
+    }
+    threads.forEach { it.start() }
+    threads.forEach { it.join() }
+}
+
+/**
+ * Фрактал: погружение в множество Мандельброта.
+ *
+ * Берётся не обзорный вид, а окрестность граничной точки, которую знают как
+ * богатую: долина морских коньков, усик на вещественной оси, точка Фейгенбаума,
+ * спирали. Вокруг такой точки множество самоподобно: каждая завитушка несёт
+ * внутри миниатюрную копию целого, и на любом увеличении картина продолжается, —
+ * отсюда ощущение, что падаешь вглубь.
+ *
+ * Вид зависит от зерна: точка берётся из списка, масштаб — от 1e-3 до глубины,
+ * которую выдерживает точка (список хранит её предел: у приблизительных координат
+ * глубже не нырнуть), угол поворота случаен, плюс смещение от центра. Затем
+ * проверяется, что кадр не пуст и не залит нутром множества, иначе берётся другой.
+ *
+ * Считается в `Double` (глубина до 1e-7 не умещается во `Float`) на уменьшенной
+ * сетке с длинной стороной 380, потом растягивается билинейно. Число итераций
+ * ограничено и растёт с глубиной. Плавный счётчик итераций `ν = n + 1 − log₂ ln|z|`
+ * не даёт ступенек; по нему идут полосы альфы. Нутро множества кодируется
+ * отрицательным числом и несёт в себе фазу последней точки орбиты — слабый узор
+ * вместо чёрной заливки. При билинейной выборке в среднем участвуют только вышедшие
+ * из множества соседи, иначе по границе легла бы серая каёмка.
+ */
+private fun fractal(s: Sheet) {
+    val random = s.random
+
+    // Центры: re, im, предельный десятичный порядок масштаба.
+    val centres = arrayOf(
+        doubleArrayOf(-0.743643887037151, 0.131825904205330, 7.0),
+        doubleArrayOf(-1.401155189092, 0.0, 6.5),
+        doubleArrayOf(0.25, 0.0, 6.0),
+        doubleArrayOf(-0.77568377, 0.13646737, 4.5),
+        doubleArrayOf(-1.25066, 0.02012, 4.0),
+        doubleArrayOf(-0.1011, 0.9563, 3.8),
+        doubleArrayOf(-0.16070135, 1.0375665, 4.5),
+    )
+
+    val longSide = 380
+    val gh: Int
+    val gw: Int
+    if (s.height >= s.width) {
+        gh = longSide
+        gw = max(2, (longSide * s.width / s.height.toFloat()).toInt())
+    } else {
+        gw = longSide
+        gh = max(2, (longSide * s.height / s.width.toFloat()).toInt())
+    }
+
+    // Плавный счётчик итераций; нутро — число меньше нуля.
+    fun orbit(cr: Double, ci: Double, maxIter: Int): Float {
+        val q = (cr - 0.25) * (cr - 0.25) + ci * ci
+        if (q * (q + (cr - 0.25)) <= 0.25 * ci * ci) return -1.5f
+        if ((cr + 1.0) * (cr + 1.0) + ci * ci <= 0.0625) return -1.5f
+        var zr = 0.0
+        var zi = 0.0
+        var n = 0
+        while (n < maxIter) {
+            val zr2 = zr * zr
+            val zi2 = zi * zi
+            if (zr2 + zi2 > 1e4) {
+                val modLog = ln(sqrt(zr2 + zi2))
+                return (n + 1 - ln(modLog) / ln(2.0)).toFloat()
+            }
+            zi = 2.0 * zr * zi + ci
+            zr = zr2 - zi2 + cr
+            n++
+        }
+        val phase = (atan2(zi, zr) / 6.283185307179586 + 0.5).toFloat()
+        return -(1f + phase)
+    }
+
+    var centreRe = 0.0
+    var centreIm = 0.0
+    var viewShort = 1.0
+    var rotation = 0.0
+    var maxIter = 300
+
+    for (attempt in 0 until 8) {
+        val c = centres[random.nextInt(centres.size)]
+        val depth = 3.0 + random.nextDouble() * (c[2] - 3.0).coerceAtLeast(0.0)
+        val scale = Math.pow(10.0, -depth)
+        centreRe = c[0] + (random.nextDouble() - 0.5) * scale * 0.8
+        centreIm = c[1] + (random.nextDouble() - 0.5) * scale * 0.8
+        viewShort = scale
+        rotation = random.nextDouble() * 6.283185307179586
+        maxIter = (180 + 50 * depth).toInt().coerceAtMost(420)
+
+        // Проба: не пустой ли кадр и не залит ли нутром.
+        var inside = 0
+        var rich = 0
+        val probes = 300
+        for (i in 0 until probes) {
+            val px = (random.nextDouble() - 0.5) * viewShort * s.w
+            val py = (random.nextDouble() - 0.5) * viewShort * s.h
+            val cr = centreRe + px * cos(rotation) - py * sin(rotation)
+            val ci = centreIm + px * sin(rotation) + py * cos(rotation)
+            val nu = orbit(cr, ci, maxIter)
+            if (nu < 0f) inside++ else if (nu > 12f) rich++
+        }
+        if (inside < probes * 0.55 && rich >= probes * 0.22) break
+    }
+
+    val grid = FloatArray(gw * gh)
+    val cRe = centreRe
+    val cIm = centreIm
+    val cosR = cos(rotation)
+    val sinR = sin(rotation)
+    val viewW = viewShort * s.w
+    val viewH = viewShort * s.h
+    val iterLimit = maxIter
+    parallelRows(gh) { from, to ->
+        for (gy in from until to) {
+            val py = (gy / (gh - 1.0) - 0.5) * viewH
+            for (gx in 0 until gw) {
+                val px = (gx / (gw - 1.0) - 0.5) * viewW
+                grid[gy * gw + gx] = orbit(
+                    cRe + px * cosR - py * sinR,
+                    cIm + px * sinR + py * cosR,
+                    iterLimit,
+                )
+            }
+        }
+    }
+
+    val span = s.span
+    val kx = (gw - 1).toFloat() / (s.width - 1)
+    val ky = (gh - 1).toFloat() / (s.height - 1)
+    val centreU = s.w * 0.5f
+    val centreV = s.h * 0.5f
+    s.fill {
+        return@fill shade@{ u: Float, v: Float ->
+            var gx = u * span * kx
+            var gy = v * span * ky
+            if (gx < 0f) gx = 0f else if (gx > gw - 1.001f) gx = gw - 1.001f
+            if (gy < 0f) gy = 0f else if (gy > gh - 1.001f) gy = gh - 1.001f
+            val ix = gx.toInt()
+            val iy = gy.toInt()
+            val fx = gx - ix
+            val fy = gy - iy
+            val a = grid[iy * gw + ix]
+            val b = grid[iy * gw + ix + 1]
+            val c = grid[(iy + 1) * gw + ix]
+            val d = grid[(iy + 1) * gw + ix + 1]
+            val nearest = if (fy < 0.5f) (if (fx < 0.5f) a else b) else (if (fx < 0.5f) c else d)
+
+            // Нутро: слабый узор по фазе последней точки орбиты.
+            if (nearest < 0f) {
+                val phase = -(nearest + 1f)
+                return@shade 0.025f + 0.07f * (0.5f + 0.5f * sin(TAU * phase * 3f))
+            }
+
+            var sum = 0f
+            var weight = 0f
+            val wa = (1f - fx) * (1f - fy)
+            val wb = fx * (1f - fy)
+            val wc = (1f - fx) * fy
+            val wd = fx * fy
+            if (a >= 0f) { sum += a * wa; weight += wa }
+            if (b >= 0f) { sum += b * wb; weight += wb }
+            if (c >= 0f) { sum += c * wc; weight += wc }
+            if (d >= 0f) { sum += d * wd; weight += wd }
+            val nu = if (weight > 1e-4f) sum / weight else nearest
+
+            // Близость к границе: чем дольше орбита держалась, тем ярче.
+            val prox = smoothstep(1.5f, 90f, nu)
+            val wide = 0.5f + 0.5f * sin(TAU * nu * 0.055f)
+            val fine = nu * 0.22f - floor(nu * 0.22f)
+            val line = smoothstep(0f, 0.18f, fine) * smoothstep(0.5f, 0.18f, fine)
+            val dx = u - centreU
+            val dy = v - centreV
+            val vignette = 1f - 0.3f * smoothstep(0.2f, 0.8f, hypot(dx, dy))
+
+            (0.05f + (0.12f + 0.55f * prox) * (0.25f + 0.75f * wide) + 0.12f * line * prox) * vignette
+        }
+    }
+}
+
+/**
+ * Матрица: цифровой дождь.
+ *
+ * Колонки глифов с яркой головой внизу и шлейфом, гаснущим кверху: колонка
+ * «вылезает» снизу и уходит вверх. В каждой колонке снизу вверх идёт несколько
+ * струй со случайными длинами и разрывами; часть колонок тусклая, часть яркая,
+ * часть пуста. Под дождём слабой сеткой лежат погашенные глифы — без неё между
+ * струями экран пустел бы.
+ *
+ * Глифы — полуширинная катакана и цифры, рисуются кистью с моноширинным
+ * шрифтом. На устройстве без катаканы в шрифтах она рисовалась бы «тофу»
+ * (прямоугольниками), поэтому каждый знак проверяется через [Paint.hasGlyph], и
+ * при нехватке катаканы остаются цифры и латинские символы.
+ *
+ * Кисть работает в пикселях: холст листа масштабируется в единицы узора, а
+ * текст мелкого размера в масштабированном холсте теряет метрики — масштаб
+ * здесь снимается обратно.
+ */
+private fun matrix(s: Sheet) {
+    val random = s.random
+    val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        typeface = Typeface.MONOSPACE
+        textAlign = Paint.Align.CENTER
+    }
+
+    val glyphs = ArrayList<String>()
+    val kana = (0xFF66..0xFF9D).map { it.toChar().toString() }.filter {
+        try {
+            textPaint.hasGlyph(it)
+        } catch (_: Throwable) {
+            false
+        }
+    }
+    if (kana.size >= 24) glyphs.addAll(kana)
+    for (ch in "0123456789") glyphs.add(ch.toString())
+    for (ch in "ZTSXEH:.=*+<>|") glyphs.add(ch.toString())
+
+    val cell = 0.0185f
+    val cols = max(1, (s.w / cell).toInt())
+    val cw = s.w / cols
+    val ch = cw * 1.2f
+    val rows = (s.h / ch).toInt() + 1
+    val cellGlyph = Array(cols * rows) { glyphs[random.nextInt(glyphs.size)] }
+
+    s.drawing { canvas ->
+        val k = s.span
+        canvas.scale(1f / k, 1f / k)
+        textPaint.textSize = ch * 0.9f * k
+        val baseline = ch * 0.82f
+
+        fun glyph(col: Int, row: Int, alpha: Int, bold: Boolean) {
+            if (alpha < 6) return
+            textPaint.alpha = if (alpha > 255) 255 else alpha
+            textPaint.isFakeBoldText = bold
+            canvas.drawText(
+                cellGlyph[row * cols + col],
+                (col + 0.5f) * cw * k,
+                (row * ch + baseline) * k,
+                textPaint,
+            )
+        }
+
+        // Погашенная сетка: слабая, чтобы струи читались поверх.
+        for (row in 0 until rows) {
+            for (col in 0 until cols) {
+                glyph(col, row, 8 + random.nextInt(8), false)
+            }
+        }
+
+        val halo = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+        for (col in 0 until cols) {
+            if (random.nextFloat() < 0.12f) continue
+            val kind = random.nextFloat()
+            val power = when {
+                kind < 0.18f -> 0.22f + random.nextFloat() * 0.18f
+                kind < 0.78f -> 0.6f + random.nextFloat() * 0.25f
+                else -> 0.9f + random.nextFloat() * 0.1f
+            }
+            var head = rows - 1 + random.nextInt(8) - random.nextInt(max(1, (rows * 0.55f).toInt()))
+            while (head > 1) {
+                val len = 5 + random.nextInt(rows / 2 + 1)
+                for (n in 0..len) {
+                    val row = head - n
+                    if (row < 0) break
+                    if (row >= rows) continue
+                    val t = 1f - n.toFloat() / len
+                    var a = 255f * power * Math.pow(t.toDouble(), 1.6).toFloat() *
+                        (0.55f + 0.45f * random.nextFloat())
+                    if (n > 0 && random.nextFloat() < 0.05f) a *= 1.6f
+                    if (n == 0) {
+                        halo.alpha = (50 * power).toInt()
+                        canvas.drawCircle(
+                            (col + 0.5f) * cw * k, (row * ch + ch * 0.5f) * k, cw * 0.9f * k, halo,
+                        )
+                        glyph(col, row, 255, true)
+                    } else {
+                        glyph(col, row, a.toInt(), false)
+                    }
+                }
+                head -= len + 2 + random.nextInt(max(1, rows / 3))
+            }
+        }
     }
 }

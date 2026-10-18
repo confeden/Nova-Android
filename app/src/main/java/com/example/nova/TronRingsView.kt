@@ -65,7 +65,8 @@ class TronRingsView @JvmOverloads constructor(
     )
 
     private var mode: Mode = Mode.STOPPED
-    private var animationStartNanos = 0L
+    /** Начало волн на времени общих часов; `null` — ещё не привязано. */
+    private var animationStartSeconds: Double? = null
     private var animatedPhase = 0f
     private var canvasWidth = 0f
     private var canvasHeight = 0f
@@ -131,12 +132,9 @@ class TronRingsView @JvmOverloads constructor(
         override fun run() {
             frameCallbackArmed = false
             if (mode != Mode.CONNECTING || !isAttachedToWindow) return
-            val now = System.nanoTime()
-            if (animationStartNanos == 0L) {
-                animationStartNanos = now
-            }
-            val elapsedMs = (now - animationStartNanos) / 1_000_000f
-            animatedPhase = (elapsedMs / cycleDurationMs) % 1f
+            // На паузе часы стоят: кадров нет, фаза не уходит в фон и не прыгает на возврате.
+            if (!NovaAnimationClock.isRunning()) return
+            syncPhase(NovaAnimationClock.now())
             invalidate()
             scheduleFrame()
         }
@@ -178,10 +176,33 @@ class TronRingsView @JvmOverloads constructor(
         if (constellationEnabled == enabled) return
         constellationEnabled = enabled
         if (mode == Mode.CONNECTING) {
-            animationStartNanos = 0L
-            animatedPhase = 0f
+            restartPhase()
             invalidate()
         }
+    }
+
+    /**
+     * Фаза волн по времени часов, без продвижения: зовётся из отрисовки и привязки,
+     * кадр сам часы не двигает.
+     */
+    private fun syncPhase(now: Double) {
+        val start = animationStartSeconds
+            ?: NovaAnimationMemory.tronStartOrBegin(now).also { animationStartSeconds = it }
+        animatedPhase = SweepPhase.fraction(now - start, cycleDurationMs / 1000.0)
+    }
+
+    /** Явный перезапуск волн: отсчёт заново от текущего времени часов. */
+    private fun restartPhase() {
+        val now = NovaAnimationClock.peek()
+        animationStartSeconds = NovaAnimationMemory.tronRestart(now)
+        syncPhase(now)
+    }
+
+    /** Возврат на экран: волны продолжаются с той же фазы, кадры снова заказываются. */
+    fun resumeAnimation() {
+        if (mode != Mode.CONNECTING) return
+        syncPhase(NovaAnimationClock.peek())
+        scheduleFrame()
     }
 
     fun setMode(value: Mode, restart: Boolean = false) {
@@ -192,14 +213,21 @@ class TronRingsView @JvmOverloads constructor(
                 // Аппаратный слой здесь вреден: вид перерисовывается каждый кадр,
                 // и слой пришлось бы каждый раз собирать заново во весь экран.
                 setLayerType(LAYER_TYPE_NONE, null)
-                animationStartNanos = 0L
-                animatedPhase = 0f
+                if (restart) {
+                    restartPhase()
+                } else {
+                    // Продолжаем уже идущие волны: пересоздание вида не должно их сбрасывать.
+                    val now = NovaAnimationClock.peek()
+                    animationStartSeconds = NovaAnimationMemory.tronStartOrBegin(now)
+                    syncPhase(now)
+                }
                 scheduleFrame()
             }
 
             Mode.STOPPED -> {
                 setLayerType(LAYER_TYPE_NONE, null)
-                animationStartNanos = 0L
+                animationStartSeconds = null
+                NovaAnimationMemory.tronStop()
                 animatedPhase = 0f
                 unscheduleFrame()
                 invalidate()
@@ -209,8 +237,7 @@ class TronRingsView @JvmOverloads constructor(
 
     fun restartAnimation() {
         if (mode != Mode.CONNECTING) return
-        animationStartNanos = 0L
-        animatedPhase = 0f
+        restartPhase()
         unscheduleFrame()
         scheduleFrame()
         invalidate()
@@ -219,6 +246,7 @@ class TronRingsView @JvmOverloads constructor(
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         if (mode == Mode.CONNECTING) {
+            syncPhase(NovaAnimationClock.peek())
             scheduleFrame()
         }
     }

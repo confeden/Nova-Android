@@ -88,6 +88,8 @@ object ProtonApi {
         val peerPublicKey: String,
         val load: Int,
         val score: Double,
+        /** Когда узел последний раз видела лента (мс), 0 — неизвестно или живой список. */
+        val lastSeen: Long = 0L,
     )
 
     private fun userAgent(profile: ProtonDeviceProfile): String =

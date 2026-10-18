@@ -440,6 +440,8 @@ class ProtonProfileStore(context: Context) {
     data class AttemptOutcomes(
         val failedAtByEndpoint: Map<String, Long>,
         val succeededAtByEndpoint: Map<String, Long>,
+        /** Сколько отказов подряд у пары (сброс успехом) — выбирает вариант обфускации. */
+        val failCountByEndpoint: Map<String, Int> = emptyMap(),
     ) {
         companion object {
             val EMPTY = AttemptOutcomes(emptyMap(), emptyMap())
@@ -448,6 +450,9 @@ class ProtonProfileStore(context: Context) {
 
     fun readAttemptOutcomes(networkClass: String?): AttemptOutcomes =
         decodeAttemptOutcomes(readAtomically(outcomesFile), outcomeNetworkClass(networkClass))
+
+    /** Итоги всех классов сети разом — для подсказок, которым класс не важен ([decodeAllOutcomes]). */
+    fun readAllOutcomes(): AttemptOutcomes = decodeAllOutcomes(readAtomically(outcomesFile))
 
     /** Адреса узлов с успешной попыткой в любом классе сети ([decodeSucceededHosts]). */
     fun readSucceededHosts(): Set<String> = decodeSucceededHosts(readAtomically(outcomesFile))
@@ -745,7 +750,11 @@ class ProtonProfileStore(context: Context) {
          *        кончался бы на ближайшей стране. Обрезка идёт по узлам, а не внутри
          *        узла: половина набора портов была бы молчаливой лотереей.
          */
-        fun expandPortFallbacks(ordered: List<ProtonProfile>, limit: Int): List<ProtonProfile> {
+        fun expandPortFallbacks(
+            ordered: List<ProtonProfile>,
+            limit: Int,
+            hints: Map<String, PortHint> = emptyMap(),
+        ): List<ProtonProfile> {
             if (ordered.isEmpty() || limit <= 0) return emptyList()
 
             // Шаг 1: кто в голове своей страны.
@@ -795,7 +804,7 @@ class ProtonProfileStore(context: Context) {
                 val host = profile.entryIp.trim().trim('[', ']')
                 if (host.isEmpty()) return@forEachIndexed
                 val ports = when {
-                    wantsFallback[index] -> fallbackPortsFor(profile.port)
+                    wantsFallback[index] -> fallbackPortsFor(profile.port, hints[host.lowercase(Locale.US)]?.failedPorts.orEmpty())
                     index in singles -> listOf(profile.port)
                     else -> return@forEachIndexed
                 }
@@ -808,10 +817,15 @@ class ProtonProfileStore(context: Context) {
         }
 
         /** Свой порт узла и следующие за ним по кругу [PORTS]. */
-        private fun fallbackPortsFor(assigned: Int): List<Int> {
+        private fun fallbackPortsFor(assigned: Int, failed: Set<Int> = emptySet()): List<Int> {
             val start = PORTS.indexOf(assigned).takeIf { it >= 0 } ?: 0
             val count = PORTS_PER_FALLBACK_SERVER.coerceAtMost(PORTS.size)
-            return (0 until count).map { PORTS[(start + it) % PORTS.size] }
+            val ring = (0 until PORTS.size).map { PORTS[(start + it) % PORTS.size] }
+            // Свой порт остаётся первым; запасными идут не молчавшие, а если таких
+            // не хватает — добираем молчавшими: набор портов не режется (S50).
+            val spare = ring.drop(1)
+            return (listOf(ring.first()) + spare.filter { it !in failed } + spare.filter { it in failed })
+                .take(count)
         }
 
         /**
@@ -833,6 +847,7 @@ class ProtonProfileStore(context: Context) {
             proven: List<ProtonApi.Server>,
             primary: List<ProtonApi.Server>,
             extra: List<ProtonApi.Server>,
+            silentHosts: Set<String> = emptySet(),
         ): List<ProtonApi.Server> {
             val primaryByHost = primary.associateBy { normalizeHost(it.entryIp) }
             val out = LinkedHashMap<String, ProtonApi.Server>()
@@ -842,7 +857,9 @@ class ProtonProfileStore(context: Context) {
                 val host = normalizeHost(node.entryIp)
                 if (host.isNotEmpty()) out.putIfAbsent(host, primaryByHost[host] ?: node)
             }
-            primary.sortedWith(compareBy<ProtonApi.Server> { it.load }.thenBy { it.score }).forEach { node ->
+            primary.sortedWith(
+                compareBy<ProtonApi.Server> { it.load }.thenBy { it.score }.thenByDescending { it.lastSeen }
+            ).forEach { node ->
                 val host = normalizeHost(node.entryIp)
                 if (host.isNotEmpty()) out.putIfAbsent(host, node)
             }
@@ -850,7 +867,29 @@ class ProtonProfileStore(context: Context) {
                 val host = normalizeHost(node.entryIp)
                 if (host.isNotEmpty()) out.putIfAbsent(host, node)
             }
-            return out.values.toList()
+            // Узлы, молчавшие недавно и ни разу не подключавшиеся позже, — в хвост пула:
+            // 80 мест кандидатов делятся по кругу стран, и мёртвый адрес, стоящий в
+            // голове страны, занимал место ещё не пробованного. Проверенные в хвост не
+            // идут (молчащим узел по определению не считается); из пула молчащих не
+            // убираем — пара, молчавшая минуту назад, со следующей волны бывает жива.
+            if (silentHosts.isEmpty()) return out.values.toList()
+            val (quiet, rest) = out.entries.partition { it.key in silentHosts }
+            return (rest + quiet).map { it.value }
+        }
+
+        /** Адреса, молчавшие недавно и не подключавшиеся после (любой класс сети). */
+        fun silentHosts(outcomes: AttemptOutcomes, nowMs: Long): Set<String> {
+            val failedAt = HashMap<String, Long>()
+            outcomes.failedAtByEndpoint.forEach { (key, at) ->
+                if (at > 0L && nowMs - at < FAILURE_MEMORY_MS) {
+                    failedAt.merge(key.substringBeforeLast(':'), at, ::maxOf)
+                }
+            }
+            val succeededAt = HashMap<String, Long>()
+            outcomes.succeededAtByEndpoint.forEach { (key, at) ->
+                succeededAt.merge(key.substringBeforeLast(':'), at, ::maxOf)
+            }
+            return failedAt.filter { (host, at) -> at > (succeededAt[host] ?: 0L) }.keys
         }
 
         /**
@@ -920,6 +959,8 @@ class ProtonProfileStore(context: Context) {
                 AttemptOutcomes(
                     failedAtByEndpoint = decodeTimestamps(section.optJSONObject("failed_at")),
                     succeededAtByEndpoint = decodeTimestamps(section.optJSONObject("succeeded_at")),
+                    failCountByEndpoint = decodeTimestamps(section.optJSONObject("fail_count"))
+                        .mapValues { it.value.coerceAtMost(1000L).toInt() },
                 )
             }.getOrDefault(AttemptOutcomes.EMPTY)
         }
@@ -943,17 +984,24 @@ class ProtonProfileStore(context: Context) {
             val current = decodeAttemptOutcomes(raw, networkClass)
             val failed = current.failedAtByEndpoint.toMutableMap()
             val succeeded = current.succeededAtByEndpoint.toMutableMap()
+            val counts = current.failCountByEndpoint.toMutableMap()
             if (success) {
                 failed.remove(key)
+                counts.remove(key)
                 succeeded[key] = atMs
             } else {
                 failed[key] = atMs
+                counts[key] = (counts[key] ?: 0) + 1
             }
+            // Счётчик живёт только у пар, чей отказ ещё записан: иначе он пережил бы
+            // вытеснение отметки из последних [OUTCOME_MEMORY_LIMIT] и копился вечно.
+            counts.keys.retainAll(failed.keys)
             root.put(
                 networkClass,
                 JSONObject()
                     .put("failed_at", encodeTimestamps(failed))
-                    .put("succeeded_at", encodeTimestamps(succeeded)),
+                    .put("succeeded_at", encodeTimestamps(succeeded))
+                    .put("fail_count", encodeTimestamps(counts.mapValues { it.value.toLong() })),
             )
             return root.toString()
         }
@@ -976,6 +1024,151 @@ class ProtonProfileStore(context: Context) {
                 .forEach { (key, at) -> json.put(key, at) }
             return json
         }
+
+        /**
+         * Итоги всех классов сети в одном виде: самые свежие отметки, наибольший счётчик.
+         *
+         * Для решений, где класс сети не важен: узел молчит целиком, а не «на Wi-Fi»
+         * (N35), и порт, на котором он однажды подключился, — лучший первый выбор и
+         * на другой сети. Очередь подключения этим не пользуется: ей нужен свой класс.
+         */
+        fun decodeAllOutcomes(raw: String?): AttemptOutcomes {
+            if (raw.isNullOrBlank()) return AttemptOutcomes.EMPTY
+            return runCatching {
+                val root = JSONObject(raw)
+                val failed = HashMap<String, Long>()
+                val succeeded = HashMap<String, Long>()
+                val counts = HashMap<String, Int>()
+                root.keys().forEach { networkClass ->
+                    val one = decodeAttemptOutcomes(raw, networkClass)
+                    one.failedAtByEndpoint.forEach { (k, v) -> failed.merge(k, v, ::maxOf) }
+                    one.succeededAtByEndpoint.forEach { (k, v) -> succeeded.merge(k, v, ::maxOf) }
+                    one.failCountByEndpoint.forEach { (k, v) -> counts.merge(k, v, ::maxOf) }
+                }
+                AttemptOutcomes(failed, succeeded, counts)
+            }.getOrDefault(AttemptOutcomes.EMPTY)
+        }
+
+        /**
+         * Что известно о портах одного адреса.
+         *
+         * @property workedPort порт, на котором узел подключался позже своего отказа
+         *           (самый свежий успех), или null.
+         * @property failedPorts порты со свежим непогашенным отказом.
+         */
+        data class PortHint(val workedPort: Int?, val failedPorts: Set<Int>)
+
+        /** Подсказки по портам, ключ — нормализованный адрес. */
+        fun portHints(outcomes: AttemptOutcomes, nowMs: Long): Map<String, PortHint> {
+            fun portOf(key: String): Int? = key.substringAfterLast(':', "").toIntOrNull()
+            val worked = HashMap<String, Pair<Int, Long>>()
+            outcomes.succeededAtByEndpoint.forEach { (key, at) ->
+                val port = portOf(key) ?: return@forEach
+                val failedAt = outcomes.failedAtByEndpoint[key] ?: 0L
+                if (at <= 0L || failedAt > at) return@forEach
+                val host = key.substringBeforeLast(':')
+                val best = worked[host]
+                if (best == null || at > best.second) worked[host] = port to at
+            }
+            val failedPorts = HashMap<String, MutableSet<Int>>()
+            outcomes.failedAtByEndpoint.forEach { (key, at) ->
+                val port = portOf(key) ?: return@forEach
+                if (at <= 0L || nowMs - at >= FAILURE_MEMORY_MS) return@forEach
+                if (at <= (outcomes.succeededAtByEndpoint[key] ?: 0L)) return@forEach
+                failedPorts.getOrPut(key.substringBeforeLast(':')) { HashSet() }.add(port)
+            }
+            val hosts = worked.keys + failedPorts.keys
+            return hosts.associateWith { PortHint(worked[it]?.first, failedPorts[it].orEmpty()) }
+        }
+
+        /**
+         * Порт для нового профиля узла.
+         *
+         * Раньше порт брался по месту узла в списке (`index % PORTS.size`), а место
+         * меняется с каждым обновлением списка: узел, подключавшийся на 443, получал
+         * после обновления 80, а молчавший порт возвращался как ни в чём не бывало.
+         * Теперь: (1) порт, на котором узел подключался; (2) иначе порт от стабильного
+         * хеша адреса, минуя порты со свежим отказом. Хеш, а не место: тот же узел
+         * получает тот же порт, пока тот не подвёл, и тогда сдвигается на следующий.
+         */
+        fun choosePort(host: String, hints: Map<String, PortHint>): Int {
+            val hint = hints[normalizeHost(host)]
+            hint?.workedPort?.let { return it }
+            val start = Math.floorMod(normalizeHost(host).hashCode(), PORTS.size)
+            val failed = hint?.failedPorts.orEmpty()
+            for (shift in PORTS.indices) {
+                val port = PORTS[(start + shift) % PORTS.size]
+                if (port !in failed) return port
+            }
+            return PORTS[start]
+        }
+
+        /**
+         * Отказы подряд у пар со свежим непогашенным отказом — по ним
+         * [attemptShape] выбирает вариант обфускации. Пара без такого отказа в
+         * карту не попадает (вариант 0, как сохранён).
+         */
+        fun failureCounts(outcomes: AttemptOutcomes, nowMs: Long): Map<String, Int> {
+            val out = HashMap<String, Int>()
+            outcomes.failedAtByEndpoint.forEach { (key, failedAt) ->
+                if (failedAt <= 0L || nowMs - failedAt >= FAILURE_MEMORY_MS) return@forEach
+                if (failedAt <= (outcomes.succeededAtByEndpoint[key] ?: 0L)) return@forEach
+                out[key] = (outcomes.failCountByEndpoint[key] ?: 1).coerceAtLeast(1)
+            }
+            return out
+        }
+
+        /** Параметры обфускации одной попытки: только Jc/Jmin/Jmax и I1 (S1/S2/H1-H4 — нельзя). */
+        data class AttemptShape(val junkCount: Int, val junkMin: Int, val junkMax: Int, val i1: String)
+
+        /**
+         * Вариант обфускации для очередной попытки той же пары.
+         *
+         * Одинаковый повтор против того же фильтра даёт тот же ответ: профиль хранит
+         * один I1 и одни параметры мусора. Равноправный пир — обычный WireGuard (S1/S2
+         * и H1-H4 он не разбирает, `kb/proton-generator.md`), поэтому меняются только
+         * `Jc/Jmin/Jmax` и `I1`; всё остальное остаётся константой.
+         *
+         * По числу отказов подряд [failures] (по кругу из четырёх):
+         * 0 — как сохранён; 1 — I1 с другим доменом из пула; 2 — без I1, мусор побольше;
+         * 3 — I1 с третьим доменом и тот же мусор побольше. Пока доменов нет, варианты
+         * 1 и 3 пересобирают I1 для домена профиля (новый DCID — другие байты).
+         *
+         * @param buildI1 сборка I1 по домену; параметр ради теста без шифрования.
+         */
+        fun attemptShape(
+            profile: ProtonProfile,
+            failures: Int,
+            sniPool: List<String>,
+            buildI1: (String) -> String = ProtonQuicInitial::buildI1,
+        ): AttemptShape {
+            val stored = AttemptShape(profile.junkCount, profile.junkMin, profile.junkMax, profile.i1)
+            val variant = failures.coerceAtLeast(0) % 4
+            if (variant == 0) return stored
+            val pool = sniPool.map { it.trim() }.filter { it.isNotEmpty() && !it.equals(profile.sni, true) }
+            fun domain(offset: Int): String {
+                if (pool.isEmpty()) return profile.sni
+                return pool[Math.floorMod(normalizeHost(profile.entryIp).hashCode() + offset, pool.size)]
+            }
+            return when (variant) {
+                1 -> domain(1).let { sni ->
+                    stored.copy(i1 = if (sni.isBlank()) "" else buildI1(sni).ifBlank { profile.i1 })
+                }
+                2 -> AttemptShape(JUNK_COUNT_HEAVY, JUNK_MIN_HEAVY, JUNK_MAX_HEAVY, "")
+                else -> domain(2).let { sni ->
+                    AttemptShape(
+                        JUNK_COUNT_HEAVY,
+                        JUNK_MIN_HEAVY,
+                        JUNK_MAX_HEAVY,
+                        if (sni.isBlank()) "" else buildI1(sni).ifBlank { profile.i1 },
+                    )
+                }
+            }
+        }
+
+        private const val JUNK_COUNT_HEAVY = 5
+        private const val JUNK_MIN_HEAVY = 10
+        private const val JUNK_MAX_HEAVY = 60
 
         /**
          * Порядок, в котором цикл подключения пробует профили Proton.
@@ -1200,6 +1393,8 @@ class ProtonProfileStore(context: Context) {
             profiles: List<ProtonProfile>,
             privateKeyBase64: String,
             preferredCountry: String = "",
+            failureCounts: Map<String, Int> = emptyMap(),
+            sniPool: List<String> = emptyList(),
         ): List<WarpVerifiedConfig> {
             if (privateKeyBase64.isBlank()) return emptyList()
             // `preferredCountry` больше не влияет на ранг и оставлен ради
@@ -1218,6 +1413,20 @@ class ProtonProfileStore(context: Context) {
             val ignoredPreferredCountry = preferredCountry
             return profiles.mapIndexed { index, profile ->
                 val rank = profile.pingMs.takeIf { it > 0 }?.toDouble() ?: 0.0
+                // Повтор пары, которая уже молчала, идёт в другой обфускации (см.
+                // [attemptShape]); id и порт те же, меняется только текст.
+                val failures = failureCounts[endpointKey(profile.entryIp, profile.port)] ?: 0
+                val shaped = if (failures > 0) {
+                    val shape = attemptShape(profile, failures, sniPool)
+                    profile.copy(
+                        junkCount = shape.junkCount,
+                        junkMin = shape.junkMin,
+                        junkMax = shape.junkMax,
+                        i1 = shape.i1,
+                    )
+                } else {
+                    profile
+                }
                 WarpVerifiedConfig(
                     id = "proton|${profile.entryIp}|${profile.port}",
                     engine = "wireguard",
@@ -1225,7 +1434,7 @@ class ProtonProfileStore(context: Context) {
                     host = profile.entryIp,
                     port = profile.port,
                     endpointSource = ENDPOINT_SOURCE,
-                    rawConfig = buildRawConfig(profile, privateKeyBase64),
+                    rawConfig = buildRawConfig(shaped, privateKeyBase64),
                     createdAt = profile.createdAt,
                     lastVerifiedAt = profile.createdAt,
                     seedOrder = index,

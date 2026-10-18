@@ -7,6 +7,14 @@ import org.junit.Test
 class OperaEndpointFeedTest {
 
     @Test
+    fun `feed keeps the AS region as is`() {
+        val parsed = OperaEndpointFeed.parseFeed("""{"regions": {"as": ["5.6.7.8:443"]}}""")
+
+        assertEquals(setOf("AS"), parsed.keys)
+        assertEquals(listOf("5.6.7.8:443"), parsed["AS"])
+    }
+
+    @Test
     fun `разбирает регионы и приводит US к AM`() {
         val parsed = OperaEndpointFeed.parseFeed(
             """

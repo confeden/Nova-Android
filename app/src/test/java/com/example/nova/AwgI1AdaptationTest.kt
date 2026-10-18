@@ -308,4 +308,46 @@ class AwgI1AdaptationTest {
         assertEquals(sipSeedI1, AwgI1Adaptation.preferredSharedMask(listOf("", sipSeedI1)))
         assertEquals("", AwgI1Adaptation.preferredSharedMask(listOf("", "  ")))
     }
+
+    @Test
+    fun `на сети негодные домены пропускаются`() {
+        // Ротация по счётчику 0 дала бы первое имя, но на этой сети оно уже подвело.
+        assertEquals(
+            "zakupki.gov.ru",
+            AwgI1Adaptation.nextSniForProfile(pool, adaptedSni = "", attempts = 0, avoid = setOf("www.gosuslugi.ru")),
+        )
+    }
+
+    @Test
+    fun `если пропустить пришлось бы всё, подбор не встаёт`() {
+        assertEquals(
+            "vk.com",
+            AwgI1Adaptation.nextSniForProfile(pool, adaptedSni = "", attempts = 2, avoid = pool.toSet()),
+        )
+    }
+
+    @Test
+    fun `запомненный для сети домен идёт раньше ротации`() {
+        assertEquals(
+            "vk.com",
+            AwgI1Adaptation.nextSniForProfile(pool, adaptedSni = "", attempts = 0, preferred = "vk.com"),
+        )
+        // Уже выданный профилю или негодный на сети — не предлагается повторно.
+        assertEquals(
+            "www.gosuslugi.ru",
+            AwgI1Adaptation.nextSniForProfile(pool, adaptedSni = "vk.com", attempts = 0, preferred = "vk.com"),
+        )
+        assertEquals(
+            "www.gosuslugi.ru",
+            AwgI1Adaptation.nextSniForProfile(pool, adaptedSni = "", attempts = 0, avoid = setOf("vk.com"), preferred = "vk.com"),
+        )
+    }
+
+    @Test
+    fun `шаг учитывает память сети`() {
+        val step = AwgI1Adaptation.decide(inputs().copy(preferredSni = "vk.com"))
+        assertEquals(AwgI1Adaptation.Step("b", "vk.com"), step)
+        val skipped = AwgI1Adaptation.decide(inputs().copy(avoidSni = setOf("www.gosuslugi.ru")))
+        assertEquals("zakupki.gov.ru", skipped?.sni)
+    }
 }

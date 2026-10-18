@@ -14,15 +14,11 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.drawable.BitmapDrawable
 import android.os.Build
-import android.os.SystemClock
 import android.util.AttributeSet
 import androidx.appcompat.widget.AppCompatImageView
-import kotlin.math.PI
-import kotlin.math.floor
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.pow
-import kotlin.math.sin
 
 /**
  * Фон главного экрана: раскрывается кругом от главной кнопки и, пока виден,
@@ -32,7 +28,7 @@ import kotlin.math.sin
  *
  * Владелец просил, чтобы фрактал не стоял картинкой, а плыл навстречу — как
  * погружение с центром там, откуда идут кольца подключения. Сделано бесконечным
- * приближением из двух слоёв: каждый растёт от 1× до 2× за [DIVE_CYCLE_MS]
+ * приближением из двух слоёв: каждый растёт от 1× до 2× за [DivePhase.CYCLE_SECONDS] (минуту)
  * (экспонентой, чтобы скорость полёта казалась ровной), второй сдвинут на
  * полцикла. Веса слоёв — sin² и cos² фазы, в сумме всегда единица, поэтому
  * яркость не мигает. Слой, дошедший до 2×, в этот момент невидим (его вес ноль) —
@@ -72,14 +68,23 @@ class BackdropRevealImageView @JvmOverloads constructor(
     private var diveEnabled = false
     private var diveOriginX = Float.NaN
     private var diveOriginY = Float.NaN
-    private var diveElapsedMs = 0L
-    private var diveLastFrameMs = 0L
+
+    /*
+     * Фаза погружения — это время общих часов ([NovaAnimationClock]), а не счётчик
+     * вида: тогда пауза, пересоздание вида и возврат попадают в ту же точку цикла.
+     * Слои хранятся с номером цикла, которому отвечают; устаревший слой остаётся
+     * запасным, пока не придёт новый. Его смена происходит, когда слой невидим
+     * (вес нуль), поэтому запасной слой на глаз не виден.
+     */
     private var diveCycleA = Int.MIN_VALUE
     private var diveCycleB = Int.MIN_VALUE
     private var diveLayerA: Bitmap? = null
     private var diveLayerB: Bitmap? = null
-    private var divePendingA: Bitmap? = null
-    private var divePendingB: Bitmap? = null
+    private var diveAskedA = Int.MIN_VALUE
+    private var diveAskedB = Int.MIN_VALUE
+
+    /** Меняется при смене картинки: ответы на старые заказы тогда отбрасываются. */
+    private var diveGeneration = 0
     private val divePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val diveDst = RectF()
     private val diveFrame = Runnable { invalidate() }
@@ -107,17 +112,9 @@ class BackdropRevealImageView @JvmOverloads constructor(
     fun setDiveEnabled(enabled: Boolean) {
         if (diveEnabled == enabled) return
         diveEnabled = enabled
-        // Пауза продолжает с той же фазы: отсчёт времени копится только в кадрах.
-        diveLastFrameMs = 0L
-        if (!enabled) {
-            removeCallbacks(diveFrame)
-            divePendingA = null
-            divePendingB = null
-            diveLayerA = null
-            diveLayerB = null
-            diveCycleA = Int.MIN_VALUE
-            diveCycleB = Int.MIN_VALUE
-        }
+        // Слои не сбрасываются: при возврате погружение продолжается с того же узора,
+        // а не падает на исходную картинку до следующего цикла.
+        if (!enabled) removeCallbacks(diveFrame)
         invalidate()
     }
 
@@ -134,10 +131,11 @@ class BackdropRevealImageView @JvmOverloads constructor(
         // новые придут для своей картинки.
         diveLayerA = null
         diveLayerB = null
-        divePendingA = null
-        divePendingB = null
         diveCycleA = Int.MIN_VALUE
         diveCycleB = Int.MIN_VALUE
+        diveAskedA = Int.MIN_VALUE
+        diveAskedB = Int.MIN_VALUE
+        diveGeneration++
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
@@ -149,14 +147,18 @@ class BackdropRevealImageView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         removeCallbacks(diveFrame)
-        diveLastFrameMs = 0L
+        (drawable as? NovaAppearanceDrawable)?.stopAnimation()
         super.onDetachedFromWindow()
     }
 
     override fun onWindowVisibilityChanged(visibility: Int) {
         super.onWindowVisibilityChanged(visibility)
-        diveLastFrameMs = 0L
-        if (visibility == VISIBLE) invalidate() else removeCallbacks(diveFrame)
+        if (visibility == VISIBLE) {
+            invalidate()
+        } else {
+            removeCallbacks(diveFrame)
+            (drawable as? NovaAppearanceDrawable)?.stopAnimation()
+        }
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -194,7 +196,46 @@ class BackdropRevealImageView @JvmOverloads constructor(
         canvas.restoreToCount(checkpoint)
     }
 
+    /**
+     * Останавливает живую анимацию, когда главный экран уходит с переднего плана:
+     * погружение и кадры дождя перестают заказываться.
+     */
+    fun pauseLiveAnimation() {
+        removeCallbacks(diveFrame)
+        (drawable as? NovaAppearanceDrawable)?.stopAnimation()
+    }
+
+    /** Возобновляет живую анимацию с того же места ([NovaAnimationClock]). */
+    fun resumeLiveAnimation() {
+        invalidate()
+    }
+
+    /**
+     * Погружение живого дождя: тот же приём, что у растровых слоёв, — два слоя
+     * одного и того же дождя, каждый растёт от 1× до 2× и смешивается по тем же
+     * весам. Слой на пике невидим, поэтому скачка при сбросе масштаба нет.
+     * Узоры не меняются: дождь по часам и так каждый раз новый.
+     */
+    private fun drawLiveDive(canvas: Canvas, live: NovaAppearanceDrawable) {
+        // На остановленных часах фаза стоит: кадр, нарисованный в паузе, её не двигает.
+        val t = DivePhase.time(NovaAnimationClock.now())
+        val phaseA = DivePhase.phaseOf(t, 0.0)
+        val phaseB = DivePhase.phaseOf(t, 0.5)
+        val weightB = DivePhase.weightB(phaseB)
+        val originX = if (diveOriginX.isNaN()) width / 2f else diveOriginX
+        val originY = if (diveOriginY.isNaN()) height * 0.43f else diveOriginY
+        val time = live.frameTime()
+        live.drawMatrixLayer(canvas, 2f.pow(phaseA), originX, originY, 255, time)
+        live.drawMatrixLayer(canvas, 2f.pow(phaseB), originX, originY, (weightB * 255f).toInt(), time)
+        live.requestNextRainFrame()
+    }
+
     private fun drawContent(canvas: Canvas) {
+        val live = drawable as? NovaAppearanceDrawable
+        if (diveEnabled && live != null && live.animated && animatorsEnabled()) {
+            drawLiveDive(canvas, live)
+            return
+        }
         val base = (drawable as? BitmapDrawable)?.bitmap
         // Картинка-заглушка 1×1 (чёрный фон без фактуры) погружаться не может.
         if (!diveEnabled || base == null || base.isRecycled || base.width < 8 || !animatorsEnabled()) {
@@ -202,42 +243,44 @@ class BackdropRevealImageView @JvmOverloads constructor(
             return
         }
 
-        val now = SystemClock.uptimeMillis()
-        if (diveLastFrameMs != 0L) diveElapsedMs += (now - diveLastFrameMs).coerceIn(0L, MAX_FRAME_STEP_MS)
-        diveLastFrameMs = now
-
-        val t = diveElapsedMs.toDouble() / DIVE_CYCLE_MS
-        val cycleA = floor(t).toInt()
-        val cycleB = floor(t + 0.5).toInt()
-        if (cycleA != diveCycleA) {
-            // Слой только что невидим (вес ноль): ставим узор, заказанный заранее,
-            // и заказываем следующий.
-            divePendingA?.let { diveLayerA = it }
-            divePendingA = null
-            diveCycleA = cycleA
-            requestDiveLayer(cycleA + 1, isLayerA = true)
-        }
-        if (cycleB != diveCycleB) {
-            divePendingB?.let { diveLayerB = it }
-            divePendingB = null
-            diveCycleB = cycleB
-            requestDiveLayer(cycleB + 1, isLayerA = false)
-        }
-        val phaseA = (t - floor(t)).toFloat()
-        val phaseB = (t + 0.5 - floor(t + 0.5)).toFloat()
-        val weightB = sin(PI.toFloat() * phaseB).let { it * it }
+        val t = DivePhase.time(NovaAnimationClock.now())
+        val cycleA = DivePhase.cycleOf(t)
+        val cycleB = DivePhase.cycleOf(t + 0.5)
+        val phaseA = DivePhase.phaseOf(t, 0.0)
+        val phaseB = DivePhase.phaseOf(t, 0.5)
+        val weightB = DivePhase.weightB(phaseB)
 
         val originX = if (diveOriginX.isNaN()) width / 2f else diveOriginX
         val originY = if (diveOriginY.isNaN()) height * 0.43f else diveOriginY
         // Слой A — непрозрачная основа, слой B ложится поверх с весом wB:
         // A·(1 − wB) + B·wB, а 1 − wB и есть вес A (sin² + cos² = 1).
-        drawDiveLayer(canvas, diveLayerA ?: base, phaseA, originX, originY, 255)
-        drawDiveLayer(canvas, diveLayerB ?: base, phaseB, originX, originY, (weightB * 255f).toInt())
+        drawDiveLayer(canvas, diveLayerFor(cycleA, isLayerB = false) ?: base, phaseA, originX, originY, 255)
+        drawDiveLayer(
+            canvas,
+            diveLayerFor(cycleB, isLayerB = true) ?: base,
+            phaseB,
+            originX,
+            originY,
+            (weightB * 255f).toInt(),
+        )
 
-        if (isAttachedToWindow && windowVisibility == VISIBLE && visibility == VISIBLE) {
+        // Кадры идут только на часах в ходу: на паузе фаза стоит и новый кадр не нужен.
+        if (isAttachedToWindow && windowVisibility == VISIBLE && visibility == VISIBLE &&
+            NovaAnimationClock.isRunning()
+        ) {
             removeCallbacks(diveFrame)
             postDelayed(diveFrame, FRAME_MS)
         }
+    }
+
+    /**
+     * Слой для номера цикла. Если его ещё нет, заказывает и отдаёт запасной —
+     * предыдущий слой (или `null`, тогда рисуется исходная картинка).
+     */
+    private fun diveLayerFor(cycle: Int, isLayerB: Boolean): Bitmap? {
+        val have = if (isLayerB) diveCycleB else diveCycleA
+        if (have != cycle) requestDiveLayer(cycle, isLayerB)
+        return if (isLayerB) diveLayerB else diveLayerA
     }
 
     private fun drawDiveLayer(
@@ -268,12 +311,23 @@ class BackdropRevealImageView @JvmOverloads constructor(
         canvas.restoreToCount(checkpoint)
     }
 
-    private fun requestDiveLayer(cycle: Int, isLayerA: Boolean) {
+    private fun requestDiveLayer(cycle: Int, isLayerB: Boolean) {
+        val asked = if (isLayerB) diveAskedB else diveAskedA
+        if (asked == cycle) return
+        if (isLayerB) diveAskedB = cycle else diveAskedA = cycle
         val supplier = diveBitmapSupplier ?: return
+        val generation = diveGeneration
         supplier(cycle) { bitmap ->
-            if (!diveEnabled) return@supplier
-            if (isLayerA && diveCycleA + 1 == cycle) divePendingA = bitmap
-            if (!isLayerA && diveCycleB + 1 == cycle) divePendingB = bitmap
+            // Ответ на заказ прежней картинки в этот вид уже не относится.
+            if (generation != diveGeneration) return@supplier
+            if (isLayerB) {
+                diveLayerB = bitmap
+                diveCycleB = cycle
+            } else {
+                diveLayerA = bitmap
+                diveCycleA = cycle
+            }
+            invalidate()
         }
     }
 
@@ -281,13 +335,7 @@ class BackdropRevealImageView @JvmOverloads constructor(
         Build.VERSION.SDK_INT < Build.VERSION_CODES.O || ValueAnimator.areAnimatorsEnabled()
 
     private companion object {
-        /** Один цикл слоя — приближение вдвое. Медленно: просили спокойное движение. */
-        const val DIVE_CYCLE_MS = 60_000.0
-
         /** ~30 кадров в секунду: глазу этого хватает, батарее — меньше работы. */
         const val FRAME_MS = 33L
-
-        /** Пропуск кадров (пауза, тяжёлый главный поток) не превращается в рывок. */
-        const val MAX_FRAME_STEP_MS = 100L
     }
 }

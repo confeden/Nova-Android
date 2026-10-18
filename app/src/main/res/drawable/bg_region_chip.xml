@@ -22,7 +22,7 @@
             <stroke
                 android:width="3dp"
                 android:color="#FFFFFFFF" />
-            <corners android:radius="18dp" />
+            <corners android:radius="100dp" />
         </shape>
     </item>
 
@@ -37,7 +37,7 @@
             <solid android:color="#3D0D1219" />
             <!-- Половина высоты кнопки (36dp) — то есть настоящий овал, а не
                  скруглённый прямоугольник. -->
-            <corners android:radius="18dp" />
+            <corners android:radius="100dp" />
         </shape>
     </item>
 
@@ -54,7 +54,7 @@
                 android:color="#2EFFFFFF" />
             <!-- Половина высоты кнопки (36dp) — то есть настоящий овал, а не
                  скруглённый прямоугольник. -->
-            <corners android:radius="18dp" />
+            <corners android:radius="100dp" />
         </shape>
     </item>
 </selector>

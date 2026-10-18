@@ -240,6 +240,20 @@ class NovaVpnService : OperaNativeVpnService() {
     private var pendingVlessProfileSwitch = false
 
     /**
+     * Поколение подключения, которому принадлежат флаги перебора VLESS.
+     *
+     * Отменённые прогоны (несколько запусков подряд при старте) выходят из `finally`
+     * позже живого и раньше сбрасывали за него `vlessRotationActive`: кнопка «следующий
+     * профиль» тогда уходила в REAPPLY, а он убивает процесс :vpn через tun2proxy_stop.
+     */
+    @Volatile
+    private var vlessRotationOwnerGeneration = -1
+
+    /** Профиль, на который просили перейти конкретно (а не «следующий»). */
+    @Volatile
+    private var vlessSwitchTargetLink: String? = null
+
+    /**
      * Порт SOCKS-инбаунда работающего ядра Xray, или -1.
      *
      * Через него наблюдается внешний адрес: это единственный путь наружу, который
@@ -875,9 +889,13 @@ class NovaVpnService : OperaNativeVpnService() {
          * перебора менял бы выбранный пользователем режим навсегда.
          */
         const val EXTRA_MANUAL_TRANSPORT_STEP = "manual_transport_step"
+
+        /** Ссылка профиля VLESS, на который надо перейти на ходу (тап по строке списка). */
+        const val EXTRA_VLESS_TARGET_LINK = "vless_target_link"
         const val MANUAL_STEP_MASQUE = "masque"
         const val MANUAL_STEP_OPERA_EU = "opera-eu"
         const val MANUAL_STEP_OPERA_US = "opera-us"
+        const val MANUAL_STEP_OPERA_AS = "opera-as"
         const val MANUAL_STEP_VLESS = "vless"
         const val ACTION_STOP_FOR_SOFT_RESTART = "STOP_FOR_SOFT_RESTART"
         const val ACTION_START_WARP_BOOTSTRAP = "START_WARP_BOOTSTRAP"
@@ -2018,10 +2036,13 @@ class NovaVpnService : OperaNativeVpnService() {
         }
 
         if (intent?.action == ACTION_SWITCH_VLESS_PROFILE) {
-            if (requestVlessProfileSwitchInPlace()) return START_STICKY
+            if (requestVlessProfileSwitchInPlace(intent.getStringExtra(EXTRA_VLESS_TARGET_LINK))) return START_STICKY
             // Перебор ещё не идёт — поднимаем сессию обычным путём, а следующий профиль
             // выбираем сами: экран живёт в другом процессе и порядок списка видит свой.
-            clientData.nextVlessProfileLink()?.let(clientData::setVlessConfigLink)
+            LogManager.log("VLESS: перебора нет (rotationActive=$vlessRotationActive), выбираем профиль и поднимаем сессию.")
+            intent.getStringExtra(EXTRA_VLESS_TARGET_LINK)?.trim()?.takeIf { it.isNotEmpty() }
+                ?.let(clientData::setVlessConfigLink)
+                ?: clientData.nextVlessProfileLink()?.let(clientData::setVlessConfigLink)
             return if (reapplyCurrentPreferences(intent)) START_STICKY else START_NOT_STICKY
         }
 
@@ -3902,9 +3923,10 @@ class NovaVpnService : OperaNativeVpnService() {
         val backend = currentBackendLabel.trim().uppercase(Locale.US)
         return when {
             backend.endsWith("-US") -> "us"
+            backend.endsWith("-AS") -> "as"
             backend.endsWith("-EU") -> "eu"
             else -> normalizeRegionPreference(clientData.getExitRegionPreference()).let {
-                if (it == "us" || it == "eu") it else "eu"
+                if (it == "us" || it == "eu" || it == "as") it else "eu"
             }
         }
     }
@@ -3913,6 +3935,7 @@ class NovaVpnService : OperaNativeVpnService() {
         val backend = currentBackendLabel.trim().uppercase(Locale.US)
         return when {
             backend.endsWith("-US") -> "AM"
+            backend.endsWith("-AS") -> "AS"
             backend.endsWith("-EU") -> "EU"
             else -> null
         }
@@ -4612,8 +4635,16 @@ class NovaVpnService : OperaNativeVpnService() {
             .orEmpty()
             .trim()
             .lowercase(Locale.US)
-        if (manualTransportStep == MANUAL_STEP_OPERA_EU || manualTransportStep == MANUAL_STEP_OPERA_US) {
-            val operaRegion = if (manualTransportStep == MANUAL_STEP_OPERA_US) "us" else "eu"
+        if (
+            manualTransportStep == MANUAL_STEP_OPERA_EU ||
+            manualTransportStep == MANUAL_STEP_OPERA_US ||
+            manualTransportStep == MANUAL_STEP_OPERA_AS
+        ) {
+            val operaRegion = when (manualTransportStep) {
+                MANUAL_STEP_OPERA_US -> "us"
+                MANUAL_STEP_OPERA_AS -> "as"
+                else -> "eu"
+            }
             LogManager.log(
                 "Ручной шаг перебора: поднимаем Opera ${operaRegion.uppercase(Locale.US)}. " +
                     "Выбранный режим ($regionPreference) не трогаем."
@@ -6516,7 +6547,11 @@ class NovaVpnService : OperaNativeVpnService() {
                     !it.manual &&
                     it.port in setOf(500, 1701, 4500, 443, 4443, 8443, 8095)
             }
-            val hasUserImportedWarpPreferred = clientData.getWarpVerifiedConfigs().any {
+            val hasUserImportedWarpPreferred = ImportedProfileRules.withoutDisabled(
+                clientData.getWarpVerifiedConfigs(),
+                { it.id },
+                clientData.disabledImportedProfileIds(),
+            ).any {
                 it.userImported && !it.manual && !it.engine.equals("masque", ignoreCase = true)
             }
             // Выбор «MASQUE» в списке регионов — это явное указание начать именно с
@@ -7588,7 +7623,7 @@ class NovaVpnService : OperaNativeVpnService() {
                     ImportedSourcePolicy.AUTO,
                     ignoreCase = true,
                 ) &&
-                clientData.getVlessProfileLinks().isNotEmpty()
+                clientData.enabledVlessProfileLinks().isNotEmpty()
             ) {
                 LogManager.log(
                     "Импортированные AWG перебраны и трафика не дали. " +
@@ -7792,7 +7827,7 @@ class NovaVpnService : OperaNativeVpnService() {
         delayMs: Long = 2600L,
     ): Boolean {
         val normalizedRegion = normalizeRegionPreference(regionPreference)
-        if (normalizedRegion != "eu" && normalizedRegion != "us") return false
+        if (normalizedRegion != "eu" && normalizedRegion != "us" && normalizedRegion != "as") return false
         if (isUserStopped || explicitStopRequested || cleanupInProgress.get()) return false
         if (!clientData.getAutoReconnect()) return false
         if (!isConnectGenerationCurrent(connectGenerationId)) return false
@@ -9114,8 +9149,14 @@ class NovaVpnService : OperaNativeVpnService() {
      * тогда рабочий профиль честно становится первым, а следующий за ним — вторым.
      */
     private fun runVlessPhase(clientData: ClientData, connectGenerationId: Int): Boolean {
-        var rotation = clientData.getVlessProfileLinks()
+        // Отключённые в списке профили в перебор не входят (ImportedProfileRules).
+        var rotation = clientData.enabledVlessProfileLinks()
             .mapNotNull { link -> VlessConfig.parse(link)?.let { link to it } }
+        if (rotation.isEmpty() && clientData.getVlessProfileLinks().isNotEmpty()) {
+            LogManager.log("VLESS выбран, но все профили отключены в списке импортированных.")
+            publishTransportNotice(clientData, "Все профили VLESS отключены.")
+            return false
+        }
         if (rotation.isEmpty()) {
             LogManager.log("VLESS выбран, но ни один профиль не разбирается.")
             publishTransportNotice(clientData, "Профиль VLESS не разобран.")
@@ -9142,6 +9183,8 @@ class NovaVpnService : OperaNativeVpnService() {
         LogManager.log("VLESS: перебор ${rotation.size} профилей, SOCKS5 на 127.0.0.1:$socksPort.")
 
         pendingVlessProfileSwitch = false
+        vlessSwitchTargetLink = null
+        vlessRotationOwnerGeneration = connectGenerationId
         vlessRotationActive = true
         vlessSocksPort = socksPort
         // Бюджет времени осмыслен только там, где есть куда уйти. В режиме «только
@@ -9149,6 +9192,9 @@ class NovaVpnService : OperaNativeVpnService() {
         // другое», а «выключаемся на середине списка».
         val fallbackAvailable = !clientData.isVlessOnlyTransportMode()
         val rejected = LinkedHashSet<String>()
+        // host:port отвергнутых в этом проходе узлов: в подписках по несколько ссылок
+        // на один сервер, и каждая стоила бы ещё шесть секунд ожидания зря.
+        val rejectedEndpoints = HashSet<String>()
         var tunnelUp = false
         var searchDeadline = SystemClock.elapsedRealtime() + VLESS_SEARCH_BUDGET_MS
         // Начинаем с активной записи, но идём по самому списку.
@@ -9169,6 +9215,10 @@ class NovaVpnService : OperaNativeVpnService() {
                 val (link, config) = rotation[cursor]
                 cursor = (cursor + 1) % rotation.size
                 tried++
+                if ("${config.host.lowercase(Locale.ROOT)}:${config.port}" in rejectedEndpoints) {
+                    rejected += link
+                    continue
+                }
                 // Номер — счётчик попыток этого прохода, а не место профиля в списке.
                 //
                 // Место в списке скакало: перебор стартует с сохранённой позиции
@@ -9193,6 +9243,7 @@ class NovaVpnService : OperaNativeVpnService() {
                 if (startError.isNotBlank()) {
                     XrayBridge.stop()
                     rejected += link
+                    rejectedEndpoints += "${config.host.lowercase(Locale.ROOT)}:${config.port}"
                     reportVlessProfileRejected(clientData, config, "ядро не приняло конфигурацию: $startError")
                     continue
                 }
@@ -9203,6 +9254,7 @@ class NovaVpnService : OperaNativeVpnService() {
                     // и наказывать его не за что.
                     if (pendingVlessProfileSwitch) continue
                     rejected += link
+                    rejectedEndpoints += "${config.host.lowercase(Locale.ROOT)}:${config.port}"
                     reportVlessProfileRejected(clientData, config, "узел не ответил")
                     continue
                 }
@@ -9221,7 +9273,7 @@ class NovaVpnService : OperaNativeVpnService() {
                 val demoted = clientData.demoteVlessProfileLinks(rejected.toList())
                 val promoted = clientData.promoteVlessProfileLink(link)
                 if (demoted || promoted) {
-                    rotation = clientData.getVlessProfileLinks()
+                    rotation = clientData.enabledVlessProfileLinks()
                         .mapNotNull { stored -> VlessConfig.parse(stored)?.let { stored to it } }
                         .ifEmpty { rotation }
                 }
@@ -9249,6 +9301,24 @@ class NovaVpnService : OperaNativeVpnService() {
                     // и туннель остаётся поднятым — меняется только ядро на том же порту.
                     // Курсор уже стоит на следующей записи, брать её и надо.
                     searchDeadline = SystemClock.elapsedRealtime() + VLESS_SEARCH_BUDGET_MS
+                    val target = vlessSwitchTargetLink
+                    vlessSwitchTargetLink = null
+                    if (target != null) {
+                        rotation.indexOfFirst { it.first == target }.takeIf { it >= 0 }?.let { cursor = it }
+                    } else {
+                        // Подписки держат по нескольку ссылок на один и тот же сервер (три на
+                        // farancenew…:8080): «следующий» по списку был тем же узлом, и кнопка
+                        // казалась мёртвой. Перешагиваем записи с тем же host:port.
+                        var skipped = 0
+                        while (skipped < rotation.size &&
+                            rotation[cursor].second.host.equals(config.host, ignoreCase = true) &&
+                            rotation[cursor].second.port == config.port
+                        ) {
+                            cursor = (cursor + 1) % rotation.size
+                            skipped++
+                        }
+                    }
+                    tried = 0
                     continue
                 }
                 // Новый круг даётся только за сессию, продержавшуюся заметное время.
@@ -9284,14 +9354,17 @@ class NovaVpnService : OperaNativeVpnService() {
             }
             return false
         } finally {
-            vlessRotationActive = false
-            pendingVlessProfileSwitch = false
-            vlessSocksPort = -1
-            clientData.clearTransportLatency()
+            if (vlessRotationOwnerGeneration == connectGenerationId) {
+                vlessRotationActive = false
+                pendingVlessProfileSwitch = false
+                vlessSwitchTargetLink = null
+                vlessSocksPort = -1
+                clientData.clearTransportLatency()
+            }
             // Наказание переживает выход из фазы: без этого сорванный проход возвращал
             // бы следующему циклу тот же список мёртвых записей в том же порядке.
             if (clientData.demoteVlessProfileLinks(rejected.toList())) {
-                clientData.getVlessProfileLinks().firstOrNull()?.let(clientData::setVlessConfigLink)
+                clientData.enabledVlessProfileLinks().firstOrNull()?.let(clientData::setVlessConfigLink)
             }
             if (!(currentState == STATE_CONNECTED && hasRecentSuccessfulTunnelProbe())) {
                 stopVlessTransport()
@@ -9309,10 +9382,14 @@ class NovaVpnService : OperaNativeVpnService() {
      * Возвращает false, если перебора нет: тогда вызывающая сторона поднимает сессию
      * обычным путём.
      */
-    private fun requestVlessProfileSwitchInPlace(): Boolean {
+    private fun requestVlessProfileSwitchInPlace(targetLink: String? = null): Boolean {
         if (!vlessRotationActive) return false
+        vlessSwitchTargetLink = targetLink?.trim()?.takeIf { it.isNotEmpty() }
         pendingVlessProfileSwitch = true
-        LogManager.log("VLESS: берём следующий профиль по кнопке, без разрыва туннеля.")
+        LogManager.log(
+            if (vlessSwitchTargetLink != null) "VLESS: переходим на выбранный профиль, без разрыва туннеля."
+            else "VLESS: берём следующий профиль по кнопке, без разрыва туннеля."
+        )
         return true
     }
 
@@ -10678,7 +10755,7 @@ class NovaVpnService : OperaNativeVpnService() {
 
     private fun handoffFromWarpBootstrapToOpera(clientData: ClientData, regionPreference: String) {
         val normalizedRegion = normalizeRegionPreference(regionPreference)
-        if (normalizedRegion != "eu" && normalizedRegion != "us") return
+        if (normalizedRegion != "eu" && normalizedRegion != "us" && normalizedRegion != "as") return
         LogManager.log("Opera endpoints получены через WARP-bootstrap. Мягко переключаемся на Opera ${normalizedRegion.uppercase(Locale.US)}.")
         clientData.clearOperaBootstrapViaWarpPending()
         operaBootstrapWarpGenerationId = -1
@@ -10692,7 +10769,7 @@ class NovaVpnService : OperaNativeVpnService() {
         reason: String,
     ): Boolean {
         val normalizedRegion = normalizeRegionPreference(clientData.getPendingOperaBootstrapViaWarpRegion())
-        if (normalizedRegion != "eu" && normalizedRegion != "us") {
+        if (normalizedRegion != "eu" && normalizedRegion != "us" && normalizedRegion != "as") {
             return false
         }
         LogManager.log(
@@ -10731,7 +10808,7 @@ class NovaVpnService : OperaNativeVpnService() {
         connectGenerationId: Int,
     ): Boolean {
         val normalizedRegion = normalizeRegionPreference(regionPreference)
-        if (normalizedRegion != "eu" && normalizedRegion != "us") return false
+        if (normalizedRegion != "eu" && normalizedRegion != "us" && normalizedRegion != "as") return false
         if (!isConnectGenerationCurrent(connectGenerationId) || isUserStopped) return false
         // Временный WARP — это другой протокол и другая страна выхода. В «Авто» такой
         // размен делает само приложение и он законен, при выбранном EU/US — нет:
@@ -10995,7 +11072,7 @@ class NovaVpnService : OperaNativeVpnService() {
         var lastHealthyAtMs = 0L
         var connectedAtMs = 0L
         val connectDeadline = SystemClock.elapsedRealtime() + when (operaLabel.uppercase()) {
-            "US" -> 26_000L
+            "US", "AS" -> 26_000L
             else -> 22_000L
         }
 
@@ -12605,6 +12682,8 @@ class NovaVpnService : OperaNativeVpnService() {
         // Счётчик берётся из отдельной карты, а не из записи: снятый подбор запись
         // удаляет, а число уже опробованных имён обязано пережить это.
         val triedCounts = clientData.getAwgI1AttemptCounts()
+        val networkKey = currentNetworkI1Key()
+        val networkMemory = clientData.getNetworkI1Memory()
         val profiles = clientData.getWarpVerifiedConfigs()
             .filter { clientData.isBundledSeed(it) && !it.engine.equals("masque", ignoreCase = true) }
             .map { config ->
@@ -12631,6 +12710,9 @@ class NovaVpnService : OperaNativeVpnService() {
                 // Сверху проверенные имена, дальше большой российский список —
                 // тот же порядок, что у маскировки SNI.
                 sniPool = clientData.getSniMaskPools().let { it.white + it.russia },
+                // Память сети: известно негодное пропускаем, лучшее для этой сети ставим первым.
+                avoidSni = networkKey?.let { NetworkI1Memory.demoted(networkMemory, it) }.orEmpty(),
+                preferredSni = networkKey?.let { NetworkI1Memory.best(networkMemory, it) },
             )
         ) ?: return
 
@@ -12720,6 +12802,59 @@ class NovaVpnService : OperaNativeVpnService() {
     }
 
     /**
+     * Что подставлено в `I1` профиля при последней сборке: (ключ сети тогда, домен).
+     *
+     * Итог попытки приходит позже и из другого места; без этой записи пришлось бы
+     * гадать, какой домен он подтверждает, и на какой сети — к концу попытки сеть уже
+     * могла смениться.
+     */
+    private val appliedNetworkI1 = ConcurrentHashMap<String, Pair<String?, String>>()
+
+    /**
+     * Ключ текущей сети для памяти подбора [NetworkI1Memory]; null — сеть опознать нечем.
+     * Разрешений не требует: имя Wi-Fi, если Android его не отдаёт, заменяет шлюз, а
+     * оператор берётся из `getNetworkOperator()`.
+     */
+    private fun currentNetworkI1Key(): String? = runCatching {
+        val connectivityManager = getSystemService(android.net.ConnectivityManager::class.java)
+        val network = selectUnderlyingNetwork(connectivityManager) ?: return@runCatching null
+        val caps = connectivityManager?.getNetworkCapabilities(network) ?: return@runCatching null
+        val networkClass = currentUnderlyingNetworkClass()
+        NetworkI1Memory.networkKey(
+            networkClass = networkClass,
+            wifiName = extractWifiSsidAndBssid(caps).first,
+            gateway = connectivityManager.getLinkProperties(network)?.routes
+                ?.firstOrNull { it.isDefaultRoute }
+                ?.gateway
+                ?.hostAddress
+                .orEmpty(),
+            operatorNumeric = if (networkClass == "cell") {
+                getSystemService(android.telephony.TelephonyManager::class.java)?.networkOperator.orEmpty()
+            } else {
+                ""
+            },
+        )
+    }.getOrNull()
+
+    /**
+     * Записывает в память сети итог попытки с тем доменом, что был подставлен в `I1`.
+     * Профиль без подставленного домена (из прошивки, SIP-семя, личный) не записывается.
+     */
+    private fun recordNetworkI1Outcome(
+        attempt: ConnectionAttempt,
+        clientData: ClientData,
+        success: Boolean,
+    ) {
+        val config = findMatchingWarpVerifiedConfigForAttempt(attempt, clientData) ?: return
+        val (networkKey, sni) = appliedNetworkI1.remove(config.id) ?: return
+        if (networkKey == null) return
+        clientData.recordNetworkI1Outcome(networkKey, sni, success)
+        LogManager.d(
+            "I1: сеть $networkKey, домен $sni — ${if (success) "прошёл" else "не прошёл"}, записано в память сети."
+        )
+    }
+
+    /**
      * Подставляет подобранный в фоне `I1` вместо зашитого в профиль.
      *
      * Только для встроенных семян: у профиля пользователя `I1` — его собственный
@@ -12732,8 +12867,32 @@ class NovaVpnService : OperaNativeVpnService() {
         config: WarpVerifiedConfig,
         clientData: ClientData,
     ): List<String> {
+        appliedNetworkI1.remove(config.id)
         if (!clientData.isBundledSeed(config)) return extras
-        val override = clientData.getAwgI1Overrides()[config.id] ?: return extras
+        val storedOverride = clientData.getAwgI1Overrides()[config.id]
+        val networkKey = currentNetworkI1Key()
+        // Запомненный для этой сети домен идёт раньше подбора по профилю, кроме одного
+        // случая: фоновый кандидат ждёт проверки именно этим подключением, и подменить
+        // его значит приписать итог чужому имени.
+        val pendingSni = clientData.getAwgI1Pending()[config.id]?.sni
+        val remembered = networkKey
+            ?.takeUnless { pendingSni != null && pendingSni == storedOverride?.sni }
+            ?.let { NetworkI1Memory.best(clientData.getNetworkI1Memory(), it) }
+        val rememberedI1 = remembered?.let { name ->
+            storedOverride?.takeIf { it.sni == name }?.i1 ?: ProtonQuicInitial.buildI1(name)
+        }?.takeIf { it.isNotBlank() }
+        val override = if (remembered != null && rememberedI1 != null) {
+            ClientData.AwgI1Override(
+                profileId = config.id,
+                sni = remembered,
+                i1 = rememberedI1,
+                updatedAt = storedOverride?.updatedAt ?: 0L,
+                attempts = storedOverride?.attempts ?: 0,
+            )
+        } else {
+            storedOverride ?: return extras
+        }
+        val usesRemembered = override !== storedOverride
         val firmwareI1 = extras.firstOrNull {
             it.substringBefore('=').trim().equals("I1", ignoreCase = true)
         }
@@ -12747,6 +12906,10 @@ class NovaVpnService : OperaNativeVpnService() {
                     "оставила бы профиль с QUIC-инициалом и ответом SIP в I2."
             )
             return extras
+        }
+        appliedNetworkI1[config.id] = networkKey to override.sni
+        if (usesRemembered) {
+            LogManager.log("I1: для этой сети применён запомненный домен ${override.sni}")
         }
         LogManager.log(
             "AWG I1 подобран для ${config.host}:${config.port}: домен ${override.sni}."
@@ -14837,6 +15000,20 @@ class NovaVpnService : OperaNativeVpnService() {
                     },
                     scope = verifiedConfigScope,
                 )
+                // Память подбора по сетям: домен, подставленный в `I1` этой попытки, и
+                // сеть, на которой он был подставлен. Порядок важен — ниже кандидат
+                // может быть снят. Отказ по ключу не в счёт: он не про домен.
+                runCatching {
+                    if (outcome == AttemptOutcome.SUCCESS || normalizedFailureReason != "access_denied") {
+                        recordNetworkI1Outcome(
+                            attempt = currentAttempt,
+                            clientData = clientData,
+                            success = outcome == AttemptOutcome.SUCCESS,
+                        )
+                    }
+                }.onFailure {
+                    LogManager.log("Не удалось записать память подбора I1 по сетям: ${it.message}")
+                }
                 // Тут же решается судьба фонового кандидата `I1`: попытка — это и есть
                 // то самое «следующее подключение», которым шаг обещал его проверить.
                 runCatching {
@@ -19750,7 +19927,9 @@ class NovaVpnService : OperaNativeVpnService() {
                 clientData.getWarpVerifiedExportSnapshot(scope) +
                 clientData.getWarpVerifiedConfigs(scope)
             ).distinctBy { it.id }
-        return withoutAvoidedColoEndpoints(all)
+        // Единственный пул подключения для WG/AWG: отключённые импортированные выпадают здесь.
+        val enabled = ImportedProfileRules.withoutDisabled(all, { it.id }, clientData.disabledImportedProfileIds())
+        return withoutAvoidedColoEndpoints(enabled)
     }
 
     /**
@@ -19921,6 +20100,17 @@ class NovaVpnService : OperaNativeVpnService() {
             // Именно поднимает: отбор опустошил бы её там, где узлов этой страны
             // не осталось, и «выбрал страну — перестал подключаться» было бы
             // честным следствием, но не тем, что просили.
+            //
+            // Пара, которая уже молчала, повторяется в другой обфускации
+            // (`ProtonProfileStore.attemptShape`): тот же I1 против того же фильтра
+            // даёт тот же ответ.
+            val failureCounts = runCatching {
+                ProtonProfileStore.failureCounts(
+                    store.readAttemptOutcomes(protonOutcomeNetworkClass()),
+                    System.currentTimeMillis(),
+                )
+            }.getOrDefault(emptyMap())
+            val sniPool = runCatching { clientData.getSniMaskPools().white }.getOrDefault(emptyList())
             ProtonProfileStore.toVerifiedConfigs(
                 ProtonProfileStore.orderByCountry(
                     store.readProfiles(),
@@ -19928,6 +20118,8 @@ class NovaVpnService : OperaNativeVpnService() {
                 ),
                 account.wireGuardPrivateKey,
                 clientData.getProtonCountryPreference(),
+                failureCounts,
+                sniPool,
             )
         }
         cachedProtonConfigs = configs
@@ -21144,6 +21336,10 @@ class NovaVpnService : OperaNativeVpnService() {
         // сейчас поднимет туннель и сам решит их судьбу. Откат при этом ведёт к
         // последнему подтверждённому состоянию, а не к чужому кандидату.
         val backgroundPending = clientData.getAwgI1Pending()
+        val networkKey = currentNetworkI1Key()
+        val networkMemory = clientData.getNetworkI1Memory()
+        val avoidOnNetwork = networkKey?.let { NetworkI1Memory.demoted(networkMemory, it) }.orEmpty()
+        val preferredOnNetwork = networkKey?.let { NetworkI1Memory.best(networkMemory, it) }
         val assigned = mutableListOf<AdaptationI1Candidate>()
         attempts.forEach { attempt ->
             val config = findMatchingWarpVerifiedConfigForAttempt(attempt, clientData) ?: return@forEach
@@ -21165,6 +21361,8 @@ class NovaVpnService : OperaNativeVpnService() {
                 pool = pool,
                 adaptedSni = previous?.sni.orEmpty(),
                 attempts = triedCounts[config.id] ?: previous?.attempts ?: 0,
+                avoid = avoidOnNetwork,
+                preferred = preferredOnNetwork,
             ) ?: return@forEach
             val i1 = ProtonQuicInitial.buildI1(sni)
             if (i1.isBlank()) {
@@ -21243,7 +21441,11 @@ class NovaVpnService : OperaNativeVpnService() {
         // В режиме «только импортированные» это значит, что встроенные профили брать
         // нельзя: пользователь просил свои, а кнопка адаптации подключалась мимо них.
         val importedSourceActive = clientData.isImportedConfigSourceActive()
-        val verifiedConfigs = clientData.getWarpVerifiedConfigs()
+        val verifiedConfigs = ImportedProfileRules.withoutDisabled(
+            clientData.getWarpVerifiedConfigs(),
+            { it.id },
+            clientData.disabledImportedProfileIds(),
+        )
             .filter { !it.manual }
             .filter {
                 if (importedSourceActive) {
@@ -21538,7 +21740,11 @@ class NovaVpnService : OperaNativeVpnService() {
         attempts: List<ConnectionAttempt>,
         clientData: ClientData,
     ): List<ConnectionAttempt> {
-        val verifiedConfigs = clientData.getWarpVerifiedConfigs()
+        val verifiedConfigs = ImportedProfileRules.withoutDisabled(
+            clientData.getWarpVerifiedConfigs(),
+            { it.id },
+            clientData.disabledImportedProfileIds(),
+        )
             .filter { !it.manual }
             .sortedWith(
                 compareByDescending<WarpVerifiedConfig> { clientData.getWarpVerifiedQualityTier(it) }
@@ -25284,7 +25490,7 @@ class NovaVpnService : OperaNativeVpnService() {
         // Источник профилей старше региона: в режиме импортированных экран настроек
         // показывает не регионы, а протоколы, и сменить регион пользователю нечем.
         if (ownProfileSourceChosen(clientData)) return true
-        return regionPreference != "eu" && regionPreference != "us"
+        return regionPreference != "eu" && regionPreference != "us" && regionPreference != "as"
     }
 
     private fun shouldAllowOperaTransport(
@@ -25303,6 +25509,7 @@ class NovaVpnService : OperaNativeVpnService() {
         return when (regionPreference) {
             "eu" -> listOf("EU" to "EU")
             "us" -> listOf("AM" to "US")
+            "as" -> listOf("AS" to "AS")
             "ru" -> emptyList()
             else -> listOf("EU" to "EU", "AM" to "US")
         }
@@ -27091,6 +27298,9 @@ class NovaVpnService : OperaNativeVpnService() {
             var ranked = ProtonProfileStore.expandPortFallbacks(
                 tcpOnly.sortedWith(byLatencyThenLoad) + silent.sortedBy { it.load },
                 ProtonProfileManager.PROFILE_LIMIT,
+                runCatching {
+                    ProtonProfileStore.portHints(store.readAllOutcomes(), System.currentTimeMillis())
+                }.getOrDefault(emptyMap()),
             )
 
             // Одно рукопожатие — в голову очереди, то есть в тот узел, с которого

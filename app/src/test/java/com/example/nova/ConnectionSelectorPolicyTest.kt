@@ -66,6 +66,8 @@ class ConnectionSelectorPolicyTest {
         val opera = ConnectionSelectorPolicy.ORDER.indexOf(ConnectionSelectorPolicy.CHIP_OPERA)
         assertEquals(opera, ConnectionSelectorPolicy.indexOf("eu"))
         assertEquals(opera, ConnectionSelectorPolicy.indexOf("us"))
+        assertEquals(opera, ConnectionSelectorPolicy.indexOf("as"))
+        assertEquals("as", ConnectionSelectorPolicy.storedValueForChip("opera", "as"))
         assertEquals("us", ConnectionSelectorPolicy.storedValueForChip("opera", "us"))
         assertEquals("eu", ConnectionSelectorPolicy.storedValueForChip("opera", "eu"))
         // Незнакомый подрегион — это EU, а не пустая строка: пустую службу не
@@ -81,7 +83,7 @@ class ConnectionSelectorPolicyTest {
     @Test
     fun `sub regions exist only for opera, proton and tor`() {
         assertEquals(
-            listOf("eu" to "EU", "us" to "US"),
+            listOf("eu" to "EU", "us" to "US", "as" to "AS"),
             ConnectionSelectorPolicy.subRegionsFor("opera", emptyList()),
         )
         // «AUTO» — своя кнопка, а не отметка на первой стране: пустое
@@ -261,7 +263,7 @@ class ConnectionSelectorPolicyTest {
 
     @Test
     fun `an unreachable stored choice is rewritten, a reachable one is not`() {
-        for (region in listOf("eu", "us")) {
+        for (region in listOf("eu", "us", "as")) {
             assertEquals(
                 region,
                 "auto",

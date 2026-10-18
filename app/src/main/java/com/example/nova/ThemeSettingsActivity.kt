@@ -76,10 +76,6 @@ class ThemeSettingsActivity : AppCompatActivity() {
         buildTextureChips()
         setupTemperature()
 
-        findViewById<Button>(R.id.btn_appearance_apply).let { button ->
-            NovaDialogs.styleButton(button, primary = true)
-            button.setOnClickListener { applySelection() }
-        }
         findViewById<Button>(R.id.btn_temperature_default).let { button ->
             NovaDialogs.styleButton(button, primary = false)
             button.setOnClickListener {
@@ -89,6 +85,18 @@ class ThemeSettingsActivity : AppCompatActivity() {
         }
 
         NovaFontHelper.apply(findViewById(android.R.id.content))
+        if (savedScrollY > 0) {
+            val scroll = findViewById<android.widget.ScrollView>(R.id.sv_theme_scroll)
+            val target = savedScrollY
+            savedScrollY = 0
+            scroll?.viewTreeObserver?.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
+                override fun onPreDraw(): Boolean {
+                    scroll.viewTreeObserver.removeOnPreDrawListener(this)
+                    scroll.scrollTo(0, target)
+                    return true
+                }
+            })
+        }
     }
 
     override fun onDestroy() {
@@ -180,10 +188,8 @@ class ThemeSettingsActivity : AppCompatActivity() {
     }
 
     /**
-     * Показывает выбор, ничего не сохраняя.
-     *
-     * Незаданные здесь значения берутся из текущего предпросмотра, а не из
-     * сохранённого: иначе выбор темы сбрасывал бы уже выбранную фактуру.
+     * Применяет выбор сразу: записывает и пересоздаёт экран. Кнопки «Применить»
+     * больше нет. Незаданные значения берутся из сохранённого.
      */
     private fun previewWith(
         theme: String = currentThemeKey(),
@@ -191,24 +197,18 @@ class ThemeSettingsActivity : AppCompatActivity() {
         temperature: Int = NovaAppearance.temperature(this),
         variant: Int = NovaAppearance.variant(this),
     ) {
-        NovaAppearance.preview(theme, texture, temperature, variant)
-        recreate()
-    }
-
-    private fun applySelection() {
-        val theme = currentThemeKey()
-        val texture = NovaAppearance.texture(this)
-        val temperature = NovaAppearance.temperature(this)
-        val variant = NovaAppearance.variant(this)
-        // `store` снимает предпросмотр сам: дальше действуют сохранённые значения,
-        // и `onDestroy` снимать уже нечего.
         NovaAppearance.store(this, theme, texture, temperature, variant)
-        applied = true
         LogManager.log(
             "Оформление: тема ${NovaTheme.optionFor(theme).title}, фактура ${texture.title}, " +
                 "температура $temperature."
         )
-        finish()
+        // Пересоздание поднимало страницу наверх: запоминаем позицию прокрутки.
+        savedScrollY = findViewById<android.widget.ScrollView>(R.id.sv_theme_scroll)?.scrollY ?: 0
+        recreate()
     }
 
+    companion object {
+        /** Позиция прокрутки на время пересоздания экрана. */
+        private var savedScrollY = 0
+    }
 }

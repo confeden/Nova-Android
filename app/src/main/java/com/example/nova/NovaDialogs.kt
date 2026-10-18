@@ -39,6 +39,8 @@ object NovaDialogs {
     fun style(dialog: Dialog) {
         // Перевод — первым: ширину кнопок ниже считают по уже переведённым подписям.
         NovaLanguage.watchWindow(dialog.window)
+        // Шрифт темы — до измерения кнопок: ширина ряда считается по подписям.
+        dialog.window?.decorView?.let { NovaFontHelper.apply(it) }
         apply(dialog.findViewById(android.R.id.button1), primary = true)
         apply(dialog.findViewById(android.R.id.button2), primary = false)
         apply(dialog.findViewById(android.R.id.button3), primary = false)

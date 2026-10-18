@@ -193,6 +193,9 @@ class FrostOverlayView @JvmOverloads constructor(
             areAnimatorsGloballyEnabled()
     }
 
+    private fun freshSeed(x: Float, y: Float): Long =
+        System.nanoTime() xor (x.toLong() * 73856093L) xor (y.toLong() * 19349663L)
+
     /** Касания проходят насквозь: это украшение, а не элемент управления. */
     override fun onTouchEvent(event: android.view.MotionEvent?): Boolean = false
 
@@ -202,13 +205,24 @@ class FrostOverlayView @JvmOverloads constructor(
      * @param durationMs сколько идёт намерзание. Постепенность здесь — смысл, а
      *        не украшение: мгновенная заливка читается как сбой отрисовки.
      */
-    fun freezeFrom(x: Float, y: Float, durationMs: Long = DEFAULT_FREEZE_MS) {
+    fun freezeFrom(
+        x: Float,
+        y: Float,
+        durationMs: Long = DEFAULT_FREEZE_MS,
+        seedKey: String? = null,
+        reuseSeed: Boolean = false,
+    ) {
         originX = x
         originY = y
-        // Зерно новое на каждую заморозку: просили, чтобы узор каждый раз был
-        // свой. Привязка к точке нажатия давала ровно обратное — с одной и той
-        // же кнопки рисовался один и тот же лёд.
-        seed = System.nanoTime() xor (x.toLong() * 73856093L) xor (y.toLong() * 19349663L)
+        // Зерно новое на каждую заморозку по нажатию: просили, чтобы узор каждый
+        // раз был свой. Повторное появление льда без нажатия (возврат на экран,
+        // пересоздание вида) берёт сохранённое по [seedKey] зерно — иначе лёд
+        // перерисовывался бы иначе на каждом возврате.
+        seed = if (seedKey == null) {
+            freshSeed(x, y)
+        } else {
+            NovaAnimationMemory.frostSeed(seedKey, reuseSeed) { freshSeed(x, y) }
+        }
         built = false
         rebuildIfNeeded()
         animator?.cancel()
@@ -909,6 +923,10 @@ class FrostOverlayView @JvmOverloads constructor(
          * Намерзание идёт медленно намеренно: просили, чтобы холод именно
          * расползался. Две секунды читались как заливка, а не как движение.
          */
+        /** Ключи зёрен льда по экранам: повторное появление без нажатия берёт прежнее зерно. */
+        const val SEED_MAIN_DNS = "main-dns"
+        const val SEED_SETTINGS_DNS = "settings-dns"
+
         const val DEFAULT_FREEZE_MS = 5200L
         const val DEFAULT_THAW_MS = 620L
 

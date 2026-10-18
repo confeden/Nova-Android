@@ -92,44 +92,52 @@
                 android:text="Пока некуда: включите точку доступа, USB-модем или подключитесь к общей сети Wi-Fi."
                 android:textColor="?attr/novaTextHint"
                 android:textSize="13sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="?attr/novaCardBackground"
+            android:orientation="vertical"
+            android:padding="12dp">
 
             <TextView
-                android:id="@+id/tv_portal_url"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="14dp"
+                android:text="Устройства с WireGuard"
+                android:textColor="?attr/novaTextTitle"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="Для ПК, Mac, телефонов и приставок, где есть WireGuard: весь трафик устройства, вместе с UDP и DNS, пойдёт через VPN этого телефона, без настройки прокси. Нажмите «Добавить устройство» и отсканируйте QR или вставьте конфиг в WireGuard."
+                android:textColor="?attr/novaTextHint"
+                android:textSize="13sp" />
+
+            <LinearLayout
+                android:id="@+id/container_wg_devices"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:orientation="vertical" />
+
+            <TextView
+                android:id="@+id/btn_wg_add_device"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_settings_action_green"
                 android:clickable="true"
                 android:focusable="true"
-                android:text="Страница настройки: —"
-                android:textColor="?attr/novaTextTitle"
-                android:textSize="14sp" />
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:text="Откройте этот адрес в браузере подключённого устройства — там пошаговая инструкция для Windows, macOS, iOS, Android и Android TV."
-                android:textColor="?attr/novaTextHint"
-                android:textSize="12sp" />
-
-            <TextView
-                android:id="@+id/tv_pac_url"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:clickable="true"
-                android:focusable="true"
-                android:text="PAC: —"
-                android:textColor="?attr/novaTextTitle"
-                android:textSize="14sp" />
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:text="Для полей «Автоматическая настройка прокси»."
-                android:textColor="?attr/novaTextHint"
-                android:textSize="12sp" />
+                android:gravity="center"
+                android:text="Добавить устройство"
+                android:textColor="?attr/novaAccentOn"
+                android:textSize="15sp"
+                android:textStyle="bold" />
         </LinearLayout>
 
         <LinearLayout
@@ -229,7 +237,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
-                android:text="Пока выключено, при отсутствии туннеля Nova честно отвечает клиенту ошибкой. Если включить, интернет у клиентов продолжит работать даже без VPN — но пойдёт открыто, со своим обычным адресом."
+                android:text="Если выключить, при отсутствии туннеля Nova честно отвечает клиенту ошибкой. Пока включено, интернет у клиентов работает даже без VPN — но идёт открыто, со своим обычным адресом."
                 android:textColor="?attr/novaTextHint"
                 android:textSize="12sp" />
         </LinearLayout>
@@ -254,7 +262,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:text="Прокси переносит только TCP. Мимо туннеля пойдут: онлайн-игры, звонки и видеосвязь (UDP); QUIC и HTTP/3; системные DNS-запросы программ, не использующих прокси; программы, игнорирующие системную настройку прокси — торренты, часть игр и утилит. Локальная сеть остаётся доступна напрямую намеренно.\n\nЧтобы через VPN шло совершенно всё, на самом устройстве нужен VPN-клиент. Раздача без root на это не способна ни у одного приложения — это ограничение Android."
+                android:text="Через прокси идёт только TCP. Мимо туннеля пойдут: онлайн-игры, звонки и видеосвязь (UDP); QUIC и HTTP/3; системные DNS-запросы программ, не использующих прокси; программы, игнорирующие системную настройку прокси — торренты, часть игр и утилит. Локальная сеть остаётся доступна напрямую намеренно.\n\nЕсли на устройстве есть WireGuard, добавьте его выше: тогда через VPN пойдёт всё, включая UDP, звонки и DNS. Прозрачной раздачи без клиента на устройстве Android без root не позволяет."
                 android:textColor="?attr/novaTextHint"
                 android:textSize="12sp" />
         </LinearLayout>

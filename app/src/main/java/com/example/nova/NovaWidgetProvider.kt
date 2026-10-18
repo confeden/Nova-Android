@@ -6,7 +6,15 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.LinearGradient
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.Shader
 import android.os.Build
+import android.view.ContextThemeWrapper
 import android.widget.RemoteViews
 
 /**
@@ -74,11 +82,78 @@ class NovaWidgetProvider : AppWidgetProvider() {
                 NovaLanguage.tr(context, "Подключить или отключить Nova"),
             )
             setContentDescription(R.id.widget_btn_next, NovaLanguage.tr(context, "Следующий профиль"))
+            // Рамка и кнопка «след. профиль» красятся цветами выбранной темы; смена
+            // темы в настройках перерисовывает уже стоящие на столе виджеты.
+            runCatching {
+                val themed = ContextThemeWrapper(
+                    context.applicationContext,
+                    NovaTheme.optionFor(NovaTheme.current(context)).styleRes,
+                )
+                val accent = NovaTheme.color(themed, R.attr.novaAccent)
+                val dim = NovaTheme.color(themed, R.attr.novaAccentDim)
+                setImageViewBitmap(R.id.widget_frame_img, frameBitmap(accent, dim))
+                setImageViewBitmap(R.id.widget_btn_next, nextButtonBitmap(context, accent))
+            }.onFailure { LogManager.log("Виджет: не удалось применить тему: ${it.message}") }
             setOnClickPendingIntent(
                 R.id.widget_btn_next,
                 buildSelfPendingIntent(context, ACTION_NEXT_PROFILE, 7102),
             )
         }
+    }
+
+    private fun mix(a: Int, b: Int, t: Float): Int = Color.argb(
+        255,
+        (Color.red(a) + (Color.red(b) - Color.red(a)) * t).toInt(),
+        (Color.green(a) + (Color.green(b) - Color.green(a)) * t).toInt(),
+        (Color.blue(a) + (Color.blue(b) - Color.blue(a)) * t).toInt(),
+    )
+
+    /** Градиентная обводка рамки; плотность 640 держит собственный размер малым. */
+    private fun frameBitmap(accent: Int, dim: Int): Bitmap {
+        val w = 240
+        val h = 135
+        val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        bitmap.density = 640
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 4.5f
+            shader = LinearGradient(
+                0f, 0f, w.toFloat(), h.toFloat(),
+                intArrayOf(accent, mix(accent, Color.WHITE, 0.4f), dim, accent),
+                floatArrayOf(0f, 0.33f, 0.68f, 1f),
+                Shader.TileMode.CLAMP,
+            )
+        }
+        Canvas(bitmap).drawRoundRect(RectF(2.25f, 2.25f, w - 2.25f, h - 2.25f), 32f, 32f, paint)
+        return bitmap
+    }
+
+    /** Круг «следующий профиль» цвета темы со значком из ресурса. */
+    private fun nextButtonBitmap(context: Context, accent: Int): Bitmap {
+        val size = 144
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        bitmap.density = 480
+        val canvas = Canvas(bitmap)
+        val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            shader = LinearGradient(
+                0f, 0f, 0f, size.toFloat(),
+                mix(accent, Color.WHITE, 0.15f), mix(accent, Color.BLACK, 0.6f),
+                Shader.TileMode.CLAMP,
+            )
+        }
+        val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 4.5f
+            color = mix(accent, Color.WHITE, 0.55f)
+        }
+        val r = size / 2f
+        canvas.drawCircle(r, r, r - 2.25f, fill)
+        canvas.drawCircle(r, r, r - 2.25f, stroke)
+        androidx.core.content.ContextCompat.getDrawable(context, R.drawable.ic_widget_next)?.let {
+            it.setBounds(39, 39, size - 39, size - 39)
+            it.draw(canvas)
+        }
+        return bitmap
     }
 
     private fun buildSelfPendingIntent(context: Context, action: String, requestCode: Int): PendingIntent {

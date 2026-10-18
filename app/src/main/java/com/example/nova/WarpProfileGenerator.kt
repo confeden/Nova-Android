@@ -148,7 +148,7 @@ object WarpProfileGenerator {
             }
 
             publish(appContext, STATE_RUNNING, "WARP: ищу точки входа", 0, TARGET_COUNT)
-            val scanned = diversify(collectVerified(identity).sortedBy { it.rttMs })
+            val scanned = diversify(collectVerified(identity, appContext).sortedBy { it.rttMs })
             if (scanned.isEmpty()) {
                 LogManager.log(
                     "WARP-генератор: сканер не нашёл ни одной точки входа за ${SCAN_TIMEOUT_MS / 1000} с. " +
@@ -317,8 +317,51 @@ object WarpProfileGenerator {
      * Второй проход — только если проверенных мало: он стоит ещё [SCAN_TIMEOUT_MS],
      * и платить эту цену там, где и одного прохода хватило, незачем.
      */
-    private fun collectVerified(identity: WarpGeneratedStore.Identity): List<Endpoint> {
-        val first = scanEndpoints(identity)
+    /**
+     * Живая подпись под время сканирования.
+     *
+     * Сканер — один вызов в ядре на 45 секунд без промежуточных ответов, и надпись
+     * «ищу точки входа» всё это время стояла неподвижно, как зависшая. Здесь поток
+     * раз в 700 мс переписывает сообщение: этап по доле срока, секунды и бегущие
+     * точки. Этапы условные — они показывают, что идёт работа и сколько осталось
+     * до предела, а не внутренний счёт сканера.
+     */
+    private fun <T> withScanTicker(context: Context, pass: Int, passes: Int, block: () -> T): T {
+        val startedAt = System.currentTimeMillis()
+        val alive = java.util.concurrent.atomic.AtomicBoolean(true)
+        val ticker = Thread({
+            var tick = 0
+            while (alive.get()) {
+                val elapsedMs = System.currentTimeMillis() - startedAt
+                val share = (elapsedMs.toFloat() / SCAN_TIMEOUT_MS).coerceIn(0f, 1f)
+                val stage = when {
+                    share < 0.15f -> "рассылаю пробные рукопожатия"
+                    share < 0.55f -> "жду ответы точек входа"
+                    share < 0.9f -> "проверяю найденные точки"
+                    else -> "добираю последние ответы"
+                }
+                val dots = ".".repeat(tick % 4)
+                val passText = if (passes > 1) "проход $pass из $passes · " else ""
+                publish(
+                    context, STATE_RUNNING,
+                    "WARP: ищу точки входа — $passText$stage$dots (${elapsedMs / 1000} с из ${SCAN_TIMEOUT_MS / 1000})",
+                    0, TARGET_COUNT,
+                )
+                tick++
+                try { Thread.sleep(700) } catch (_: InterruptedException) { return@Thread }
+            }
+        }, "warp-scan-ticker").apply { isDaemon = true }
+        ticker.start()
+        try {
+            return block()
+        } finally {
+            alive.set(false)
+            ticker.interrupt()
+        }
+    }
+
+    private fun collectVerified(identity: WarpGeneratedStore.Identity, context: Context): List<Endpoint> {
+        val first = withScanTicker(context, 1, 1) { scanEndpoints(identity) }
         val verified = first.filter { it.rttMs > 0 }
         val padded = first.size - verified.size
         if (padded > 0) {
@@ -332,7 +375,7 @@ object WarpProfileGenerator {
             "WARP-генератор: проверенных точек ${verified.size}, это меньше $ENOUGH_VERIFIED — " +
                 "идём вторым проходом."
         )
-        val second = scanEndpoints(identity).filter { it.rttMs > 0 }
+        val second = withScanTicker(context, 2, 2) { scanEndpoints(identity) }.filter { it.rttMs > 0 }
         // Объединение, а не пересечение: сканер обходит префиксы случайно, и два
         // прохода находят во многом разные адреса — пересечение было бы почти
         // пустым. У повторившихся берём лучшее время.

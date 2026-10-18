@@ -22,14 +22,14 @@ class ProfileIssueLabelsTest {
     @Test
     fun `kindFor returns PROTON for proton and whenever preparation is requested`() {
         assertEquals(Kind.PROTON, ProfileIssueLabels.kindFor("proton", protonPreparationRequested = false))
-        for (region in listOf("auto", "ru", "masque", "eu", "us", "vless", "tor", "unknown", null)) {
+        for (region in listOf("auto", "ru", "masque", "eu", "us", "as", "vless", "tor", "unknown", null)) {
             assertEquals(Kind.PROTON, ProfileIssueLabels.kindFor(region, protonPreparationRequested = true))
         }
     }
 
     @Test
     fun `kindFor returns NONE for unsupported regions`() {
-        for (region in listOf("eu", "us", "vless", "tor")) {
+        for (region in listOf("eu", "us", "as", "vless", "tor")) {
             assertEquals(Kind.NONE, ProfileIssueLabels.kindFor(region, protonPreparationRequested = false))
         }
     }

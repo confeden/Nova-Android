@@ -774,7 +774,7 @@ class SettingsActivity : AppCompatActivity() {
 
             } else {
 
-                runManualUpdateCheck()
+                showDownloadSourceDialog()
 
             }
 
@@ -3177,7 +3177,13 @@ class SettingsActivity : AppCompatActivity() {
         )
         overlay.post {
             overlay.setClearZones(emptyList())
-            overlay.freezeFrom(overlay.width / 2f, overlay.height / 2f, durationMs = 1L)
+            overlay.freezeFrom(
+                overlay.width / 2f,
+                overlay.height / 2f,
+                durationMs = 1L,
+                seedKey = FrostOverlayView.SEED_SETTINGS_DNS,
+                reuseSeed = true,
+            )
         }
     }
 
@@ -3693,6 +3699,8 @@ class SettingsActivity : AppCompatActivity() {
             "eu" -> "OPERA EU"
 
             "us" -> "OPERA US"
+
+            "as" -> "OPERA AS"
 
             "ru" -> "WARP"
 
@@ -4775,7 +4783,9 @@ class SettingsActivity : AppCompatActivity() {
 
                 generatedCloudflareProfilesExist = exists
 
-                val running = progress.state == WarpProfileGenerator.STATE_RUNNING
+                val running = progress.state == WarpProfileGenerator.STATE_RUNNING &&
+                    progress.atMs > 0L &&
+                    System.currentTimeMillis() - progress.atMs < 120_000L
 
                 if (running) warpGenerateRequestedAtMs = 0L
 
@@ -5081,7 +5091,7 @@ class SettingsActivity : AppCompatActivity() {
      */
     private fun openDownloadPage() {
 
-        val link = "https://nova-app.eu/download/#nova-android"
+        val link = "https://nova-app.eu/dl/nova-android"
 
         try {
 
@@ -5102,6 +5112,22 @@ class SettingsActivity : AppCompatActivity() {
     }
 
 
+
+    /** Выбор источника: страница на сайте или проверка и загрузка с GitHub. */
+    private fun showDownloadSourceDialog() {
+        android.app.AlertDialog.Builder(this)
+            .setTitle(NovaLanguage.tr(this, "Скачать последнюю версию"))
+            .setItems(
+                arrayOf(
+                    NovaLanguage.tr(this, "С сайта"),
+                    NovaLanguage.tr(this, "С GitHub"),
+                )
+            ) { _, which ->
+                if (which == 0) openDownloadPage() else runManualUpdateCheck()
+            }
+            .setNegativeButton(NovaLanguage.tr(this, "Отмена"), null)
+            .show()
+    }
 
     private fun runManualUpdateCheck() {
 
@@ -5380,7 +5406,7 @@ class SettingsActivity : AppCompatActivity() {
 
             isOperaBackend -> ClientData.TRAFFIC_MASK_POOL_GLOBAL
 
-            regionPreference == "eu" || regionPreference == "us" -> ClientData.TRAFFIC_MASK_POOL_GLOBAL
+            regionPreference == "eu" || regionPreference == "us" || regionPreference == "as" -> ClientData.TRAFFIC_MASK_POOL_GLOBAL
 
             else -> ClientData.TRAFFIC_MASK_POOL_RUSSIA
 

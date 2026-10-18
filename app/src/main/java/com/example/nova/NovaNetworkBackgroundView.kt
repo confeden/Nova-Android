@@ -17,11 +17,17 @@ class NovaNetworkBackgroundView @JvmOverloads constructor(
     defStyleAttr: Int = 0,
 ) : View(context, attrs, defStyleAttr) {
 
+    /**
+     * Узел. Положение не копится по кадрам: оно считается от домашней точки по
+     * времени общих часов ([syncNodes]), поэтому пауза и пересоздание вида не сдвигают его.
+     */
     private data class Node(
         var x: Float,
         var y: Float,
-        var vx: Float,
-        var vy: Float,
+        val homeX: Float,
+        val homeY: Float,
+        val vx: Float,
+        val vy: Float,
         val radius: Float,
         val phase: Float,
     )
@@ -45,7 +51,6 @@ class NovaNetworkBackgroundView @JvmOverloads constructor(
     }
     private val trianglePath = Path()
     private var frameScheduled = false
-    private var lastFrameMs = 0L
     private var phaseSeconds = 0f
     private val targetFrameDelayMs = 42L
 
@@ -112,11 +117,9 @@ class NovaNetworkBackgroundView @JvmOverloads constructor(
         override fun run() {
             frameScheduled = false
             if (!supported || visibility != VISIBLE || !isAttachedToWindow) return
-            val now = android.os.SystemClock.uptimeMillis()
-            val deltaMs = if (lastFrameMs > 0L) (now - lastFrameMs).coerceIn(16L, 80L) else targetFrameDelayMs
-            lastFrameMs = now
-            updateNodes(deltaMs / 16.666f)
-            phaseSeconds = (phaseSeconds + deltaMs / 1000f) % 4096f
+            // Часы на паузе: движение стоит и кадры не заказываются, возврат их запустит.
+            if (!NovaAnimationClock.isRunning()) return
+            syncNodes(NovaAnimationClock.now())
             invalidate()
             scheduleFrame()
         }
@@ -135,14 +138,12 @@ class NovaNetworkBackgroundView @JvmOverloads constructor(
 
     fun startAnimation() {
         if (!supported) return
-        lastFrameMs = 0L
         scheduleFrame()
     }
 
     fun stopAnimation() {
         frameScheduled = false
         removeCallbacks(frameRunnable)
-        lastFrameMs = 0L
     }
 
     override fun onAttachedToWindow() {
@@ -180,6 +181,7 @@ class NovaNetworkBackgroundView @JvmOverloads constructor(
             canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), washPaint)
         }
         if (nodes.isEmpty()) return
+        syncNodes(NovaAnimationClock.peek())
         drawTriangles(canvas)
         drawLinks(canvas)
         for (node in nodes) {
@@ -203,6 +205,8 @@ class NovaNetworkBackgroundView @JvmOverloads constructor(
             nodes += Node(
                 x = point.x,
                 y = point.y,
+                homeX = point.x,
+                homeY = point.y,
                 vx = point.vx,
                 vy = point.vy,
                 radius = point.radius,
@@ -211,27 +215,22 @@ class NovaNetworkBackgroundView @JvmOverloads constructor(
         }
     }
 
-    private fun updateNodes(step: Float) {
+    /**
+     * Положения и пульс по времени общих часов. Отсчёт движения — от точки
+     * [NovaAnimationMemory.networkOrigin], то есть от раскладки этого размера; вид,
+     * пересозданный с тем же размером, попадает в ту же точку движения.
+     */
+    private fun syncNodes(now: Double) {
+        phaseSeconds = (now % 4096.0).toFloat()
         val w = width.toFloat()
         val h = height.toFloat()
-        if (w <= 0f || h <= 0f) return
+        if (nodes.isEmpty() || w <= 0f || h <= 0f) return
+        val origin = NovaAnimationMemory.networkOrigin("${width}x$height", now)
+        // Скорость узла задана на кадр в 16.67 мс: 60 кадров в секунду.
+        val frames = (now - origin) * 60.0
         for (node in nodes) {
-            node.x += node.vx * step
-            node.y += node.vy * step
-            if (node.x < 0f) {
-                node.x = 0f
-                node.vx = kotlin.math.abs(node.vx)
-            } else if (node.x > w) {
-                node.x = w
-                node.vx = -kotlin.math.abs(node.vx)
-            }
-            if (node.y < 0f) {
-                node.y = 0f
-                node.vy = kotlin.math.abs(node.vy)
-            } else if (node.y > h) {
-                node.y = h
-                node.vy = -kotlin.math.abs(node.vy)
-            }
+            node.x = WallBounce.position(node.homeX, (node.vx * frames).toFloat(), w)
+            node.y = WallBounce.position(node.homeY, (node.vy * frames).toFloat(), h)
         }
     }
 

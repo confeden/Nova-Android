@@ -22,6 +22,7 @@ class RegionTransportPolicyTest {
 
         assertFalse(RegionTransportPolicy.allowsTransportSubstitution("eu"))
         assertFalse(RegionTransportPolicy.allowsTransportSubstitution("us"))
+        assertFalse(RegionTransportPolicy.allowsTransportSubstitution("as"))
         assertFalse(RegionTransportPolicy.allowsTransportSubstitution("ru"))
         assertFalse(RegionTransportPolicy.allowsTransportSubstitution("masque"))
         assertFalse(RegionTransportPolicy.allowsTransportSubstitution("vless"))
@@ -35,6 +36,7 @@ class RegionTransportPolicyTest {
         // Opera и есть выбранный выход.
         assertTrue(RegionTransportPolicy.allowsOperaTransport("eu"))
         assertTrue(RegionTransportPolicy.allowsOperaTransport("US"))
+        assertTrue(RegionTransportPolicy.allowsOperaTransport("as"))
 
         // Названный выход — другой транспорт. Раньше в запретах был только `ru`,
         // и выбранный MASQUE после неудачи уезжал на выход Opera.
@@ -85,6 +87,7 @@ class RegionTransportPolicyTest {
         assertFalse(RegionTransportPolicy.allowsMasqueTransport("ru"))
         assertFalse(RegionTransportPolicy.allowsMasqueTransport("eu"))
         assertFalse(RegionTransportPolicy.allowsMasqueTransport("us"))
+        assertFalse(RegionTransportPolicy.allowsMasqueTransport("as"))
         assertFalse(RegionTransportPolicy.allowsMasqueTransport("proton"))
         assertFalse(RegionTransportPolicy.allowsMasqueTransport("vless"))
     }
@@ -101,7 +104,7 @@ class RegionVocabularyTest {
 
     @org.junit.Test
     fun `every selectable region survives normalization`() {
-        for (region in listOf("auto", "ru", "eu", "us", "masque", "vless", "proton")) {
+        for (region in listOf("auto", "ru", "eu", "us", "as", "masque", "vless", "proton")) {
             org.junit.Assert.assertEquals(region, RegionTransportPolicy.normalizeKnown(region))
             org.junit.Assert.assertEquals(region, RegionTransportPolicy.normalizeKnown(region.uppercase()))
             org.junit.Assert.assertEquals(region, RegionTransportPolicy.normalizeKnown("  $region  "))
@@ -121,7 +124,7 @@ class RegionVocabularyTest {
      */
     @org.junit.Test
     fun `an explicit choice stays explicit after normalization`() {
-        for (region in listOf("ru", "eu", "us", "masque", "vless", "proton")) {
+        for (region in listOf("ru", "eu", "us", "as", "masque", "vless", "proton")) {
             val normalized = RegionTransportPolicy.normalizeKnown(region)
             org.junit.Assert.assertTrue(region, RegionTransportPolicy.isExplicitChoice(normalized))
         }
@@ -137,7 +140,7 @@ class RegionVocabularyTest {
                 RegionTransportPolicy.allowsOperaTransport(RegionTransportPolicy.normalizeKnown(region)),
             )
         }
-        for (region in listOf("eu", "us", "auto")) {
+        for (region in listOf("eu", "us", "as", "auto")) {
             org.junit.Assert.assertTrue(
                 region,
                 RegionTransportPolicy.allowsOperaTransport(RegionTransportPolicy.normalizeKnown(region)),

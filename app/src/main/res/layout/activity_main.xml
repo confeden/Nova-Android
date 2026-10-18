@@ -357,7 +357,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:saveEnabled="false"
-        android:layout_marginBottom="2dp"
+        android:layout_marginBottom="6dp"
         android:background="@drawable/bg_country_badge"
         android:paddingStart="10dp"
         android:paddingTop="6dp"
@@ -369,7 +369,7 @@
         android:textSize="12sp"
         android:textStyle="bold"
         android:visibility="gone"
-        app:layout_constraintBottom_toTopOf="@+id/tv_internet_label"
+        app:layout_constraintBottom_toTopOf="@+id/btn_settings"
         app:layout_constraintEnd_toEndOf="@+id/graph_latency" />
 
     <!--
@@ -414,6 +414,7 @@
             следит за единственным выбором только у **прямых** детей.
         -->
         <HorizontalScrollView
+            android:id="@+id/hsv_exit_region"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:fillViewport="true"
@@ -538,6 +539,44 @@
                     android:orientation="horizontal" />
             </HorizontalScrollView>
         </LinearLayout>
+
+        <!--
+            Выбор протокола импортированных профилей (AUTO и семьи). Вместо регионов
+            показывается только в режиме импортированных конфигураций; пишет ту же
+            настройку, что и «Настройки» → «Конфигурации». Кнопки создаёт код
+            (`MainActivity.refreshImportedProtocolGroup`) по `item_imported_protocol_chip`.
+        -->
+        <com.example.nova.FlowRadioGroup
+            android:id="@+id/rg_imported_protocol"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:orientation="horizontal"
+            android:visibility="gone" />
+
+        <!--
+            Сворачиваемая строка импортированных профилей под выбором протокола. Видна
+            только в режиме импортированных конфигураций. Нажатие открывает полный список
+            (ImportedProfilesSheet): список с замерами в строке не умещается между
+            кнопкой и «Настройками» ни в портрете, ни в альбоме.
+        -->
+        <TextView
+            android:id="@+id/tv_imported_profiles"
+            android:layout_width="wrap_content"
+            android:layout_height="34dp"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="6dp"
+            android:background="@drawable/bg_settings_button"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:minWidth="112dp"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:text="Импортированные профили (0) ▾"
+            android:textColor="#FFFFFF"
+            android:textSize="13sp"
+            android:visibility="gone" />
     </LinearLayout>
 
     <!--
@@ -555,7 +594,9 @@
         android:layout_marginTop="4dp"
         android:layout_marginStart="16dp"
         android:layout_marginEnd="16dp"
+        android:ellipsize="end"
         android:gravity="center"
+        android:maxLines="2"
         android:textColor="#B9C4D6"
         android:textSize="12sp"
         android:visibility="gone"

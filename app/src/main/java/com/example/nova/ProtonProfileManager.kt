@@ -334,6 +334,12 @@ object ProtonProfileManager {
         // значит продолжить прогон, а не начать его заново.
         ProtonApi.seedAlternativeHost(store.readAlternativeHost())
 
+        // Свежая лента узлов (ProtonNodeFeed) подтягивается в фоне и **до** быстрого
+        // выхода ниже: на исправном наборе профилей прогон почти всегда выходит
+        // оттуда, и вызов после него обновлял бы ленту только раз в сутки-шесть
+        // часов, а не по сроку ленты. Не бросает и не ждёт.
+        ProtonNodeFeed.refreshIfStale(context)
+
         publish("Proton: проверяю профили")
         val existing = store.readProfiles()
         val account = store.readAccount()
@@ -511,7 +517,18 @@ object ProtonProfileManager {
                 )
             }
         val extra = if (liveServers.isNotEmpty()) ProtonNodeCatalog.load(context) else emptyList()
-        val pool = ProtonProfileStore.mergeNodePools(proven, servers, extra)
+        // Итоги попыток всех классов сети: из них берутся порт, на котором узел уже
+        // подключался, и список адресов, молчавших недавно (в хвост пула).
+        val allOutcomes = runCatching { store.readAllOutcomes() }
+            .getOrDefault(ProtonProfileStore.AttemptOutcomes.EMPTY)
+        val outcomesNowMs = System.currentTimeMillis()
+        val portHints = ProtonProfileStore.portHints(allOutcomes, outcomesNowMs)
+        val pool = ProtonProfileStore.mergeNodePools(
+            proven,
+            servers,
+            extra,
+            silentHosts = ProtonProfileStore.silentHosts(allOutcomes, outcomesNowMs),
+        )
 
         // Кандидаты: по кругу стран, внутри страны — проверенные, затем наименее
         // загруженные; портов — по кругу. Если оператор глушит один порт, кандидаты
@@ -530,14 +547,14 @@ object ProtonProfileManager {
                     .joinToString(", ") { "${it.key} ${it.value}" }
         )
         val candidates = picked
-            .mapIndexed { index, server ->
+            .map { server ->
                 val sni = whiteHosts.randomOrNull(random).orEmpty()
                 ProtonProfile(
                     serverName = server.name,
                     country = server.country,
                     city = server.city,
                     entryIp = server.entryIp,
-                    port = ProtonProfileStore.PORTS[index % ProtonProfileStore.PORTS.size],
+                    port = ProtonProfileStore.choosePort(server.entryIp, portHints),
                     peerPublicKey = server.peerPublicKey,
                     pingMs = -1,
                     pingSource = ProtonLatency.SOURCE_NONE,
@@ -609,6 +626,7 @@ object ProtonProfileManager {
             val fallback = ProtonProfileStore.expandPortFallbacks(
                 candidates.sortedBy { it.load },
                 PROFILE_LIMIT,
+                portHints,
             )
             LogManager.log(
                 if (!probeRequested) {

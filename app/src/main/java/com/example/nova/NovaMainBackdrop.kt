@@ -52,6 +52,28 @@ internal object NovaMainBackdrop {
     private const val TEXTURE_ALPHA = 112
 
     /**
+     * Живой дождь «Matrix» вместо растра: тот же [NovaAppearanceDrawable], что и на
+     * экранах настроек, с чёрной основой и прозрачностью главного экрана. `null` —
+     * фактура статичная, и идёт прежний путь через [request].
+     *
+     * Клок общий на процесс, поэтому пересоздание drawable (смена оформления)
+     * не сбрасывает дождь.
+     */
+    fun liveDrawable(context: Context): android.graphics.drawable.Drawable? {
+        if (NovaAppearance.texture(context) != NovaAppearance.Texture.MATRIX) return null
+        return NovaAppearanceDrawable(
+            NovaAppearance.Texture.MATRIX,
+            NovaAppearance.TEMPERATURE_NEUTRAL,
+            accent(context),
+            NovaAppearance.variant(context),
+            blackBase = true,
+            rainAlpha = TEXTURE_ALPHA,
+            // Главный экран — единственный, где дождь живёт: остальные экраны рисуют кадр.
+            animated = true,
+        )
+    }
+
+    /**
      * Готовый фон или `null`, если узор ещё строится.
      *
      * `onReady` зовётся **из фонового потока** — виды в нём трогать нельзя.

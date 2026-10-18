@@ -62,6 +62,15 @@ object LocalAppProxyManager {
         // не понимал, что произошло. Теперь адрес и порт остаются на месте, а решение
         // «пускать или нет» принимается по месту, на каждом подключении.
         val shouldRun = clientData.isLocalProxyEnabled()
+        // WireGuard-сервер раздачи живёт по тем же правилам, что и прокси. Выпуск
+        // наружу решаем здесь на каждом sync: туннель поднят либо разрешён прямой выход.
+        GatewayWireGuard.syncServer(
+            context = appContext,
+            shouldRun = shouldRun,
+            egressAllowed = serviceState == NovaVpnService.STATE_CONNECTED ||
+                clientData.isGatewayAllowDirectWithoutVpn(),
+            logger = logger,
+        )
         val endpoints = GatewayEndpoints.discover(appContext)
         val desiredHosts = resolveListenHosts(endpoints)
         val primaryHost = resolveAdvertisedHost(endpoints)
@@ -82,20 +91,13 @@ object LocalAppProxyManager {
         clientData.ensureLocalProxyCredentials()
         val currentListeners = listeners
         val currentHosts = currentListeners.map { it.host }.sorted()
-        // Портал проверяем наравне с прокси. Раньше условие смотрело только на сокеты
-        // прокси, и если портал не поднялся — например, в момент включения список
-        // интерфейсов оказался пуст, — то дальше каждый sync видел «всё уже работает»
-        // и молча уходил. Портал не поднимался уже никогда.
-        val portalHealthy = GatewayPortal.isRunning() || endpoints.isEmpty()
         if (
             running.get() &&
             currentListeners.isNotEmpty() &&
             currentListeners.all { !it.socket.isClosed } &&
-            currentHosts == desiredHosts.sorted() &&
-            portalHealthy
+            currentHosts == desiredHosts.sorted()
         ) {
             advertisedHost = primaryHost
-            GatewayPortal.sync(appContext, endpoints, logger)
             clientData.saveLocalProxyStatus(
                 running = true,
                 backend = backendLabel,
@@ -146,7 +148,6 @@ object LocalAppProxyManager {
             }
             listeners = emptyList()
             advertisedHost = primaryHost
-            GatewayPortal.stop(logger)
             clientData.saveLocalProxyStatus(
                 running = false,
                 backend = backendLabel,
@@ -160,7 +161,6 @@ object LocalAppProxyManager {
 
         listeners = boundListeners
         advertisedHost = primaryHost
-        GatewayPortal.sync(appContext, endpoints, logger)
         clientData.saveLocalProxyStatus(
             running = true,
             backend = backendLabel,
@@ -209,7 +209,6 @@ object LocalAppProxyManager {
         if (activeListeners.isNotEmpty()) {
             logger("Локальный прокси остановлен.")
         }
-        GatewayPortal.stop(logger)
         val clientData = ClientData(context.applicationContext)
         val endpoints = currentEndpoints
         advertisedHost = resolveAdvertisedHost(endpoints)
@@ -330,6 +329,14 @@ object LocalAppProxyManager {
         val httpVersion = requestParts[2].trim().ifBlank { "HTTP/1.1" }
         val headers = readHttpHeaders(input)
         val protocolLabel = if (method == "CONNECT") "HTTPS-CONNECT" else "HTTP"
+
+        // Голый запрос на адрес шлюза («GET / HTTP/1.1», как из адресной строки) — это не
+        // запрос через прокси: у того цель — полный URL. Отвечаем страницей с адресом,
+        // логином и паролем, чтобы настроить клиента, не заходя в приложение.
+        if ((method == "GET" || method == "HEAD") && requestTarget.startsWith("/")) {
+            writeCredentialsPage(context, clientSocket, output, headOnly = method == "HEAD")
+            return
+        }
 
         if (!authExempt && !isHttpAuthorized(context, headers)) {
             if (isRateLimited(ownerKey)) {
@@ -576,6 +583,49 @@ object LocalAppProxyManager {
         if (clientData.getServiceState() == NovaVpnService.STATE_CONNECTED) return false
         return !clientData.isGatewayAllowDirectWithoutVpn()
     }
+
+    private fun writeCredentialsPage(
+        context: Context,
+        clientSocket: Socket,
+        output: OutputStream,
+        headOnly: Boolean,
+    ) {
+        val clientData = ClientData(context)
+        val (login, password) = clientData.ensureLocalProxyCredentials()
+        val host = clientSocket.localAddress?.hostAddress.orEmpty().substringBefore('%')
+        val port = clientData.getLocalProxyPort()
+        val body = NovaLanguage.tr("""
+            <!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Раздача через Nova</title></head>
+            <body style="font-family:sans-serif;padding:24px;max-width:520px">
+            <h2>Раздача через Nova</h2>
+            <p>Пропишите в настройках прокси на этом устройстве:</p>
+            <table cellpadding="6" style="font-size:18px">
+            <tr><td>Адрес</td><td><b>$host</b></td></tr>
+            <tr><td>Порт</td><td><b>$port</b></td></tr>
+            <tr><td>Тип</td><td><b>HTTP или SOCKS5</b></td></tr>
+            <tr><td>Логин</td><td><b>${htmlEscape(login)}</b></td></tr>
+            <tr><td>Пароль</td><td><b>${htmlEscape(password)}</b></td></tr>
+            </table>
+            <p>Если в настройках нет полей логина и пароля, включите в Nova
+            «Без пароля для клиентов раздачи».</p>
+            </body></html>
+        """.trimIndent()).toByteArray(StandardCharsets.UTF_8)
+        output.write(
+            (
+                "HTTP/1.1 200 OK\r\n" +
+                    "Content-Type: text/html; charset=utf-8\r\n" +
+                    "Content-Length: ${body.size}\r\n" +
+                    "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
+                ).toByteArray(StandardCharsets.US_ASCII)
+        )
+        if (!headOnly) output.write(body)
+        output.flush()
+    }
+
+    private fun htmlEscape(value: String): String =
+        value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
 
     private fun writeTunnelUnavailable(output: OutputStream) {
         val body = NovaLanguage.tr("""

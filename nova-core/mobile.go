@@ -153,6 +153,35 @@ func DNSTunnelStatus() string {
 	return novaengine.DNSTunnelStatus()
 }
 
+// StartGatewayServer starts the hotspot-sharing WireGuard server (no root: the
+// clients' connections are re-opened by this process's own sockets, so they follow
+// the Nova tunnel). configJSON: listen_port, private_key, addr4, addr6, mtu, peers.
+func StartGatewayServer(configJSON string) error {
+	return novaengine.StartGatewayServer(configJSON)
+}
+
+// UpdateGatewayPeers replaces the peer list of the running sharing server.
+func UpdateGatewayPeers(peersJSON string) error {
+	return novaengine.UpdateGatewayPeers(peersJSON)
+}
+
+// StopGatewayServer stops the sharing server.
+func StopGatewayServer() {
+	novaengine.StopGatewayServer()
+}
+
+// SetGatewayEgressAllowed tells the sharing server whether clients may leave
+// (tunnel up, or direct egress allowed). Denied clients get a refusal, not silence.
+func SetGatewayEgressAllowed(allowed bool) {
+	novaengine.SetGatewayEgressAllowed(allowed)
+}
+
+// GatewayServerStats returns the device dump (per-peer rx/tx, handshakes) plus the
+// live connection count; empty when the server is not running.
+func GatewayServerStats() string {
+	return novaengine.GatewayServerStats()
+}
+
 // StopTorPtProxy closes every pluggable-transport listener.
 func StopTorPtProxy() {
 	novaengine.StopTorPtProxy()

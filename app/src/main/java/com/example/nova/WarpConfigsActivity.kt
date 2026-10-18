@@ -619,7 +619,7 @@ class WarpConfigsActivity : AppCompatActivity() {
         pendingVpnPermissionAction = "discovery"
         val regionPreference = clientData.getExitRegionPreference()
         val effectiveRegion = when (regionPreference) {
-            "eu", "us" -> "ru"
+            "eu", "us", "as" -> "ru"
             else -> regionPreference
         }
         val intent = Intent(this, NovaVpnService::class.java).apply {
@@ -675,7 +675,7 @@ class WarpConfigsActivity : AppCompatActivity() {
         pendingVpnPermissionAction = "adaptation"
         val regionPreference = clientData.getExitRegionPreference()
         val effectiveRegion = when (regionPreference) {
-            "eu", "us" -> "ru"
+            "eu", "us", "as" -> "ru"
             else -> regionPreference
         }
         val intent = Intent(this, NovaVpnService::class.java).apply {
@@ -760,8 +760,8 @@ class WarpConfigsActivity : AppCompatActivity() {
         btnAdapt.isEnabled = !stopRequestedLocally && (!running || adaptationRunning)
         btnAdapt.text = when {
             adaptationRunning && stopRequestedLocally -> "Останавливаем..."
-            adaptationRunning -> "Остановить адаптацию"
-            else -> "Адаптация к условиям сети"
+            adaptationRunning -> "Остановить проверку"
+            else -> "Перепроверить профили"
         }
 
         tvStatus.text = if (message.isNotBlank()) message else if (running) "Идёт проверка..." else "Готово к проверке"

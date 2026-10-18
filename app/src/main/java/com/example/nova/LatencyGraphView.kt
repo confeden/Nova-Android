@@ -40,10 +40,10 @@ import android.view.View
  * * приход замера двигает всё содержимое пути ровно на шаг влево, поэтому
  *   `shift` уменьшается на единицу — в этот кадр на экране не двигается **ничего**;
  * * между замерами `shift` растёт с частотой «шаг за интервал», и скорость
- *   корректируется мягко: `1 + [SHIFT_GAIN] * ([SHIFT_TARGET] - shift)`. Это
+ *   корректируется мягко: `1 + границы сдвига * (границы сдвига - shift)`. Это
  *   регулятор **скорости**, а не положения: ошибка гасится за несколько кадров
  *   плавным ускорением, а не скачком;
- * * у верхней границы ([SHIFT_MAX]) скорость гасится до нуля непрерывно, так что
+ * * у верхней границы (границы сдвига) скорость гасится до нуля непрерывно, так что
  *   пропавший замер линию не обрывает — она просто останавливается.
  *
  * Ожидаемый интервал — скользящее среднее по факту, а не константа.
@@ -104,14 +104,16 @@ class LatencyGraphView @JvmOverloads constructor(
      * внеочередной замер (их шлют `onResume` и отрисовка подключённого состояния)
      * не должен разгонять поток вдвое.
      */
-    private var sampleIntervalMs = 2_000f
-    private var lastSampleAtMs = 0L
+    private var lastBeatAtMs = 0L
+    private var pending = 0
+    private var hasPending = false
+    private var idleBeats = 0
 
     /**
      * Сдвиг содержимого влево, **в шагах**. Единственное, что меняется в кадре.
      *
      * Ноль — новейшая точка стоит ровно у правого края. Установившееся значение
-     * около [SHIFT_TARGET]: небольшой запас нужен, чтобы дрожание интервала
+     * около границы сдвига: небольшой запас нужен, чтобы дрожание интервала
      * съедалось им, а не остановкой линии.
      */
     private var shift = 0f
@@ -160,16 +162,27 @@ class LatencyGraphView @JvmOverloads constructor(
         }
     }
 
+    /**
+     * Принимает замер. Он не рисуется сразу: точки попадают на линию только по
+     * метроному ([BEAT_MS]), поэтому запоздавший до секунды замер не сбивает ритм.
+     */
     fun addLatency(ms: Int) {
         val now = SystemClock.uptimeMillis()
-        if (lastSampleAtMs != 0L) {
-            val observed = (now - lastSampleAtMs).toFloat()
-                .coerceIn(MIN_INTERVAL_MS, MAX_INTERVAL_MS)
-            sampleIntervalMs += (observed - sampleIntervalMs) * INTERVAL_EMA
+        if (count == 0) {
+            // Первому замеру ждать такт нечего: на экране пусто.
+            commitPoint(ms)
+            lastBeatAtMs = now
+            idleBeats = 0
+        } else {
+            pending = ms
+            hasPending = true
         }
-        lastSampleAtMs = now
+        startAnimation()
+    }
+
+    /** Дописывает точку в буфер и пересобирает путь — раз за такт, не за кадр. */
+    private fun commitPoint(ms: Int) {
         val color = colorForLatency(ms)
-        val hadContent = count > 0
         if (count < capacity) {
             values[count] = ms
             colors[count] = color
@@ -180,23 +193,15 @@ class LatencyGraphView @JvmOverloads constructor(
             values[capacity - 1] = ms
             colors[capacity - 1] = color
         }
-        // Замер сдвинул всё содержимое пути на шаг влево — компенсируем сдвигом
-        // ровно на тот же шаг. В этот кадр на экране не двигается ничего: именно
-        // отсюда берётся непрерывность потока.
-        //
-        // Первому замеру компенсировать нечего: на экране ещё пусто. Без этой
-        // оговорки он уезжал на шаг **за** правый край и не рисовался вовсе.
-        if (hadContent) shift = (shift - 1f).coerceAtLeast(SHIFT_MIN)
         rebuild()
-        startAnimation()
-        invalidate()
     }
 
     fun clearLatencies() {
         count = 0
-        lastSampleAtMs = 0L
+        hasPending = false
+        idleBeats = 0
+        lastBeatAtMs = 0L
         shift = 0f
-        sampleIntervalMs = 2_000f
         linePath.reset()
         fillPath.reset()
         colorShader = null
@@ -268,24 +273,40 @@ class LatencyGraphView @JvmOverloads constructor(
      * Один шаг потока.
      *
      * Скорость номинально «шаг за интервал» и правится пропорционально
-     * расхождению с [SHIFT_TARGET]. Регулятор именно скоростной: положение он
+     * расхождению с границы сдвига. Регулятор именно скоростной: положение он
      * никогда не переставляет, поэтому и рывка не бывает — только чуть более
      * быстрое или чуть более медленное течение.
      */
     private fun stepFlow(now: Long) {
         if (lastFrameAtMs == 0L) {
             lastFrameAtMs = now
+            if (lastBeatAtMs == 0L) lastBeatAtMs = now
             return
         }
-        val dt = (now - lastFrameAtMs).coerceIn(0L, MAX_FRAME_STEP_MS).toFloat()
         lastFrameAtMs = now
-        if (dt <= 0f || count == 0) return
-        val nominal = 1f / sampleIntervalMs
-        val correction = (1f + SHIFT_GAIN * (SHIFT_TARGET - shift)).coerceIn(0.25f, 3f)
-        // Тормоз у верхней границы: без него линия упиралась бы в неё на полном
-        // ходу. Пропавший замер должен останавливать поток плавно.
-        val headroom = ((SHIFT_MAX - shift) / SHIFT_EASE).coerceIn(0f, 1f)
-        shift = (shift + nominal * correction * headroom * dt).coerceAtMost(SHIFT_MAX)
+        if (count == 0) return
+        // Такты идут по сетке без накопления ошибки; после долгой паузы сетка
+        // просто начинается заново, а не нагоняет пропущенное.
+        if (now - lastBeatAtMs > BEAT_MS * 3) lastBeatAtMs = now - BEAT_MS
+        if (now - lastBeatAtMs >= BEAT_MS) {
+            lastBeatAtMs += BEAT_MS
+            if (hasPending) {
+                hasPending = false
+                idleBeats = 0
+                commitPoint(pending)
+            } else {
+                // Замера к такту нет — линия держит прежнее значение, ритм прежний.
+                idleBeats++
+                if (idleBeats > MAX_IDLE_BEATS) {
+                    stopAnimation()
+                    return
+                }
+                commitPoint(values[count - 1])
+            }
+        }
+        // Сдвиг зависит только от времени: -1 сразу после такта (новая точка за
+        // правым краем), 0 к следующему. Скорость постоянна, рывков нет.
+        shift = (now - lastBeatAtMs).toFloat() / BEAT_MS - 1f
     }
 
     private fun rebuild() {
@@ -387,7 +408,7 @@ class LatencyGraphView @JvmOverloads constructor(
      * Шкала не должна обрываться внутри вида: обрыв читается как срез, и заметен
      * он ровно в момент прихода замера, когда пересобирается путь. Поэтому старт
      * всегда левее нуля, с запасом на сдвиг холста в **любую** сторону: пачка
-     * внеочередных замеров уводит [shift] до [SHIFT_MIN], то есть рисует
+     * внеочередных замеров уводит [shift] до границы сдвига, то есть рисует
      * содержимое правее на полтора шага, — отсюда и [LEAD_IN_STEPS].
      *
      * До старейшего замера путь идёт горизонталью. На полном буфере она целиком
@@ -605,33 +626,11 @@ class LatencyGraphView @JvmOverloads constructor(
         /** Сколько шагов помещается по ширине. Ёмкость больше — хвост уходит за левый край. */
         private const val VISIBLE_SPAN = 45f
 
-        /** Границы, в которых доверяем измеренному интервалу между замерами. */
-        private const val MIN_INTERVAL_MS = 700f
-        private const val MAX_INTERVAL_MS = 6_000f
+        /** Один такт линии: шаг по горизонтали ровно за это время. Замер может запаздывать до такта. */
+        private const val BEAT_MS = 1_000L
 
-        /** Доля нового замера в скользящем среднем интервала. */
-        private const val INTERVAL_EMA = 0.3f
-
-        /** Куда регулятор тянет сдвиг: полшага запаса на дрожание интервала. */
-        private const val SHIFT_TARGET = 0.5f
-
-        /** Сила поправки скорости. Больше — быстрее сходится и заметнее «дышит». */
-        private const val SHIFT_GAIN = 0.9f
-
-        /** Дальше этого не уезжаем: справа появилась бы растущая пустота. */
-        private const val SHIFT_MAX = 1.25f
-
-        /** Ближе этого к границе поток тормозит, а не упирается. */
-        private const val SHIFT_EASE = 0.35f
-
-        /**
-         * Предел отставания после пачки внеочередных замеров.
-         *
-         * `onResume` и отрисовка подключённого состояния зовут замер вне тика, и
-         * два замера подряд могут прийти за доли секунды. Регулятор нагонит это
-         * сам, а граница держит новейшую точку в разумной близости к краю.
-         */
-        private const val SHIFT_MIN = -1.5f
+        /** Сколько тактов подряд держим значение без свежих замеров, прежде чем встать. */
+        private const val MAX_IDLE_BEATS = 6
 
         /** Высота столбца прозрачности в пикселях его собственных координат. */
         private const val FADE_RAMP_HEIGHT = 64
@@ -645,7 +644,7 @@ class LatencyGraphView @JvmOverloads constructor(
         /**
          * На сколько шагов путь начинается левее границы вида.
          *
-         * Больше, чем модуль [SHIFT_MIN]: даже когда сдвиг уводит содержимое
+         * Больше, чем модуль границы сдвига: даже когда сдвиг уводит содержимое
          * вправо на полтора шага, начало пути остаётся за краем, и линия входит
          * в вид, а не начинается в нём.
          */

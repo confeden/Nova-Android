@@ -44,10 +44,9 @@ object NovaAppearance {
         NONE("none", "None"),
         BASALT("basalt", "Basalt"),
         MARBLE("marble", "Marble"),
-        MICA("mica", "Mica"),
         WOOD("wood", "Wood"),
         SAND("sand", "Sand"),
-        GRASS("grass", "Grass"),
+        GRASS("grass", "Луг"),
         CRACKS("cracks", "Cracks"),
         WATER("water", "Water"),
         SMOKE("smoke", "Smoke"),
@@ -55,9 +54,10 @@ object NovaAppearance {
         SLIME("slime", "Slime"),
         SHARDS("shards", "Shards"),
         SPLATTER("splatter", "Splatter"),
-        GLOW("glow", "Glow"),
         LIGHTNING("lightning", "Lightning"),
         SNOW("snow", "Snow"),
+        FRACTAL("fractal", "Fractal"),
+        MATRIX("matrix", "Matrix"),
         ;
 
         companion object {

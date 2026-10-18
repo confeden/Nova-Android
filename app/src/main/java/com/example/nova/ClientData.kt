@@ -253,7 +253,7 @@ data class WarpConfigsMenuSnapshot(
     val discoveryOrdinal: Int = 0,
     val discoveryTotal: Int = 0,
     val createButtonText: String = "Сгенерировать новые",
-    val adaptButtonText: String = "Адаптация к условиям сети",
+    val adaptButtonText: String = "Перепроверить профили",
     val importedToggleText: String = "Переключиться на импортированные",
     val sourceToken: String = "",
     val items: List<WarpConfigCardSnapshot> = emptyList(),
@@ -344,6 +344,7 @@ class ClientData(context: Context) {
      */
     private val domainBypassStatsFile = AtomicFile(File(appContext.filesDir, "domain_bypass_stats.json"))
     private val pinnedProfilesFile = AtomicFile(File(appContext.filesDir, "pinned_profiles.json"))
+    private val disabledImportedProfilesFile = AtomicFile(File(appContext.filesDir, "imported_profiles_disabled.json"))
     private val awgI1File = AtomicFile(File(appContext.filesDir, "awg_i1_overrides.json"))
 
     /**
@@ -1019,15 +1020,14 @@ class ClientData(context: Context) {
     /**
      * Выпускать трафик клиентов напрямую, когда туннель недоступен.
      *
-     * По умолчанию выключено, и это осознанно: клиент подключился к раздаче именно
-     * ради VPN, и молча выпустить его мимо туннеля — это не «связь продолжила
-     * работать», а утечка, которую он не заметит. Пока туннеля нет, шлюз остаётся
-     * доступен и честно отвечает ошибкой, а как только туннель поднимется, всё
-     * заработает само.
+     * По умолчанию включено (решение владельца): раздача должна давать интернет и без
+     * VPN. Выключить можно на экране раздачи — тогда шлюз отвечает 503, пока туннеля нет.
+     * Сокеты прокси — сокеты самого телефона, поэтому TTL клиентских пакетов не
+     * меняется и сам факт раздачи по нему не виден.
      */
     fun isGatewayAllowDirectWithoutVpn(): Boolean {
-        readGatewayFlags()?.let { if (it.has("allow_direct")) return it.optBoolean("allow_direct", false) }
-        return prefs.getBoolean("gateway_allow_direct_without_vpn", false)
+        readGatewayFlags()?.let { if (it.has("allow_direct")) return it.optBoolean("allow_direct", true) }
+        return prefs.getBoolean("gateway_allow_direct_without_vpn", true)
     }
     fun setGatewayAllowDirectWithoutVpn(enabled: Boolean) {
         prefs.edit().putBoolean("gateway_allow_direct_without_vpn", enabled).commit()
@@ -1057,7 +1057,6 @@ class ClientData(context: Context) {
     fun setLastTransportNotice(value: String) {
         prefs.edit().putString("last_transport_notice", value.trim()).commit()
     }
-    fun getGatewayPortalPort(): Int = 1371
     fun saveServiceState(
         state: String,
         /**
@@ -1425,8 +1424,8 @@ class ClientData(context: Context) {
             // подрегион Opera и предпочтённая страна Proton, и запись одного поля
             // целым объектом стирала бы два других.
             val state = readExitRegionState().put("region", normalized)
-            if (normalized == "eu" || normalized == "us") {
-                // Выбор EU/US — это и есть выбор подрегиона Opera. Запоминаем его
+            if (normalized == "eu" || normalized == "us" || normalized == "as") {
+                // Выбор EU/US/AS — это и есть выбор подрегиона Opera. Запоминаем его
                 // здесь же, иначе строка под селектором показывала бы EU сразу
                 // после того, как пользователь нажал US.
                 state.put(KEY_OPERA_SUB_REGION, normalized)
@@ -1483,7 +1482,7 @@ class ClientData(context: Context) {
         val explicit = state.optString(KEY_OPERA_SUB_REGION)
         if (explicit.isNotBlank()) return ConnectionSelectorPolicy.normalizeOperaSubRegion(explicit)
         val region = normalizeRegionPreference(state.optString("region"))
-        if (region == "eu" || region == "us") return region
+        if (region == "eu" || region == "us" || region == "as") return region
         return ConnectionSelectorPolicy.DEFAULT_OPERA_SUB_REGION
     }
 
@@ -1553,7 +1552,7 @@ class ClientData(context: Context) {
         // импортированная попытка не выполнялась.
         if (isImportedConfigSourceActive()) return true
         return when (getExitRegionPreference()) {
-            "eu", "us", "tor" -> false
+            "eu", "us", "as", "tor" -> false
             else -> true
         }
     }
@@ -1833,8 +1832,21 @@ class ClientData(context: Context) {
     }
 
     /** Следующий профиль VLESS за текущим, с закольцовыванием. */
-    fun nextVlessProfileLink(current: String? = getVlessConfigLink()): String? =
-        ProfileRotation.next(getVlessProfileLinks(), current?.trim().orEmpty())
+    fun nextVlessProfileLink(current: String? = getVlessConfigLink()): String? {
+        val links = enabledVlessProfileLinks()
+        val currentLink = current?.trim().orEmpty()
+        val currentConfig = VlessConfig.parse(currentLink)
+        var candidate = ProfileRotation.next(links, currentLink)
+        // Несколько ссылок на один host:port — один и тот же узел, «следующий» должен быть другим.
+        var guard = 0
+        while (candidate != null && currentConfig != null && guard < links.size) {
+            val c = VlessConfig.parse(candidate)
+            if (c == null || !(c.host.equals(currentConfig.host, ignoreCase = true) && c.port == currentConfig.port)) break
+            candidate = ProfileRotation.next(links, candidate)
+            guard++
+        }
+        return candidate
+    }
 
     /**
      * Импортированные профили VLESS в виде карточек списка конфигураций.
@@ -2135,9 +2147,32 @@ class ClientData(context: Context) {
         }
     }
 
+    /**
+     * Память «сеть — домен» ([NetworkI1Memory]). Лежит в том же файле, что и подбор, и
+     * пишется только из `:vpn` (I2); ключ `nets` не пересекается с остальными.
+     */
+    fun getNetworkI1Memory(): NetworkI1Memory.Memory =
+        NetworkI1Memory.fromJson(readAtomicJson(awgI1File)?.optJSONObject("nets"))
+
+    fun recordNetworkI1Outcome(
+        networkKey: String?,
+        sni: String,
+        success: Boolean,
+        nowMs: Long = System.currentTimeMillis(),
+    ) {
+        if (networkKey.isNullOrBlank() || sni.isBlank()) return
+        synchronized(awgI1Lock) {
+            val root = readAtomicJson(awgI1File) ?: JSONObject()
+            val memory = NetworkI1Memory.fromJson(root.optJSONObject("nets"))
+            root.put("nets", NetworkI1Memory.toJson(NetworkI1Memory.record(memory, networkKey, sni, success, nowMs)))
+            writeAtomicRaw(awgI1File, root.toString())
+        }
+    }
+
     fun clearAwgI1Overrides() {
         synchronized(awgI1Lock) {
             val root = readAtomicJson(awgI1File) ?: JSONObject()
+            root.remove("nets")
             root.remove("items")
             root.remove("attempts")
             root.remove("pending")
@@ -2174,6 +2209,45 @@ class ClientData(context: Context) {
         return (0 until array.length())
             .mapNotNull { array.optString(it).trim().takeIf(String::isNotEmpty) }
             .toSet()
+    }
+
+    /**
+     * Отключённые импортированные профили (кнопка ✕ в списке).
+
+     * Отключённый профиль не участвует ни в подключении, ни в переборе, ни в адаптации,
+     * но остаётся в списке серым и включается обратно. Файл, а не настройки (I2):
+     * выбор читает `:vpn`, а у его настроек свой кэш. Значения — `id` карточки:
+     * `vless|identity` для VLESS, `WarpVerifiedConfig.id` для AWG.
+     */
+    fun disabledImportedProfileIds(): Set<String> {
+        val array = readAtomicJson(disabledImportedProfilesFile)?.optJSONArray("ids") ?: return emptySet()
+        return (0 until array.length())
+            .mapNotNull { array.optString(it).trim().takeIf(String::isNotEmpty) }
+            .toSet()
+    }
+
+    fun setImportedProfileDisabled(id: String, disabled: Boolean) {
+        val normalized = id.trim()
+        if (normalized.isEmpty()) return
+        synchronized(disabledImportedProfilesLock) {
+            val ids = disabledImportedProfileIds().toMutableSet()
+            val changed = if (disabled) ids.add(normalized) else ids.remove(normalized)
+            if (!changed) return
+            writeAtomicRaw(
+                disabledImportedProfilesFile,
+                JSONObject().put("ids", JSONArray(ids.toList())).toString(),
+            )
+        }
+    }
+
+    /** Профили VLESS без отключённых. Само хранилище не меняется: его пишут обратно целиком. */
+    fun enabledVlessProfileLinks(): List<String> {
+        val disabled = disabledImportedProfileIds()
+        val links = getVlessProfileLinks()
+        if (disabled.isEmpty()) return links
+        return links.filterNot { link ->
+            VlessConfig.parse(link)?.identity?.let { VLESS_CONFIG_ID_PREFIX + it in disabled } == true
+        }
     }
 
     /** Закреплённые профили VLESS в терминах их identity — в таком виде их знает `planSync`. */
@@ -2393,8 +2467,13 @@ class ClientData(context: Context) {
         return when (normalizeRegionPreference(getExitRegionPreference())) {
             "eu" -> listOf("EU" to "EU")
             "us" -> listOf("AM" to "US")
+            "as" -> listOf("AS" to "AS")
             "ru", "proton", "masque", "vless", "tor" -> emptyList()
-            else -> if (preferred == "us") {
+            // AS в «Авто» идёт первым, только если пользователь сам его выбрал и
+            // запомнил; по умолчанию автоцепочка остаётся EU+AM.
+            else -> if (preferred == "as") {
+                listOf("AS" to "AS", "EU" to "EU", "AM" to "US")
+            } else if (preferred == "us") {
                 listOf("AM" to "US", "EU" to "EU")
             } else {
                 listOf("EU" to "EU", "AM" to "US")
@@ -3371,7 +3450,7 @@ class ClientData(context: Context) {
         val until = prefs.getLong("opera_bootstrap_warp_pending_until", 0L)
         if (until <= nowMs) return ""
         return normalizeRegionPreference(prefs.getString("opera_bootstrap_warp_pending_region", ""))
-            .takeIf { it == "eu" || it == "us" }
+            .takeIf { it == "eu" || it == "us" || it == "as" }
             .orEmpty()
     }
 
@@ -3956,7 +4035,7 @@ class ClientData(context: Context) {
     ): Boolean {
         val preference = normalizeRegionPreference(getExitRegionPreference())
         if (preference == "ru") return false
-        if (preference == "eu" || preference == "us") return true
+        if (preference == "eu" || preference == "us" || preference == "as") return true
         if (isOperaBackendLabel(backendLabel)) return true
 
         val resolvedCountry = countryHint?.trim()?.uppercase().orEmpty()
@@ -5686,10 +5765,11 @@ class ClientData(context: Context) {
     fun getWarpVerifiedExportFile(): File = warpVerifiedExportFile
 
     fun getAvailableImportedProtocolFamilies(): List<String> {
+        val disabledIds = disabledImportedProfileIds()
         val warpFamilies = (getWarpVerifiedExportSnapshot() + getWarpVerifiedConfigs())
             .distinctBy { it.id }
             .asSequence()
-            .filter { it.userImported && !it.manual }
+            .filter { it.userImported && !it.manual && it.id !in disabledIds }
             .map(::inferImportedProtocolFamily)
             .filter { it != "auto" }
             .distinct()
@@ -5701,7 +5781,7 @@ class ClientData(context: Context) {
         // пяти радиокнопкам, первую из которых занимает «AUTO», — а семей бывает до
         // пяти. Пока VLESS дописывался в конец, при полном наборе импортированных
         // протоколов кнопки ему не доставалось и выбрать его было нечем.
-        val vlessFamilies = if (getVlessProfileLinks().isEmpty()) emptyList() else listOf("vless")
+        val vlessFamilies = if (enabledVlessProfileLinks().isEmpty()) emptyList() else listOf("vless")
         return (vlessFamilies + warpFamilies).distinct()
     }
 
@@ -9452,6 +9532,7 @@ class ClientData(context: Context) {
         private const val SNI_STATS_LIMIT = 256
         private val sniStatsLock = Any()
         private val pinnedProfilesLock = Any()
+        private val disabledImportedProfilesLock = Any()
         private val awgI1Lock = Any()
 
         private const val STRATEGY_SCOPE_DEFAULT = "default"

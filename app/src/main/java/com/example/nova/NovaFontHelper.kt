@@ -1,5 +1,6 @@
 package com.example.nova
 
+import android.content.Context
 import android.graphics.Typeface
 import android.view.View
 import android.view.ViewGroup
@@ -59,45 +60,53 @@ object NovaFontHelper {
         R.id.tv_logs_preview,
     )
 
+    /**
+     * Метка на виде, который уже выбрал своё начертание сам (например, конфиг
+     * в диалоге — моноширинный на любой теме). Обход дерева его не трогает.
+     */
+    const val KEEP_FACE_TAG = "nova:keep-face"
+
     fun apply(root: View) {
-        // Тема решает начертание целиком: у Matrix интерфейс изображает терминал,
-        // и Roboto в нём неуместен ровно так же, как скруглённые углы.
-        val face = runCatching {
-            NovaTheme.optionFor(NovaTheme.current(root.context)).face
-        }.getOrDefault(NovaTheme.Face.DEFAULT)
-        if (face != cachedFace) {
-            cachedRegular = null
-            cachedMedium = null
-            cachedBold = null
-            cachedBlack = null
-            cachedFace = face
-        }
-        val regular = cachedRegular ?: loadRegular(root, face).also { cachedRegular = it }
-        val medium = cachedMedium ?: loadMedium(root, regular, face).also { cachedMedium = it }
-        val bold = cachedBold ?: loadBold(root, regular, face).also { cachedBold = it }
-        val black = cachedBlack ?: loadBlack(root, bold, face).also { cachedBlack = it }
-        applyRecursive(root, regular, medium, bold, black)
+        val set = setFor(root.context, themeFace(root.context))
+        val mono = if (set.face == NovaTheme.Face.MONOSPACE) set.regular else Typeface.MONOSPACE
+        applyRecursive(root, set, mono)
     }
 
-    private fun applyRecursive(
-        view: View,
-        regular: Typeface,
-        medium: Typeface,
-        bold: Typeface,
-        black: Typeface,
-    ) {
+    /**
+     * Моноширинное начертание для текста, который ставится вручную (журнал,
+     * тело конфига): на Matrix — его собственный шрифт, на остальных темах —
+     * системный `Typeface.MONOSPACE`, как и раньше.
+     */
+    fun monospace(context: Context): Typeface {
+        val face = themeFace(context)
+        return if (face == NovaTheme.Face.MONOSPACE) setFor(context, face).regular else Typeface.MONOSPACE
+    }
+
+    private fun themeFace(context: Context): NovaTheme.Face =
+        runCatching { NovaTheme.optionFor(NovaTheme.current(context)).face }
+            .getOrDefault(NovaTheme.Face.DEFAULT)
+
+    private fun setFor(context: Context, face: NovaTheme.Face): FaceSet {
+        cached?.takeIf { it.face == face }?.let { return it }
+        return loadSet(context, face).also { cached = it }
+    }
+
+    private fun applyRecursive(view: View, set: FaceSet, mono: Typeface) {
         when (view) {
             is EditText -> {
-                view.typeface = regular
+                view.typeface = set.regular
             }
 
             is TextView -> {
-                if (view.id !in alwaysMonospaceIds) {
-                    view.typeface = when {
-                        view.id in blackIds -> black
-                        view.id in mediumIds -> medium
-                        isBoldView(view) -> bold
-                        else -> regular
+                when {
+                    // Своё начертание, выбранное при создании.
+                    view.tag == KEEP_FACE_TAG -> Unit
+                    view.id in alwaysMonospaceIds -> view.typeface = mono
+                    else -> view.typeface = when {
+                        view.id in blackIds -> set.black
+                        view.id in mediumIds -> set.medium
+                        isBoldView(view) -> set.bold
+                        else -> set.regular
                     }
                 }
             }
@@ -108,7 +117,7 @@ object NovaFontHelper {
         }
         if (view is ViewGroup) {
             for (i in 0 until view.childCount) {
-                applyRecursive(view.getChildAt(i), regular, medium, bold, black)
+                applyRecursive(view.getChildAt(i), set, mono)
             }
         }
     }
@@ -121,62 +130,62 @@ object NovaFontHelper {
     }
 
     /**
-     * Семейство для начертания темы, или `null` — значит штатный Roboto из ресурсов.
+     * Набор из четырёх начертаний для роли: обычное, среднее, жирное и «чёрное».
+     * Если у семейства один файл, он идёт во все роли, а жирное получается
+     * синтетическим утолщением (как у встроенных семейств Android раньше).
      *
-     * `sans-serif-condensed` — встроенное семейство Android, а не наш файл: оно
-     * есть на любом устройстве начиная с API 16 и ничего не весит.
+     * `DEFAULT` — штатный Roboto. `HEAVY` — самое жирное в проекте (GTA): обычный
+     * и средний вес сдвинуты на ступень вверх, а «чёрное» — Rubik Mono One, и
+     * идёт только на статусе и кнопке подключения (blackIds), где её ширина
+     * уместна.
      */
-    private fun familyOf(face: NovaTheme.Face): Typeface? = when (face) {
-        NovaTheme.Face.MONOSPACE -> Typeface.MONOSPACE
-        NovaTheme.Face.SERIF -> Typeface.SERIF
-        NovaTheme.Face.CONDENSED -> Typeface.create("sans-serif-condensed", Typeface.NORMAL)
-        NovaTheme.Face.DEFAULT, NovaTheme.Face.HEAVY -> null
+    private fun loadSet(context: Context, face: NovaTheme.Face): FaceSet {
+        fun font(id: Int, fallback: Typeface): Typeface =
+            ResourcesCompat.getFont(context, id) ?: fallback
+        val sans = Typeface.SANS_SERIF
+        return when (face) {
+            NovaTheme.Face.DEFAULT -> FaceSet(
+                face,
+                regular = font(R.font.roboto_regular, sans),
+                medium = font(R.font.roboto_medium, sans),
+                bold = font(R.font.roboto_bold, sans),
+                black = font(R.font.roboto_black, sans),
+            )
+            NovaTheme.Face.HEAVY -> {
+                val bold = font(R.font.roboto_bold, sans)
+                val black = font(R.font.roboto_black, sans)
+                FaceSet(
+                    face,
+                    regular = bold,
+                    medium = black,
+                    bold = black,
+                    black = font(R.font.rubik_mono_one, black),
+                )
+            }
+            NovaTheme.Face.MONOSPACE -> single(face, font(R.font.ptmono_regular, Typeface.MONOSPACE))
+            NovaTheme.Face.SERIF_SC -> pair(face, font(R.font.cormorant_sc_regular, Typeface.SERIF), font(R.font.cormorant_sc_bold, Typeface.SERIF))
+            NovaTheme.Face.ROMAN -> single(face, font(R.font.forum_regular, Typeface.SERIF))
+            NovaTheme.Face.OLD_STYLE -> pair(face, font(R.font.old_standard_regular, Typeface.SERIF), font(R.font.old_standard_bold, Typeface.SERIF))
+            NovaTheme.Face.TECHNO -> pair(face, font(R.font.play_regular, sans), font(R.font.play_bold, sans))
+        }
     }
 
-    // У встроенных семейств Android — моноширинного, с засечками и узкого — всего
-    // два начертания, обычное и жирное: «medium» и «black» там просто нет, а
-    // подменять их синтетическим утолщением нечем. Поэтому medium сходится с
-    // обычным, а black — с жирным; терминалу, каменному меню и узкому гротеску
-    // это идёт: у всех трёх толщина одна.
-    //
-    // `HEAVY` — наоборот: у него все четыре роли смещены на ступень вверх, вплоть
-    // до Roboto Black. Это темы GTA, где надписи в самой игре «надутые», и
-    // обычный вес рядом с их палитрой выглядит чужим.
-    private fun loadRegular(root: View, face: NovaTheme.Face): Typeface {
-        familyOf(face)?.let { return it }
-        val res = if (face == NovaTheme.Face.HEAVY) R.font.roboto_bold else R.font.roboto_regular
-        return ResourcesCompat.getFont(root.context, res) ?: Typeface.SANS_SERIF
+    private fun single(face: NovaTheme.Face, file: Typeface): FaceSet {
+        val bold = Typeface.create(file, Typeface.BOLD)
+        return FaceSet(face, regular = file, medium = file, bold = bold, black = bold)
     }
 
-    private fun loadMedium(root: View, fallback: Typeface, face: NovaTheme.Face): Typeface {
-        if (familyOf(face) != null) return fallback
-        val res = if (face == NovaTheme.Face.HEAVY) R.font.roboto_black else R.font.roboto_medium
-        return ResourcesCompat.getFont(root.context, res) ?: fallback
-    }
+    private fun pair(face: NovaTheme.Face, regular: Typeface, bold: Typeface): FaceSet =
+        FaceSet(face, regular = regular, medium = bold, bold = bold, black = bold)
 
-    private fun loadBold(root: View, fallback: Typeface, face: NovaTheme.Face): Typeface {
-        familyOf(face)?.let { return Typeface.create(it, Typeface.BOLD) }
-        val res = if (face == NovaTheme.Face.HEAVY) R.font.roboto_black else R.font.roboto_bold
-        return ResourcesCompat.getFont(root.context, res) ?: fallback
-    }
-
-    private fun loadBlack(root: View, fallback: Typeface, face: NovaTheme.Face): Typeface {
-        if (familyOf(face) != null) return fallback
-        return ResourcesCompat.getFont(root.context, R.font.roboto_black) ?: fallback
-    }
+    private class FaceSet(
+        val face: NovaTheme.Face,
+        val regular: Typeface,
+        val medium: Typeface,
+        val bold: Typeface,
+        val black: Typeface,
+    )
 
     @Volatile
-    private var cachedFace: NovaTheme.Face = NovaTheme.Face.DEFAULT
-
-    @Volatile
-    private var cachedRegular: Typeface? = null
-
-    @Volatile
-    private var cachedMedium: Typeface? = null
-
-    @Volatile
-    private var cachedBold: Typeface? = null
-
-    @Volatile
-    private var cachedBlack: Typeface? = null
+    private var cached: FaceSet? = null
 }

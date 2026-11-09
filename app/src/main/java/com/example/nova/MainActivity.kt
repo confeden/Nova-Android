@@ -163,6 +163,25 @@ class MainActivity : AppCompatActivity() {
          */
         private const val SELECTOR_ROWS = 4
 
+        /** Три полосы кнопок плюс список профилей Nova вместо четвёртой, в «полосах». */
+        private const val SELECTOR_ROWS_WITH_NOVA_LIST = 5.5f
+
+        /**
+         * Шаг полосы кнопок (высота + отступ), который держим при списке Nova, dp:
+         * обычные 36 + 5, как без списка. Прежние 34 сплющивали кнопки.
+         */
+        private const val NOVA_CHIP_PITCH_DP = 41f
+
+        /** Место под плашку страны под списком Nova, dp; см. [novaBadgeRoomPx]. */
+        private const val NOVA_BADGE_ROOM_DP = 36f
+
+        /** Сколько строк списка Nova хотим увидеть: ради них сжимается шкала и поднимается кнопка. */
+        private const val NOVA_WANTED_LIST_ROWS = 8
+
+        /** Высота шкалы пинга в разметке и её нижняя граница, dp. */
+        private const val GRAPH_BASE_HEIGHT_DP = 64f
+        private const val GRAPH_MIN_HEIGHT_DP = 40f
+
         /** Под селектором в горизонтали: строка пояснений и «Настройки» с отступами. */
         private const val LANDSCAPE_SELECTOR_FOOTER_DP = 100f
 
@@ -801,7 +820,11 @@ class MainActivity : AppCompatActivity() {
             // машинерия WARP не подходит вовсе: там профиль опознаётся парой
             // «режим + endpoint», а здесь узел задаётся целиком ссылкой — раньше
             // кнопка уходила в ветку WARP и отвечала «нет следующей WARP-конфигурации».
-            if (clientData.shouldUseVlessTransport()) {
+            // Nova — тот же механизм смены узла на ходу, что у VLESS; ветка WARP
+            // пересобрала бы сеанс через REAPPLY и остановила tun2proxy.
+            if (clientData.shouldUseVlessTransport() ||
+                clientData.getExitRegionPreference().trim().lowercase(Locale.ROOT) == ConnectionSelectorPolicy.CHIP_NOVA
+            ) {
                 switchToNextVlessProfile()
                 return@setOnClickListener
             }
@@ -1129,6 +1152,12 @@ class MainActivity : AppCompatActivity() {
         // сверки давно не было. В обеих сборках — это не обновление приложения.
         DnsServerFeed.syncSchedule(this)
         DnsServerFeed.refreshInBackground(this, LogManager::log)
+        // Встроенный список Nova: расписание раз в 12 часов и сверка, если снимок
+        // устарел. `refreshInBackground` читает nova_list.json (сотни КБ) для
+        // решения «пора ли», поэтому зовётся не с главного потока.
+        NovaList.syncSchedule(this)
+        Thread({ NovaList.refreshInBackground(this, LogManager::log) }, "NovaListLaunch")
+            .apply { isDaemon = true; start() }
         refreshInstallUpdateButton()
         btnConnect.setPillStyle(
             fillColor = Color.argb(78, 220, 208, 255),
@@ -1323,6 +1352,14 @@ class MainActivity : AppCompatActivity() {
             insets
         }
         applyOrientationLayout()
+        // Бейдж, микро-лог и список меняют раскладку без обращения к селектору.
+        mainRoot.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            if (!isLandscapeLayout) {
+                distributePortraitSpace()
+                applyRegionChipHeights()
+                fitNovaListHeight()
+            }
+        }
     }
 
     /**
@@ -1447,7 +1484,13 @@ class MainActivity : AppCompatActivity() {
         // Высота кнопок селектора считалась под прежний промежуток.
         regionChipHeightPx = 0
         regionChipGapPx = 0
-        mainRoot.post { applyRegionChipHeights() }
+        // `applyTo` вернул шкалу и перекос кнопки к значениям из XML.
+        portraitConnectShiftPx = 0
+        mainRoot.post {
+            distributePortraitSpace()
+            applyRegionChipHeights()
+            fitNovaListHeight()
+        }
         // Кольца расходятся от кнопки, а она переехала.
         syncPulseOriginToConnectButton()
         // Фактура собрана под размер экрана: повёрнутый растр растягивался бы
@@ -1715,6 +1758,7 @@ class MainActivity : AppCompatActivity() {
         startFlowExecutor.shutdown()
         ipExecutor.shutdown()
         latencyExecutor.shutdown()
+        novaProfileList?.destroy()
         // Пул ленивый: трогаем его только если он вообще создавался, иначе закрытие
         // экрана само же его и поднимет.
         if (lazyTraceExecutor.isInitialized()) traceExecutor.shutdown()
@@ -2150,6 +2194,14 @@ class MainActivity : AppCompatActivity() {
     // -- четвёртая строка: подрегион выбранного транспорта --------------------
 
     private var mainSubRegionRow: View? = null
+
+    /** Список профилей Nova в четвёртой полосе; null, пока разметка не собрана. */
+    private var novaProfileList: NovaProfileListController? = null
+
+    /** Подпись `#N ПРОТОКОЛ` активного узла Nova для бейджа — из памяти, обновляется в фоне. */
+    @Volatile private var novaBadgeSuffix: String = ""
+    @Volatile private var novaBadgeActiveId: String = "\u0000"
+    @Volatile private var novaBadgeReadAtMs: Long = 0L
     private var mainSubRegionLabel: TextView? = null
     private var mainSubRegionGroup: FlowRadioGroup? = null
 
@@ -2312,7 +2364,17 @@ class MainActivity : AppCompatActivity() {
         // помещались, и — поскольку `wrap_content` в `ConstraintLayout` границы
         // не соблюдает — строка подрегиона рисовалась поверх «Настроек».
         // Проверено на устройстве.
-        val pitch = usable / SELECTOR_ROWS
+        // С выбранной NOVA четвёртую полосу занимает список профилей (~2,5 полосы).
+        val novaList = novaProfileList?.takeIf { it.shown }
+        val pitch = if (novaList != null) {
+            // Со списком Nova кнопки держат свой шаг, а список берёт остаток (от двух
+            // строк); место под него готовит [distributePortraitSpace].
+            val badgeRoom = novaBadgeRoomPx()
+            val forChips = (usable - badgeRoom - 4 * novaList.rowHeightPx) / 3
+            forChips.coerceAtMost((NOVA_CHIP_PITCH_DP * uiScale() * density).toInt())
+        } else {
+            (usable / SELECTOR_ROWS.toFloat()).toInt()
+        }
         val gap = (pitch * CHIP_ROW_GAP_SHARE).toInt().coerceIn(
             (MIN_CHIP_ROW_GAP_DP * density).toInt(),
             (CHIP_ROW_GAP_DP * density).toInt(),
@@ -2328,6 +2390,165 @@ class MainActivity : AppCompatActivity() {
         mainSubRegionGroup?.let { group ->
             for (index in 0 until group.childCount) applyChipMetrics(group.getChildAt(index), height, gap)
         }
+    }
+
+    private var portraitConnectShiftPx = 0
+
+    /**
+     * Портрет: делит вертикаль между верхом, селектором и низом, когда выбран NOVA
+     * и под список профилей нужно больше места. Низ экрана уже прижат (шкала, адреса,
+     * «Настройки» висят на версии), поэтому сначала сжимается шкала пинга (до
+     * [GRAPH_MIN_HEIGHT_DP]) и всё, что над ней, опускается; если этого мало, главная
+     * кнопка вместе со статусом поднимается (вертикальный перекос кнопки, не выше
+     * строки состояния). Без списка разметка как в XML. Считается от неизменных
+     * величин (высота корня, кнопки, шкалы), поэтому повторный вызов результата не
+     * меняет и цикла раскладки нет.
+     */
+    private fun distributePortraitSpace() {
+        if (!::mainRoot.isInitialized || isLandscapeLayout || !::btnConnect.isInitialized) return
+        val graph = findViewById<View>(R.id.graph_latency) ?: return
+        val settings = findViewById<View>(R.id.btn_settings) ?: return
+        val status = findViewById<View>(R.id.tvStatus) ?: return
+        val microLog = findViewById<View>(R.id.ll_micro_log)
+        val rootH = mainRoot.height
+        val connectH = btnConnect.height
+        if (rootH <= 0 || connectH <= 0 || settings.top <= 0) return
+        val graphLp = graph.layoutParams
+        val connectLp = btnConnect.layoutParams as? androidx.constraintlayout.widget.ConstraintLayout.LayoutParams ?: return
+        val density = resources.displayMetrics.density
+        val scale = uiScale()
+        val baseConnectBottom = (rootH - connectH) / 2 + connectH
+        // Раскладка ещё не догнала параметры: дождёмся следующего прохода.
+        if (graph.height != graphLp.height || kotlin.math.abs(btnConnect.bottom - (baseConnectBottom - portraitConnectShiftPx)) > 1) return
+        val baseGraph = (GRAPH_BASE_HEIGHT_DP * density).toInt()
+        val minGraph = (GRAPH_MIN_HEIGHT_DP * density).toInt()
+        var wantedGraph = baseGraph
+        var wantedShift = 0
+        var wantedPadBottomReduction = 0
+        var wantedPadTopReduction = 0
+        if (novaProfileList?.shown == true) {
+            val glowPad = (SELECTION_GLOW_PAD_DP * density).toInt()
+            val topMargin = (mainRegionScroll?.layoutParams as? ViewGroup.MarginLayoutParams)?.topMargin ?: 0
+            val badgeRoom = novaBadgeRoomPx()
+            val rowPx = novaProfileList?.rowHeightPx ?: (22 * density).toInt()
+            val need = topMargin + (SELECTOR_BOTTOM_RESERVE_DP * density).toInt() + 4 * glowPad + badgeRoom +
+                (3 * NOVA_CHIP_PITCH_DP * scale * density).toInt() + NOVA_WANTED_LIST_ROWS * rowPx
+            val settingsTopAtBase = settings.top + graph.height - baseGraph
+            val deficit = need - (settingsTopAtBase - baseConnectBottom)
+            if (deficit > 0) {
+                wantedGraph = baseGraph - deficit.coerceAtMost(baseGraph - minGraph)
+                val rest = deficit - (baseGraph - wantedGraph)
+                if (rest > 0) {
+                    val rootLoc = IntArray(2)
+                    mainRoot.getLocationInWindow(rootLoc)
+                    // Верхняя граница: верх микро-лога (его строка занимает место и
+                    // когда пуста) или, без него, текст статуса. Воздух вокруг текста
+                    // статуса (44 dp сверху, 60 dp снизу) сжимается до 12 / 40 dp.
+                    val microTop = microLog?.takeIf { it.height > 0 }?.top
+                    val padTopFull = statusPortraitPaddingTop
+                    val padBottomFull = statusPortraitPaddingBottom
+                    val currentTopE = padTopFull - status.paddingTop
+                    val currentBottomE = padBottomFull - status.paddingBottom
+                    val topNow = microTop ?: (status.top + status.paddingTop)
+                    val baseTop = topNow + portraitConnectShiftPx -
+                        currentBottomE - (if (microTop != null) currentTopE else 0)
+                    val minTop = maxOf(mainRoot.paddingTop, landscapeInsetTop - rootLoc[1]) +
+                        ((if (microTop == null) 16 else 8) * density).toInt()
+                    val roomFull = (baseTop - minTop).coerceAtLeast(0)
+                    val maxBottomE = (padBottomFull - (40 * density).toInt()).coerceAtLeast(0)
+                    val maxTopE = if (microTop != null) (padTopFull - (12 * density).toInt()).coerceAtLeast(0) else 0
+                    wantedShift = rest.coerceAtMost(roomFull + maxBottomE + maxTopE)
+                    val extra = (wantedShift - roomFull).coerceAtLeast(0)
+                    wantedPadBottomReduction = extra.coerceAtMost(maxBottomE)
+                    wantedPadTopReduction = (extra - wantedPadBottomReduction).coerceAtMost(maxTopE)
+                }
+            }
+        }
+        val wantedPadBottom = statusPortraitPaddingBottom - wantedPadBottomReduction
+        val wantedPadTop = statusPortraitPaddingTop - wantedPadTopReduction
+        if (status.paddingBottom != wantedPadBottom || status.paddingTop != wantedPadTop) {
+            status.setPadding(status.paddingLeft, wantedPadTop, status.paddingRight, wantedPadBottom)
+        }
+        var relayout = false
+        if (graphLp.height != wantedGraph) {
+            graphLp.height = wantedGraph
+            relayout = true
+        }
+        if (wantedShift != portraitConnectShiftPx) {
+            portraitConnectShiftPx = wantedShift
+            val span = (rootH - connectH).coerceAtLeast(1)
+            connectLp.verticalBias = (((rootH - connectH) / 2f - wantedShift) / span).coerceIn(0f, 1f)
+            relayout = true
+        }
+        if (relayout) mainRoot.requestLayout()
+    }
+
+    /**
+     * Потолок высоты списка Nova: от его верха до «Настроек» (в горизонтали — до
+     * нижней границы селектора), от двух до десяти строк. До первой раскладки
+     * координат нет — тогда ничего не делаем, перерисовка придёт ещё раз.
+     */
+    private fun fitNovaListHeight() {
+        val controller = novaProfileList ?: return
+        if (!controller.shown) return
+        val list = findViewById<View>(R.id.rv_nova_profiles) ?: return
+        val listLoc = IntArray(2)
+        list.getLocationInWindow(listLoc)
+        val limitY = if (isLandscapeLayout) {
+            val rootLoc = IntArray(2)
+            mainRoot.getLocationInWindow(rootLoc)
+            rootLoc[1] + mainRoot.height -
+                (LANDSCAPE_SELECTOR_FOOTER_DP * uiScale() * resources.displayMetrics.density).toInt()
+        } else {
+            val settings = findViewById<View>(R.id.btn_settings) ?: return
+            val settingsLoc = IntArray(2)
+            settings.getLocationInWindow(settingsLoc)
+            settingsLoc[1]
+        }
+        if (listLoc[1] <= 0 || limitY <= listLoc[1]) return
+        val reserve = (SELECTOR_BOTTOM_RESERVE_DP * resources.displayMetrics.density).toInt()
+        // Нижний отступ списка — место под плашку страны; его тоже вычитаем.
+        val badgeRoom = novaBadgeRoomPx()
+        (list.layoutParams as? ViewGroup.MarginLayoutParams)?.let { lp ->
+            if (lp.bottomMargin != badgeRoom) {
+                lp.bottomMargin = badgeRoom
+                list.layoutParams = lp
+            }
+        }
+        controller.fitHeight(limitY - listLoc[1] - reserve - badgeRoom)
+    }
+
+    /**
+     * Место под плашку страны под списком Nova. В портрете она висит над «Настройками»
+     * справа и видна только при подключении; без неё запас лишь оставлял пустую полосу
+     * над «Настройками» и отнимал высоту у кнопок. Смена видимости плашки перекладывает
+     * `mainRoot`, и слушатель раскладки пересчитывает список.
+     */
+    private fun novaBadgeRoomPx(): Int {
+        val shown = isLandscapeLayout ||
+            (::tvCountryBadge.isInitialized && tvCountryBadge.visibility == View.VISIBLE)
+        return if (shown) (NOVA_BADGE_ROOM_DP * resources.displayMetrics.density).toInt() else 0
+    }
+
+    /**
+     * Выбран профиль в списке Nova. Выбор уже записан в файл; если сеанс идёт на
+     * NOVA, служба переключается на месте (`nova:<id>`, «nova:» — авто), иначе
+     * выбор применится при подключении.
+     */
+    private fun onNovaProfileChosen(id: String) {
+        LogManager.log("Главный экран: профиль Nova → ${id.ifEmpty { "авто" }}.")
+        val state = clientData.getServiceState()
+        val live = state == NovaVpnService.STATE_CONNECTED || state == NovaVpnService.STATE_CONNECTING
+        if (!live || clientData.getExitRegionPreference().trim().lowercase() != ConnectionSelectorPolicy.CHIP_NOVA) return
+        updateUiByState(NovaVpnService.STATE_CONNECTING)
+        ContextCompat.startForegroundService(
+            this,
+            Intent(this, NovaVpnService::class.java).apply {
+                action = NovaVpnService.ACTION_SWITCH_VLESS_PROFILE
+                putExtra(NovaVpnService.EXTRA_VLESS_TARGET_LINK, NovaVpnService.NOVA_TARGET_PREFIX + id)
+                applyCurrentPreferenceExtras(this)
+            }
+        )
     }
 
     /** Во сколько раз крупнее телефона рисуем кнопки и промежутки: 1 на телефоне, до 1,3 на планшете. */
@@ -2389,6 +2610,9 @@ class MainActivity : AppCompatActivity() {
         dnsModeNotice = findViewById(R.id.tv_dns_mode_notice)
         mainRegionNotice = findViewById(R.id.tv_exit_last)
         mainSubRegionRow = findViewById(R.id.ll_exit_sub_region)
+        novaProfileList = findViewById<NovaMaxHeightRecyclerView>(R.id.rv_nova_profiles)?.let { list ->
+            NovaProfileListController(this, list, { themeAccentColor }, ::onNovaProfileChosen)
+        }
         mainDotHint = findViewById<TextView>(R.id.tv_exit_dot_hint)?.apply {
             setOnClickListener { showPrivateDnsExplanation() }
         }
@@ -2469,6 +2693,12 @@ class MainActivity : AppCompatActivity() {
      */
     private fun applyChipFromMainScreen(chipValue: String) {
         applyDnsFrostState(chipValue, animate = true)
+        if (chipValue == ConnectionSelectorPolicy.CHIP_NOVA) {
+            LogManager.log("Главный экран: выбран NOVA.")
+            // Решение «пора ли сверять» читает файл списка — не на главном потоке.
+            Thread({ NovaList.refreshInBackground(this, LogManager::log) }, "NovaChipTap")
+                .apply { isDaemon = true; start() }
+        }
         if (chipValue == ConnectionSelectorPolicy.CHIP_TOR) {
             LogManager.log("Главный экран: выбран TOR.")
             // Сбор мостов запускается заранее, а не в момент подключения: он идёт
@@ -2915,8 +3145,12 @@ class MainActivity : AppCompatActivity() {
         val importedActive = clientData.isImportedConfigSourceActive()
         if (importedActive) {
             val wasShown = importedBlockShown
+            // Импортированные конфиги — не DNS: лёд и подпись режима снимаются,
+            // иначе они остаются поверх блока импортированных профилей.
+            applyDnsFrostState("", animate = false)
             mainRegionChips?.visibility = View.GONE
             mainSubRegionRow?.visibility = View.GONE
+            novaProfileList?.onVisible(false, false, false)
             notice?.visibility = View.GONE
             showImportedBlock(true)
             if (!wasShown) refreshImportedProfilesField()
@@ -2975,7 +3209,9 @@ class MainActivity : AppCompatActivity() {
         // координат ещё нет, а перерисовка приходит несколько раз в секунду.
         // Повторный счёт стоит два сравнения — менять что-либо она будет только
         // когда результат правда изменился.
+        distributePortraitSpace()
         applyRegionChipHeights()
+        fitNovaListHeight()
 
         // Запрет держится выключенными кнопками, а не снятым обработчиком:
         // выключенную кнопку нажать нельзя, и снимать обработчик — значит терять
@@ -3002,6 +3238,21 @@ class MainActivity : AppCompatActivity() {
     private fun refreshMainSubRegionRow(chipValue: String) {
         val row = mainSubRegionRow ?: return
         val group = mainSubRegionGroup ?: return
+        // NOVA: вместо региональных кнопок в этой же полосе стоит список профилей.
+        if (chipValue == ConnectionSelectorPolicy.CHIP_NOVA && novaProfileList != null) {
+            row.visibility = View.GONE
+            mainDotHintChip = chipValue
+            mainDotHint?.visibility = View.GONE
+            mainSubRegionSignature = ""
+            if (group.childCount > 0) group.removeAllViews()
+            novaProfileList?.onVisible(
+                visible = true,
+                tunnelLive = isTunnelConnected() || vpnState == NovaVpnService.STATE_CONNECTING,
+                dnsSessionActive = isDnsSessionActive(),
+            )
+            return
+        }
+        novaProfileList?.onVisible(false, false, false)
         // Подсказка про DoT нужна только там, где она что-то меняет: у Tor и у
         // DNS-туннеля, и только при включённом строгом «Частном DNS».
         val dotHintNeeded = (
@@ -3305,6 +3556,10 @@ class MainActivity : AppCompatActivity() {
         // строятся, и без этой строки экран показывал «WARP» на живом Tor.
         if (clientData.getExitRegionPreference().trim().lowercase() == "tor") {
             return NovaVpnService.BACKEND_TOR
+        }
+        // Nova — то же правило: прокси на петле, и без явной строки бейдж угадывал WARP.
+        if (clientData.getExitRegionPreference().trim().lowercase() == ConnectionSelectorPolicy.CHIP_NOVA) {
+            return NovaVpnService.BACKEND_NOVA
         }
         val snapshot = snapshotBackend?.trim().orEmpty()
         val selectedRegion = clientData.getExitRegionPreference().trim().lowercase()
@@ -3625,6 +3880,10 @@ class MainActivity : AppCompatActivity() {
         }
         if (clientData.getExitRegionPreference().trim().lowercase() == "tor") {
             return NovaVpnService.BACKEND_TOR
+        }
+        // Nova — то же правило: прокси на петле, и без явной строки бейдж угадывал WARP.
+        if (clientData.getExitRegionPreference().trim().lowercase() == ConnectionSelectorPolicy.CHIP_NOVA) {
+            return NovaVpnService.BACKEND_NOVA
         }
         val selectedRegion = clientData.getExitRegionPreference().trim().lowercase()
         val restartSession = clientData.getRestartSession()
@@ -4313,7 +4572,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun switchToNextVlessProfile() {
-        val profileCount = clientData.getVlessProfileLinks().size
+        // Nova: следующий узел по замеру выбирает служба, счётчик ссылок VLESS тут ни при чём.
+        val novaChip = clientData.getExitRegionPreference().trim().lowercase() == ConnectionSelectorPolicy.CHIP_NOVA
+        val profileCount = if (novaChip) 2 else clientData.getVlessProfileLinks().size
         if (profileCount == 0) {
             Toast.makeText(this, NovaLanguage.tr(this, "Нет профилей VLESS"), Toast.LENGTH_SHORT).show()
             return
@@ -5034,6 +5295,29 @@ class MainActivity : AppCompatActivity() {
         return vlessBadgeName
     }
 
+    /**
+     * `#N ПРОТОКОЛ` активного узла Nova для бейджа. Файлы читаются в фоне не чаще
+     * раза в пять секунд (I13); список узлов перечитывается, только когда сменился
+     * сам активный узел.
+     */
+    private fun novaBadgeSuffixForBadge(): String {
+        val now = SystemClock.elapsedRealtime()
+        if (now - novaBadgeReadAtMs > VLESS_BADGE_NAME_REFRESH_MS) {
+            novaBadgeReadAtMs = now
+            Thread({
+                runCatching {
+                    val id = NovaList.active(this)
+                    if (id != novaBadgeActiveId) {
+                        val node = NovaList.nodes(this).firstOrNull { it.id == id }
+                        novaBadgeSuffix = node?.let { "#${it.number} ${it.protocol}" }.orEmpty()
+                        novaBadgeActiveId = id
+                    }
+                }
+            }, "nova-badge-name").apply { isDaemon = true }.start()
+        }
+        return novaBadgeSuffix
+    }
+
     private fun buildTunnelBadgeText(): String {
         val backend = if (isTunnelConnected()) {
             resolveConnectedUiBackend()
@@ -5085,6 +5369,10 @@ class MainActivity : AppCompatActivity() {
         }
         if (NovaVpnService.isPublishedTransport(transport, NovaVpnService.TRANSPORT_AWG)) {
             return "${NovaVpnService.TRANSPORT_AWG}: $effectiveCountry"
+        }
+        if (backend.trim().uppercase().startsWith(NovaVpnService.BACKEND_NOVA)) {
+            val suffix = novaBadgeSuffixForBadge()
+            return if (suffix.isEmpty()) "NOVA: $effectiveCountry" else "NOVA: $effectiveCountry · $suffix"
         }
         if (backend.trim().uppercase().startsWith(NovaVpnService.BACKEND_VLESS)) {
             // Имя профиля из ссылки (`#имя`): по нему человек узнаёт свой узел,
@@ -5191,6 +5479,7 @@ class MainActivity : AppCompatActivity() {
             preference == "eu" || preference == "us" || preference == "as" ->
                 "${NovaVpnService.BACKEND_OPERA}-${preference.uppercase()}"
             preference == "vless" -> NovaVpnService.BACKEND_VLESS
+            preference == ConnectionSelectorPolicy.CHIP_NOVA -> NovaVpnService.BACKEND_NOVA
             // Остаточный бэкенд прошлой сессии годится только там, где выбор не назван
             // явно. Пока сюда попадал и VLESS, подключение к нему подписывалось «EU» от
             // недавнего сеанса Opera.
@@ -5645,6 +5934,7 @@ class MainActivity : AppCompatActivity() {
             preference == "tor" -> "ПОДКЛЮЧЕНИЕ... TOR"
             preference == "vless" -> "ПОДКЛЮЧЕНИЕ... VLESS"
             preference == "proton" -> "ПОДКЛЮЧЕНИЕ... AWG Proton"
+            preference == "nova" -> "ПОДКЛЮЧЕНИЕ... Nova"
             isOperaBackend(currentTunnelBackend) -> {
                 val normalized = currentTunnelBackend.trim().uppercase()
                 val region = when {

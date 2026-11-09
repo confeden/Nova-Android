@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Одна строка списка профилей Nova на главном экране: «● #12  VLESS·R  host:443  85 мс».
+    Строка в одну линию и плотная: номер, протокол и пинг — фиксированные колонки,
+    адрес берёт остаток и сокращается многоточием посередине.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="22dp"
+    android:clickable="true"
+    android:focusable="true"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingStart="4dp"
+    android:paddingEnd="4dp">
+
+    <TextView
+        android:id="@+id/tv_nova_mark"
+        android:layout_width="12dp"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:maxLines="1"
+        android:textColor="#B9C4D6"
+        android:textSize="11sp" />
+
+    <TextView
+        android:id="@+id/tv_nova_num"
+        android:layout_width="36dp"
+        android:layout_height="wrap_content"
+        android:maxLines="1"
+        android:textColor="#B9C4D6"
+        android:textSize="11sp" />
+
+    <TextView
+        android:id="@+id/tv_nova_proto"
+        android:layout_width="62dp"
+        android:layout_height="wrap_content"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:textColor="#B9C4D6"
+        android:textSize="11sp" />
+
+    <TextView
+        android:id="@+id/tv_nova_addr"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:ellipsize="middle"
+        android:maxLines="1"
+        android:singleLine="true"
+        android:textColor="#B9C4D6"
+        android:textSize="11sp" />
+
+    <TextView
+        android:id="@+id/tv_nova_ping"
+        android:layout_width="52dp"
+        android:layout_height="wrap_content"
+        android:gravity="end"
+        android:maxLines="1"
+        android:textColor="#B9C4D6"
+        android:textSize="11sp" />
+</LinearLayout>

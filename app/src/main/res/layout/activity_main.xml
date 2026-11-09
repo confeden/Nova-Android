@@ -453,6 +453,11 @@
                 android:text="PROTON" />
 
             <RadioButton
+                android:id="@+id/rb_exit_nova"
+                style="@style/NovaMainRegionChip"
+                android:text="NOVA" />
+
+            <RadioButton
                 android:id="@+id/rb_exit_tor"
                 style="@style/NovaMainRegionChip"
                 android:text="TOR" />
@@ -539,6 +544,25 @@
                     android:orientation="horizontal" />
             </HorizontalScrollView>
         </LinearLayout>
+
+        <!--
+            Список профилей встроенной подписки Nova. Занимает место четвёртой полосы,
+            когда выбрана кнопка NOVA: подрегион у неё не бывает, зато бывает сотня
+            узлов. Высота ограничена пятью строками (и свободным местом до
+            «Настроек»), дальше список прокручивается внутри себя. Наполняет и
+            держит `NovaProfileListController`.
+        -->
+        <!-- Нижний отступ — место под плашку страны (tv_country_badge): она
+             привязана к «Настройкам» справа и иначе ложилась на строки списка. -->
+        <com.example.nova.NovaMaxHeightRecyclerView
+            android:id="@+id/rv_nova_profiles"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:layout_marginBottom="36dp"
+            android:overScrollMode="never"
+            android:scrollbars="vertical"
+            android:visibility="gone" />
 
         <!--
             Выбор протокола импортированных профилей (AUTO и семьи). Вместо регионов

@@ -892,6 +892,9 @@ class NovaVpnService : OperaNativeVpnService() {
 
         /** Ссылка профиля VLESS, на который надо перейти на ходу (тап по строке списка). */
         const val EXTRA_VLESS_TARGET_LINK = "vless_target_link"
+
+        /** Цель переключения из списка Nova: `nova:<id>`, `nova:` — «Авто». */
+        const val NOVA_TARGET_PREFIX = "nova:"
         const val MANUAL_STEP_MASQUE = "masque"
         const val MANUAL_STEP_OPERA_EU = "opera-eu"
         const val MANUAL_STEP_OPERA_US = "opera-us"
@@ -1187,6 +1190,9 @@ class NovaVpnService : OperaNativeVpnService() {
         const val BACKEND_TOR = "TOR"
         const val BACKEND_DNS = "DNS"
 
+        /** Встроенный список Nova. Префикс VLESS — чтобы вся обвязка «прокси на петле» узнала его. */
+        const val BACKEND_NOVA = "VLESS-NOVA"
+
         /**
          * MTU туннеля VLESS. Наружу трафик уходит обычным TCP-соединением ядра Xray,
          * поэтому запас нужен только под заголовки TLS/REALITY — тот же 1420, что и у
@@ -1479,12 +1485,16 @@ class NovaVpnService : OperaNativeVpnService() {
          */
         private const val VLESS_SESSION_CREDIT_MS = 20_000L
 
+        /** «Авто» в Nova: сколько лучших по замеру узлов пробуем, прежде чем сдаться. */
+        private const val NOVA_AUTO_MAX_ATTEMPTS = 40
+
 
         /** Метки транспорта для честного отображения в интерфейсе. */
         const val TRANSPORT_MASQUE = "MASQUE"
         const val TRANSPORT_VLESS = "VLESS"
         const val TRANSPORT_TOR = "TOR"
         const val TRANSPORT_DNS = "DNS"
+        const val TRANSPORT_NOVA = "NOVA"
 
         /**
          * Сколько ждём одну несущую DNS-туннеля.
@@ -2039,6 +2049,10 @@ class NovaVpnService : OperaNativeVpnService() {
             if (requestVlessProfileSwitchInPlace(intent.getStringExtra(EXTRA_VLESS_TARGET_LINK))) return START_STICKY
             // Перебор ещё не идёт — поднимаем сессию обычным путём, а следующий профиль
             // выбираем сами: экран живёт в другом процессе и порядок списка видит свой.
+            if (intent.getStringExtra(EXTRA_VLESS_TARGET_LINK).orEmpty().startsWith(NOVA_TARGET_PREFIX)) {
+                // Выбор Nova уже записан экраном в файл; поднимаем сессию обычным путём.
+                return if (reapplyCurrentPreferences(intent)) START_STICKY else START_NOT_STICKY
+            }
             LogManager.log("VLESS: перебора нет (rotationActive=$vlessRotationActive), выбираем профиль и поднимаем сессию.")
             intent.getStringExtra(EXTRA_VLESS_TARGET_LINK)?.trim()?.takeIf { it.isNotEmpty() }
                 ?.let(clientData::setVlessConfigLink)
@@ -3368,6 +3382,7 @@ class NovaVpnService : OperaNativeVpnService() {
             allowBlockingWait = true,
         )
         runCatching { XrayBridge.stop() }
+        runCatching { NovaProxyProcess.stop(LogManager::log) }
         // Сеанс Tor снимается здесь же: у него нет владельца, и без этого новая
         // фаза перехватывала бы уже работающий tor — новый torrc он не читает, а
         // `awaitBootstrap` сразу получал бы «100 %» от прежнего.
@@ -4716,6 +4731,32 @@ class NovaVpnService : OperaNativeVpnService() {
             return true
         }
 
+        // Nova — своя фаза, как DNS: выбранный список не подменяется другим (I1).
+        if (regionPreference == ConnectionSelectorPolicy.CHIP_NOVA) {
+            setCurrentBackend(BACKEND_NOVA)
+            currentTransportLabel = TRANSPORT_NOVA
+            broadcastState(STATE_CONNECTING)
+            startSafeServiceThread("NovaReapplyNovaList") {
+                if (!waitForPreviousCleanupIfNeeded(connectGenerationId, "nova-reapply")) {
+                    return@startSafeServiceThread
+                }
+                if (!isConnectGenerationCurrent(connectGenerationId)) return@startSafeServiceThread
+                if (!ensureFreshTransportState(connectGenerationId, "nova-reapply")) {
+                    return@startSafeServiceThread
+                }
+                if (runNovaListPhase(clientData, connectGenerationId)) return@startSafeServiceThread
+                if (isUserStopped || !isConnectGenerationCurrent(connectGenerationId)) {
+                    return@startSafeServiceThread
+                }
+                LogManager.log("Nova не поднялся, а подменять его другим протоколом нельзя.")
+                isRunning = false
+                broadcastState(STATE_STOPPED)
+                stopSelf()
+            }
+            isRunning = true
+            return true
+        }
+
         // Tor — как VLESS: своя фаза, и общая ветка WARP ему не подходит вовсе.
         if (regionPreference == ConnectionSelectorPolicy.CHIP_TOR) {
             setCurrentBackend(BACKEND_TOR)
@@ -5970,6 +6011,15 @@ class NovaVpnService : OperaNativeVpnService() {
                 stopSelf()
                 return
             }
+            if (regionPreference == ConnectionSelectorPolicy.CHIP_NOVA) {
+                if (runNovaListPhase(clientData, connectGenerationId)) return
+                if (isUserStopped || !isConnectGenerationCurrent(connectGenerationId)) return
+                LogManager.log("Nova не поднялся, а подменять его другим протоколом нельзя.")
+                isRunning = false
+                broadcastState(STATE_STOPPED)
+                stopSelf()
+                return
+            }
             if (regionPreference == ConnectionSelectorPolicy.CHIP_TOR) {
                 installSocketProtector()
                 if (runTorPhase(clientData, connectGenerationId)) return
@@ -6174,6 +6224,7 @@ class NovaVpnService : OperaNativeVpnService() {
             } catch (t: Throwable) {
                 LogManager.log("Не удалось остановить ядро Xray при остановке сервиса: ${t.message}")
             }
+            runCatching { NovaProxyProcess.stop(LogManager::log) }
             stopTorSessionQuietly()
             // DNS-туннель снимается здесь же, и это не симметрия ради симметрии.
             //
@@ -6403,6 +6454,16 @@ class NovaVpnService : OperaNativeVpnService() {
                 if (isUserStopped || !isConnectGenerationCurrent(connectGenerationId)) return
                 closeActiveInterface()
                 LogManager.log("DNS не поднялся, а подменять его другим протоколом нельзя.")
+                isRunning = false
+                broadcastState(STATE_STOPPED)
+                stopSelf()
+                return
+            }
+            if (!isUserStopped && regionPreference == ConnectionSelectorPolicy.CHIP_NOVA) {
+                if (runNovaListPhase(clientData, connectGenerationId)) return
+                if (isUserStopped || !isConnectGenerationCurrent(connectGenerationId)) return
+                closeActiveInterface()
+                LogManager.log("Nova не поднялся, а подменять его другим протоколом нельзя.")
                 isRunning = false
                 broadcastState(STATE_STOPPED)
                 stopSelf()
@@ -9386,6 +9447,9 @@ class NovaVpnService : OperaNativeVpnService() {
         if (!vlessRotationActive) return false
         vlessSwitchTargetLink = targetLink?.trim()?.takeIf { it.isNotEmpty() }
         pendingVlessProfileSwitch = true
+        // Статус уходит в «подключение» в тот же миг: иначе экран до смены узла показывал
+        // «подключено», потом «не подключено» и только затем «подключение».
+        broadcastState(STATE_CONNECTING)
         LogManager.log(
             if (vlessSwitchTargetLink != null) "VLESS: переходим на выбранный профиль, без разрыва туннеля."
             else "VLESS: берём следующий профиль по кнопке, без разрыва туннеля."
@@ -9527,7 +9591,14 @@ class NovaVpnService : OperaNativeVpnService() {
                 LogManager.log("tun2proxy для VLESS завершился. Поднимаем туннель заново.")
                 return VlessSessionResult(VlessSessionOutcome.TUNNEL_GONE, uptimeMs())
             }
-            Thread.sleep(1500L)
+            // Короткими кусками, чтобы нажатие кнопки не ждало до полутора секунд и
+            // последующей пробы старого узла: статус обязан уйти в «подключение» сразу.
+            var sleptMs = 0L
+            while (sleptMs < 1500L && !pendingVlessProfileSwitch && !isUserStopped) {
+                Thread.sleep(100L)
+                sleptMs += 100L
+            }
+            if (pendingVlessProfileSwitch) continue
             // Только проба через узел: VALIDATED залипает, а проверка через сеть VPN
             // на tun2proxy проходит всегда — рукопожатие и DNS отвечает он сам (G258).
             // Проба живости и есть замер задержки: запрос идёт наружу через сам узел.
@@ -9736,6 +9807,173 @@ class NovaVpnService : OperaNativeVpnService() {
         return true
     }
 
+    /**
+     * Фаза «Nova»: встроенный список Nova (как подписка Nova PC) через помощник
+     * `nova-proxy` на Mihomo -> SOCKS5 на петле -> tun2proxy -> TUN.
+     *
+     * Выбор человека — закон (I1): названный профиль поднимается только он, и при
+     * отказе фаза говорит об этом, а не уходит на соседний. Перебор по замеру идёт
+     * лишь в «Авто» (выбор «»). Метка бэкенда начинается с VLESS намеренно: вся
+     * обвязка «прокси на петле» (проба выхода, пинг, раздельный туннель) у службы и
+     * экрана уже ключуется по этому префиксу.
+     */
+    private fun runNovaListPhase(clientData: ClientData, connectGenerationId: Int): Boolean {
+        if (NovaList.nodes(this).isEmpty()) {
+            LogManager.log("Nova: список ещё не загружен — загружаем перед подключением.")
+            publishTransportNotice(clientData, "Загружаем список Nova…")
+            NovaList.refresh(this, LogManager::log)
+            if (isUserStopped || !isConnectGenerationCurrent(connectGenerationId)) return true
+        }
+        if (NovaList.nodes(this).isEmpty()) {
+            LogManager.log("Nova: список пуст — подключаться не к чему.")
+            publishTransportNotice(clientData, "Список Nova недоступен.", keepOnStop = true)
+            return false
+        }
+        if (!NovaProxyProcess.isAvailable(this)) {
+            LogManager.log("Nova недоступен: нет движка ${NovaProxyProcess.BINARY} для ABI ${Build.SUPPORTED_ABIS.joinToString()}.")
+            publishTransportNotice(clientData, "Nova недоступен на этом устройстве.", keepOnStop = true)
+            return false
+        }
+        if (!OperaNativeVpnService.isNativeRuntimeAvailable(this)) {
+            LogManager.log("Nova недоступен: нет native-библиотеки tun2proxy.")
+            publishTransportNotice(clientData, "Nova недоступен на этом устройстве.", keepOnStop = true)
+            return false
+        }
+
+        currentTransportLabel = TRANSPORT_NOVA
+        setCurrentBackend(BACKEND_NOVA)
+        pendingVlessProfileSwitch = false
+        vlessSwitchTargetLink = null
+        vlessRotationOwnerGeneration = connectGenerationId
+        vlessRotationActive = true
+
+        fun plan(): Pair<Boolean, List<NovaList.Node>> {
+            val ordered = NovaList.ordered(this)
+            val chosen = NovaList.choice(this)
+            val explicit = chosen.isNotEmpty() && ordered.any { it.id == chosen }
+            return if (explicit) true to ordered.filter { it.id == chosen }
+            else false to ordered.take(NOVA_AUTO_MAX_ATTEMPTS)
+        }
+
+        var (explicit, rotation) = plan()
+        var tunnelUp = false
+        var tunnelPort = -1
+        var cursor = 0
+
+        // Цель переключения: `nova:<id>` / `nova:` — выбор с экрана (уже записан в
+        // файл, план собирается заново); без цели — кнопка «след. профиль»: берём
+        // узел после текущего в порядке замера, по кругу.
+        fun switchTo(current: NovaList.Node) {
+            val target = vlessSwitchTargetLink
+            vlessSwitchTargetLink = null
+            if (target != null) {
+                val next = plan(); explicit = next.first; rotation = next.second; cursor = 0
+                return
+            }
+            val ordered = NovaList.ordered(this).take(NOVA_AUTO_MAX_ATTEMPTS)
+            val at = ordered.indexOfFirst { it.id == current.id }
+            explicit = false
+            rotation = if (at >= 0) ordered.drop(at + 1) + ordered.take(at + 1) else ordered
+            cursor = 0
+        }
+        try {
+            while (cursor < rotation.size) {
+                if (isUserStopped || !isConnectGenerationCurrent(connectGenerationId)) return true
+                val node = rotation[cursor++]
+                currentAttemptOrdinal = cursor
+                currentAttemptTotal = rotation.size
+                pendingVlessProfileSwitch = false
+                broadcastState(STATE_CONNECTING)
+                LogManager.log(
+                    "Nova профиль $cursor/${rotation.size}: #${node.number} ${node.protocol} " +
+                        "(${node.server}:${node.port})${if (explicit) ", выбран вручную" else ""}."
+                )
+                // Новый узел — новый процесс движка на том же порту, на который уже
+                // смотрит tun2proxy: туннель не трогаем. Пересборка — только если
+                // порт занять не удалось.
+                val socksPort = NovaProxyProcess.start(
+                    this, node, LogManager::log, preferredPort = if (tunnelUp) tunnelPort else 0,
+                )
+                if (socksPort == 0) {
+                    NovaList.recordPings(this, mapOf(node.id to NovaList.Ping(-1, false, System.currentTimeMillis())))
+                    publishTransportNotice(clientData, "Профиль #${node.number} не принят движком — берём следующий.")
+                    continue
+                }
+                vlessSocksPort = socksPort
+                if (!awaitVlessProxyReady(socksPort, connectGenerationId)) {
+                    if (isUserStopped || !isConnectGenerationCurrent(connectGenerationId)) return true
+                    NovaProxyProcess.stop(LogManager::log)
+                    if (pendingVlessProfileSwitch) {
+                        switchTo(node)
+                        continue
+                    }
+                    NovaList.recordPings(this, mapOf(node.id to NovaList.Ping(-1, false, System.currentTimeMillis())))
+                    LogManager.log("Nova профиль #${node.number} не ответил.")
+                    publishTransportNotice(
+                        clientData,
+                        if (explicit) "Профиль #${node.number} не ответил." else "Профиль #${node.number} не ответил — берём следующий.",
+                    )
+                    continue
+                }
+                if (tunnelUp && tunnelPort != socksPort) {
+                    stopOperaFallback(joinTimeoutMs = 2500L, stopProxyManager = false)
+                    tunnelUp = false
+                }
+                if (!tunnelUp) {
+                    if (!startProxyTunnel(clientData, socksPort, BACKEND_NOVA, "NovaListVPN", "NovaListTunThread")) return false
+                    tunnelUp = true
+                    tunnelPort = socksPort
+                }
+                markSuccessfulTunnelProbe()
+                LogManager.log("Nova активен: #${node.number} ${node.protocol} ${node.server}:${node.port}.")
+                publishTransportNotice(clientData, "")
+                NovaList.setActive(this, node.id)
+                broadcastState(STATE_CONNECTED)
+
+                val session = holdVlessSession(clientData, socksPort, connectGenerationId)
+                if (session.outcome == VlessSessionOutcome.RELEASED) return true
+                NovaProxyProcess.stop(LogManager::log)
+                if (session.outcome == VlessSessionOutcome.TUNNEL_GONE) {
+                    stopOperaFallback(joinTimeoutMs = 2500L, stopProxyManager = false)
+                    tunnelUp = false
+                }
+                if (session.outcome == VlessSessionOutcome.SWITCH_REQUESTED) {
+                    switchTo(node)
+                    continue
+                }
+                NovaList.recordPings(this, mapOf(node.id to NovaList.Ping(-1, false, System.currentTimeMillis())))
+                if (explicit) {
+                    // Выбранный вручную узел переподнимаем, пока он держит заметное
+                    // время; сорвавшийся сразу — честный отказ (I1, I4).
+                    if (session.uptimeMs >= VLESS_SESSION_CREDIT_MS) cursor = 0
+                    else LogManager.log("Nova: выбранный профиль #${node.number} потерял трафик.")
+                }
+            }
+            LogManager.log(
+                if (explicit) "Nova: выбранный профиль не поднялся. Выберите другой или «Авто»."
+                else "Nova: ни один из ${rotation.size} профилей не ответил."
+            )
+            publishTransportNotice(
+                clientData,
+                if (explicit) "Выбранный профиль Nova не отвечает." else "Ни один профиль Nova не ответил.",
+                keepOnStop = true,
+            )
+            return false
+        } finally {
+            if (vlessRotationOwnerGeneration == connectGenerationId) {
+                vlessRotationActive = false
+                pendingVlessProfileSwitch = false
+                vlessSwitchTargetLink = null
+                vlessSocksPort = -1
+                clientData.clearTransportLatency()
+            }
+            if (!(currentState == STATE_CONNECTED && hasRecentSuccessfulTunnelProbe())) {
+                stopVlessTransport()
+                NovaList.setActive(this, "")
+            }
+        }
+    }
+
     private fun stopVlessTransport() {
         stopOperaFallback(joinTimeoutMs = 2500L, stopProxyManager = false)
         try {
@@ -9743,6 +9981,7 @@ class NovaVpnService : OperaNativeVpnService() {
         } catch (t: Throwable) {
             LogManager.log("Не удалось остановить ядро Xray: ${t.message}")
         }
+        runCatching { NovaProxyProcess.stop(LogManager::log) }
     }
 
 
@@ -15476,6 +15715,17 @@ class NovaVpnService : OperaNativeVpnService() {
                 return
             }
         }
+        // Nova: пока идёт её фаза, живость и смену узла ведёт `holdVlessSession` (проба
+        // через сам узел каждые ~1,5 с; при потере трафика — следующий узел на том же
+        // порту, без пересборки туннеля). Реконнект отсюда останавливал tun2proxy, а его
+        // остановка — это `exit(-1)` всего `:vpn`: на Mi A1 с умершим узлом WG #40 сторож
+        // успевал раньше фазы, и процесс перезапускался по кругу.
+        if (currentBackendLabel.trim().uppercase(Locale.ROOT) == BACKEND_NOVA) {
+            if (vlessRotationActive) {
+                connectedHealthProbeFailures = 0
+                return
+            }
+        }
         val clientData = ClientData(this)
         val importedExactAwgActive = currentConnectionUsesImportedExactAwg()
         val warpBackend =
@@ -15971,6 +16221,15 @@ class NovaVpnService : OperaNativeVpnService() {
                     }
                     return@startSafeServiceThread
                 }
+                if (regionPreference == ConnectionSelectorPolicy.CHIP_NOVA) {
+                    stopVlessTransport()
+                    if (!runNovaListPhase(clientData, connectGenerationId)) {
+                        if (isUserStopped || !isConnectGenerationCurrent(connectGenerationId)) return@startSafeServiceThread
+                        LogManager.log("Nova не поднялся после смены сети, а подменять его другим протоколом нельзя.")
+                        broadcastState(STATE_STOPPED)
+                    }
+                    return@startSafeServiceThread
+                }
                 if (regionPreference == ConnectionSelectorPolicy.CHIP_TOR) {
                     recoverTorSessionAfterNetworkChange(clientData, connectGenerationId)
                     return@startSafeServiceThread
@@ -16386,6 +16645,17 @@ class NovaVpnService : OperaNativeVpnService() {
         // но по пробе через сам SOCKS tor'а, с подходящим ему сроком.
         if (isTorBackendLabel(currentBackendLabel)) {
             if (TorTransport.isRunning() && hasRecentSuccessfulTunnelProbe(TOR_PROOF_WINDOW_MS)) {
+                connectedHealthProbeFailures = 0
+                return
+            }
+        }
+        // Nova: пока идёт её фаза, живость и смену узла ведёт `holdVlessSession` (проба
+        // через сам узел каждые ~1,5 с; при потере трафика — следующий узел на том же
+        // порту, без пересборки туннеля). Реконнект отсюда останавливал tun2proxy, а его
+        // остановка — это `exit(-1)` всего `:vpn`: на Mi A1 с умершим узлом WG #40 сторож
+        // успевал раньше фазы, и процесс перезапускался по кругу.
+        if (currentBackendLabel.trim().uppercase(Locale.ROOT) == BACKEND_NOVA) {
+            if (vlessRotationActive) {
                 connectedHealthProbeFailures = 0
                 return
             }
@@ -28323,6 +28593,7 @@ class NovaVpnService : OperaNativeVpnService() {
                 allowBlockingWait = true,
             )
             runCatching { XrayBridge.stop() }
+        runCatching { NovaProxyProcess.stop(LogManager::log) }
             closeActiveInterface()
             // Пауза не для красоты: закрытие интерфейса асинхронно доходит до системы,
             // и сокет MASQUE, открытый в ту же миллисекунду, может достаться ещё живому

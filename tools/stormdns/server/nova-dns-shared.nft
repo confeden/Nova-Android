@@ -1,0 +1,18 @@
+#!/usr/sbin/nft -f
+# Shared-host variant (62.60.230.61, also DNS-AI nova-eu, Amnezia, Excalidraw, telemt).
+# NEVER `flush ruleset` here and never a drop policy on input: other projects own the box.
+# Only this table is replaced; UDP 443 belongs to dnsdist (DoQ/DoH3) and is not redirected.
+table inet nova_dns
+delete table inet nova_dns
+table inet nova_dns {
+  chain prerouting {
+    type nat hook prerouting priority dstnat; policy accept;
+    ip daddr 62.60.230.61 udp dport { 5353, 8053 } redirect to :53
+  }
+  chain output {
+    type filter hook output priority 0; policy accept;
+    # Defence in depth for the tunnel user: no mail, no torrent defaults, no Tor ports.
+    meta skuid "stormdns" tcp dport { 25, 465, 587, 2525, 6881-6889, 6969, 51413, 9001, 9030, 9050, 9051, 9150 } reject
+    meta skuid "stormdns" ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8 } reject
+  }
+}

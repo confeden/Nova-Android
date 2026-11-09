@@ -1,0 +1,11 @@
+[Unit]
+Description=Nova DNS tunnel: own nftables table (shared host, no flush)
+After=network-online.target docker.service
+Before=stormdns.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/stormdns/nova-dns-shared.nft
+ExecStop=/usr/sbin/nft delete table inet nova_dns
+[Install]
+WantedBy=multi-user.target

@@ -4164,17 +4164,9 @@ class SettingsActivity : AppCompatActivity() {
 
     ) {
 
-        val rbExitAuto = buttons.getOrNull(0) ?: return
-
-        val rbExitRu = buttons.getOrNull(1) ?: return
-
-        val rbExitMasque = buttons.getOrNull(2) ?: return
-
-        val rbExitOpera = buttons.getOrNull(3) ?: return
-
-        val rbExitProton = buttons.getOrNull(4) ?: return
-
-        val rbExitTor = buttons.getOrNull(5) ?: return
+        // Кнопки ищутся по значению через [ConnectionSelectorPolicy], а не по
+        // позиции: вставка новой кнопки в середину порядка ничего не ломает.
+        if (buttons.size < ConnectionSelectorPolicy.SIZE) return
 
         // Название общее для обеих половин списка: WARP, MASQUE и AWG Proton — это
         // протоколы, EU и US — регионы, и «Выбор региона» половину из них не
@@ -4281,6 +4273,12 @@ class SettingsActivity : AppCompatActivity() {
                 ConnectionSelectorPolicy.valueAt(chipIndex)
             } else {
                 "auto"
+            }
+
+            if (chipValue == ConnectionSelectorPolicy.CHIP_NOVA) {
+                // Список Nova сверяется при выборе кнопки (если снимок устарел).
+                LogManager.log("Настройки: выбран NOVA, сверяем список профилей.")
+                NovaList.refreshInBackground(this@SettingsActivity, LogManager::log)
             }
 
             if (chipValue == ConnectionSelectorPolicy.CHIP_TOR) {

@@ -18,15 +18,15 @@ class ConnectionSelectorPolicyTest {
     @Test
     fun `order and labels stay in step`() {
         assertEquals(ConnectionSelectorPolicy.ORDER.size, ConnectionSelectorPolicy.LABELS.size)
-        assertEquals(7, ConnectionSelectorPolicy.SIZE)
+        assertEquals(8, ConnectionSelectorPolicy.SIZE)
         // Порядок кода, а не разметки: masque третий. Разъедется — сломается и
         // главный экран, и настройки, каждый по-своему.
         assertEquals(
-            listOf("auto", "ru", "masque", "opera", "proton", "tor", "dns"),
+            listOf("auto", "ru", "masque", "opera", "proton", "nova", "tor", "dns"),
             ConnectionSelectorPolicy.ORDER,
         )
         assertEquals(
-            listOf("AUTO", "WARP", "MASQUE", "OPERA", "PROTON", "TOR", "DNS"),
+            listOf("AUTO", "WARP", "MASQUE", "OPERA", "PROTON", "NOVA", "TOR", "DNS"),
             ConnectionSelectorPolicy.LABELS,
         )
     }
@@ -270,7 +270,7 @@ class ConnectionSelectorPolicyTest {
                 ConnectionSelectorPolicy.availability(false, false, region).rewriteStoredTo,
             )
         }
-        for (region in listOf("auto", "ru", "masque", "proton", "tor")) {
+        for (region in listOf("auto", "ru", "masque", "proton", "nova", "tor")) {
             assertNull(region, ConnectionSelectorPolicy.availability(false, false, region).rewriteStoredTo)
         }
         // С поддержкой Opera переписывать нечего вообще.

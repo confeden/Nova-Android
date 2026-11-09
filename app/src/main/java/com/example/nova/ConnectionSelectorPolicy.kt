@@ -36,14 +36,14 @@ object ConnectionSelectorPolicy {
      *
      * `masque` стоит третьим намеренно — так он и лежит в `protocolButtons`.
      * `opera` заменил пару `eu`/`us`: это одна кнопка на один транспорт.
-     * `tor` дописан **в конец**: `SettingsActivity.configureRegionSelector`
-     * разбирает кнопки позиционно (`getOrNull(0..5)`), и вставка в середину
-     * молча переименовала бы половину селектора.
+     * `nova` стоит сразу после `proton`. Позиционных разборов кнопок больше нет:
+     * `SettingsActivity.configureRegionSelector` ищет кнопку по значению через
+     * [indexOf], так что вставка в середину ничего не переименовывает.
      */
-    val ORDER: List<String> = listOf("auto", "ru", "masque", "opera", "proton", "tor", "dns")
+    val ORDER: List<String> = listOf("auto", "ru", "masque", "opera", "proton", "nova", "tor", "dns")
 
     /** Подписи в том же порядке. `ru` — это WARP, и это не опечатка. */
-    val LABELS: List<String> = listOf("AUTO", "WARP", "MASQUE", "OPERA", "PROTON", "TOR", "DNS")
+    val LABELS: List<String> = listOf("AUTO", "WARP", "MASQUE", "OPERA", "PROTON", "NOVA", "TOR", "DNS")
 
     /**
      * Разбиение на строки: сколько кнопок в каждой.
@@ -54,12 +54,12 @@ object ConnectionSelectorPolicy {
      *
      * * строка 1 — всё, что работает через Cloudflare (`AUTO` начинает именно с
      *   них, поэтому стоит здесь);
-     * * строка 2 — зарубежные VPN (встроенная Opera и Proton);
+     * * строка 2 — зарубежные VPN и списки узлов (Opera, Proton, Nova);
      * * строка 3 — то, что везут чужие сети и чужие резолверы: Tor и DNS.
      *
      * Сумма обязана равняться [SIZE]; за этим следит тест.
      */
-    val ROWS: List<Int> = listOf(3, 2, 2)
+    val ROWS: List<Int> = listOf(3, 3, 2)
 
     /** Сколько кнопок обязано быть в группе. Меньше — селектор не настраивается. */
     val SIZE: Int get() = ORDER.size
@@ -67,15 +67,16 @@ object ConnectionSelectorPolicy {
     /** Значение кнопки «встроенная Opera». */
     const val CHIP_OPERA: String = "opera"
 
+    /** Значение кнопки NOVA — встроенный список узлов Nova (Mihomo). */
+    const val CHIP_NOVA: String = "nova"
+
     /** Значение кнопки Tor. */
     const val CHIP_TOR: String = "tor"
 
     /**
      * Значение кнопки DNS — туннель поверх обычных DNS-запросов.
      *
-     * Дописан **в конец** по той же причине, по какой туда дописывался `tor`:
-     * `SettingsActivity.configureRegionSelector` разбирает кнопки позиционно, и
-     * вставка в середину молча переименовала бы половину селектора.
+     * Стоит последним в [ORDER].
      *
      * Сервера у нас под него нет и не будет (D34): адрес зоны и открытый ключ
      * приносит пользователь, как в импорте AWG/VLESS. Ни один DNS-туннель не
@@ -488,6 +489,7 @@ object ConnectionSelectorPolicy {
         R.id.rb_exit_masque,
         R.id.rb_exit_opera,
         R.id.rb_exit_proton,
+        R.id.rb_exit_nova,
         R.id.rb_exit_tor,
         R.id.rb_exit_dns,
     )

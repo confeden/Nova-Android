@@ -158,6 +158,19 @@
                         android:buttonTint="?attr/novaAccent"/>
 
                     <RadioButton
+                        android:id="@+id/rb_exit_nova"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="NOVA"
+                        android:textColor="?attr/novaTextTitle"
+                        android:textSize="11sp"
+                        android:paddingStart="0dp"
+                        android:paddingEnd="0dp"
+                        android:layout_marginEnd="10dp"
+                        android:maxLines="1"
+                        android:buttonTint="?attr/novaAccent"/>
+
+                    <RadioButton
                         android:id="@+id/rb_exit_tor"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"

@@ -3785,23 +3785,19 @@ class ClientData(context: Context) {
             )
         }
 
-        // Xbox DNS идёт первым в любом режиме — решение владельца. Раньше он
-        // подставлялся только на российском выходе WARP, а встроенный AWG с выходом,
-        // скажем, в Финляндии и весь прокси-режим Opera получали Cloudflare. Теперь
-        // порядок один для всех: Xbox впереди, остальные резолверы — запасные.
+        // Cloudflare идёт первым в любом режиме: порядок один для всех. Xbox DNS,
+        // стоявший здесь раньше, больше не работает и убран.
         // Порядок в списке и есть порядок обхода: и `VpnService.Builder`, и перехват
         // DNS в ядре берут следующий адрес, когда предыдущий не ответил.
-        val primary = XBOX_DNS_SERVERS
-        val secondary = CLOUDFLARE_DNS_SERVERS
+        val primary = CLOUDFLARE_DNS_SERVERS
         val label = when {
-            isOperaBackendLabel(backendLabel) -> "xbox-primary-opera"
-            isVlessBackendLabel(backendLabel) -> "xbox-primary-vless"
-            shouldPreferXboxDnsForWarp(countryHint) -> "xbox-primary-warp-ru"
-            else -> "xbox-primary-warp"
+            isOperaBackendLabel(backendLabel) -> "cloudflare-primary-opera"
+            isVlessBackendLabel(backendLabel) -> "cloudflare-primary-vless"
+            else -> "cloudflare-primary-warp"
         }
         return VpnDnsProfile(
             label = label,
-            servers = (primary + secondary).distinct(),
+            servers = primary.distinct(),
             operaBootstrapResolvers = operaBootstrapResolvers,
             operaBootstrapLabel = operaBootstrapLabel,
         )
@@ -3810,29 +3806,28 @@ class ClientData(context: Context) {
     private fun resolvePreferredOperaBootstrapProfile(
         allowLocalDnsOverride: Boolean,
     ): Pair<String, String> {
-        // Порядок: приоритетный DoH владельца, затем Xbox DNS, затем DNS провайдера и
+        // Порядок: приоритетный DoH владельца, затем DNS провайдера и
         // публичные. opera-proxy резолвит свой API до того, как поднят туннель, то есть
         // по сети оператора — ровно там, где эти резолверы и должны работать. Список
         // перебирается по порядку, поэтому шифрованный идёт первым: имя API наружу
         // тогда не уходит открытым текстом.
         if (!allowLocalDnsOverride) {
-            return (PRIORITY_DOH_BOOTSTRAP_RESOLVER_LIST + XBOX_BOOTSTRAP_RESOLVER_LIST + DEFAULT_OPERA_BOOTSTRAP_RESOLVER_LIST)
+            return (PRIORITY_DOH_BOOTSTRAP_RESOLVER_LIST + DEFAULT_OPERA_BOOTSTRAP_RESOLVER_LIST)
                 .distinct()
-                .joinToString(",") to "priority-doh-xbox-public-opera-bootstrap"
+                .joinToString(",") to "priority-doh-public-opera-bootstrap"
         }
         val providerResolvers = resolveProviderOperaBootstrapResolvers()
         if (providerResolvers.isEmpty()) {
-            return (PRIORITY_DOH_BOOTSTRAP_RESOLVER_LIST + XBOX_BOOTSTRAP_RESOLVER_LIST + DEFAULT_OPERA_BOOTSTRAP_RESOLVER_LIST)
+            return (PRIORITY_DOH_BOOTSTRAP_RESOLVER_LIST + DEFAULT_OPERA_BOOTSTRAP_RESOLVER_LIST)
                 .distinct()
-                .joinToString(",") to "priority-doh-xbox-public-opera-bootstrap"
+                .joinToString(",") to "priority-doh-public-opera-bootstrap"
         }
         val combined = (
             PRIORITY_DOH_BOOTSTRAP_RESOLVER_LIST +
-                XBOX_BOOTSTRAP_RESOLVER_LIST +
                 providerResolvers +
                 DEFAULT_OPERA_BOOTSTRAP_RESOLVER_LIST
             ).distinct()
-        return combined.joinToString(",") to "priority-doh-xbox-provider-public-opera-bootstrap"
+        return combined.joinToString(",") to "priority-doh-provider-public-opera-bootstrap"
     }
 
     private fun resolveProviderOperaBootstrapResolvers(): List<String> {
@@ -3863,7 +3858,6 @@ class ClientData(context: Context) {
         if (host.isBlank()) return true
         val normalized = normalizeBootstrapDnsHost(host)
         if (normalized.isBlank()) return true
-        if (normalized in XBOX_DNS_SERVERS) return true
         if (normalized in ADGUARD_NO_ADS_DNS_SERVERS) return true
         if (normalized == LocalDnsPolicy.LOCAL_PROXY_IPV4 || normalized == LocalDnsPolicy.LOCAL_PROXY_IPV6) return true
         if (normalized == "127.0.0.1" || normalized == "::1") return true
@@ -9385,35 +9379,6 @@ class ClientData(context: Context) {
         return TRAFFIC_MASK_STATS_PREFIX + host
     }
 
-    private fun shouldPreferXboxDnsForWarp(countryHint: String? = null): Boolean {
-        val preference = normalizeRegionPreference(getExitRegionPreference())
-        val resolvedCountry = countryHint?.trim()?.uppercase().orEmpty()
-            .ifBlank { getLastExitCountry().trim().uppercase() }
-        if (preference == "ru") return true
-        // Страна, определённая по внешнему IP — та же проверка, что показывает регион
-        // на главном экране, — решает окончательно. Раньше здесь стояло только
-        // `== "RU" -> true`, и известный зарубежный выход проваливался дальше, к
-        // догадкам по локали и часовому поясу: у российского пользователя они всегда
-        // дают «Россия», хотя выход в этот момент, скажем, в Германии.
-        if (resolvedCountry.isNotEmpty()) return resolvedCountry == "RU"
-        if (preference != "auto") return false
-
-        val localeCountry = Locale.getDefault().country?.trim()?.uppercase().orEmpty()
-        if (localeCountry == "RU") return true
-
-        val timezoneId = TimeZone.getDefault().id?.trim().orEmpty()
-        if (timezoneId in RUSSIAN_TIME_ZONES) return true
-
-        val lastMode = normalizeToken(getLastSuccessMode())
-        val lastProtocol = normalizeToken(getLastSuccessProtocol())
-        val lastBackendLooksWarp = !lastMode.startsWith("opera") && !lastProtocol.startsWith("opera")
-        if (hasFreshLastSuccess() && lastBackendLooksWarp) {
-            return true
-        }
-
-        return false
-    }
-
     private fun isOperaBackendLabel(label: String?): Boolean {
         return label?.trim()?.uppercase()?.startsWith(NovaVpnService.BACKEND_OPERA) == true
     }
@@ -9592,13 +9557,6 @@ class ClientData(context: Context) {
          */
         private const val SNI_RUSSIA_POOL_LIMIT = 512
 
-        private val XBOX_DNS_SERVERS = listOf(
-            "111.88.96.50",
-            "111.88.96.51",
-            "2a00:ab00:1233:26::50",
-            "2a00:ab00:1233:26::51",
-        )
-
         /**
          * Приоритетный DoH владельца в формате opera-proxy.
          *
@@ -9611,16 +9569,6 @@ class ClientData(context: Context) {
             PriorityDns.DOH_URL,
         )
 
-        /**
-         * Те же адреса в формате, который понимает opera-proxy.
-         *
-         * IPv6 в bootstrap не отдаём: у opera-proxy список резолверов разбирается по
-         * запятой, и адрес с двоеточиями в нём не отличить от `host:port`.
-         */
-        private val XBOX_BOOTSTRAP_RESOLVER_LIST = listOf(
-            "dns://111.88.96.50",
-            "dns://111.88.96.51",
-        )
         private val ADGUARD_NO_ADS_DNS_SERVERS = listOf(
             "94.140.14.14",
             "94.140.15.15",

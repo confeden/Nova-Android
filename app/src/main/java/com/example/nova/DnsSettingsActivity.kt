@@ -821,7 +821,7 @@ class DnsSettingsActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("Вернуть резолверы по умолчанию?")
             .setMessage(
-                "Список заменится штатным: наш резолвер, затем Comss, GeoHide, Xbox, " +
+                "Список заменится штатным: наш резолвер, затем Comss, GeoHide, " +
                     "Cloudflare и Google — все шифрованные, — и последней ступенью " +
                     "открытый резолвер провайдера. Ваши правила и их порядок пропадут."
             )

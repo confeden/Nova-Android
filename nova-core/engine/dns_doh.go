@@ -149,13 +149,17 @@ func dohClientFor(upstream *dohUpstream, route dnsUpstreamRoute, timeout time.Du
 				return dialer.DialContext(ctx, network, address)
 			}
 			if !strings.EqualFold(host, upstream.host) || len(bootstrap) == 0 {
-				return dialer.DialContext(ctx, network, address)
+				conn, dialErr := dialer.DialContext(ctx, network, address)
+				if dialErr != nil {
+					return nil, dialErr
+				}
+				return obfuscateDNSConn(conn, route), nil
 			}
 			var lastErr error
 			for _, ip := range bootstrap {
 				conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
 				if dialErr == nil {
-					return conn, nil
+					return obfuscateDNSConn(conn, route), nil
 				}
 				lastErr = dialErr
 			}

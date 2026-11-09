@@ -363,8 +363,12 @@ object DnsRulesStore {
      * 4 — версия, в которой у правила появился свой транспорт. Файл версии 4
      * старая сборка прочитает без вреда: незнакомый ключ `fromJson` пропускает,
      * а `migrate` видит `4 >= 3` и не трогает список.
+     *
+     * 5 — версия, в которой из умолчаний ушёл Xbox DNS: сервис перестал работать.
+     * Формат файла не менялся, поэтому старая сборка читает его без вреда; она
+     * просто покажет правило, которое уже не отвечает.
      */
-    private const val VERSION = 4
+    private const val VERSION = 5
 
     private val writeLock = Any()
 
@@ -409,13 +413,6 @@ object DnsRulesStore {
             kind = DnsRule.Kind.DOH,
             value = "https://geohide.ru/dns-query",
             bootstrap = listOf("193.233.112.67", "193.233.112.68", "46.8.158.6"),
-            transport = DnsRule.Transport.ANY,
-        ),
-        DnsRule(
-            id = "xbox",
-            kind = DnsRule.Kind.DOH,
-            value = "https://xbox-dns.ru/dns-query",
-            bootstrap = listOf("111.88.96.50", "111.88.96.51"),
             transport = DnsRule.Transport.ANY,
         ),
         DnsRule(
@@ -488,6 +485,7 @@ object DnsRulesStore {
         var current = rules
         if (version < 3) current = migrateToV3(current)
         if (version < 4) current = migrateToV4(current)
+        if (version < 5) current = migrateToV5(current)
         return current
     }
 
@@ -552,6 +550,31 @@ object DnsRulesStore {
         }
         return migrated
     }
+
+    /**
+     * Убирает встроенное правило Xbox DNS: сервис больше не работает.
+     *
+     * Условие узкое (I1): уходит только строка, у которой совпали **и**
+     * идентификатор, **и** адрес. Правило, которое человек поправил сам, остаётся.
+     */
+    private fun migrateToV5(rules: List<DnsRule>): List<DnsRule> {
+        val kept = withoutDeadXboxRule(rules)
+        // Один раз на процесс — по той же причине, что и у migrateToV4.
+        if (kept.size != rules.size && !v5MigrationLogged) {
+            v5MigrationLogged = true
+            LogManager.log("Правило DNS Xbox удалено: сервис больше не работает.")
+        }
+        return kept
+    }
+
+    /** Решение по списку — отдельно от записи в журнал. */
+    internal fun withoutDeadXboxRule(rules: List<DnsRule>): List<DnsRule> =
+        rules.filterNot {
+            it.id == "xbox" && it.value.equals("https://xbox-dns.ru/dns-query", ignoreCase = true)
+        }
+
+    @Volatile
+    private var v5MigrationLogged = false
 
     /** Уже сказали про перевод на автовыбор транспорта в этом процессе. */
     @Volatile

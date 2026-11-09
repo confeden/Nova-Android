@@ -1333,6 +1333,9 @@ func resolveDNSPayload(query []byte, upstreams []string, timeout time.Duration) 
 // сейчас» — разные утверждения, и держаться первого на мёртвом пути значит
 // платить полный таймаут на каждом запросе.
 func resolveDNSViaSpec(query []byte, spec *dnsUpstreamSpec, timeout time.Duration) ([]byte, string, error) {
+	if spec.route == dnsRouteObfsFirst {
+		return resolveDNSObfsFirst(query, spec, timeout)
+	}
 	if spec.route != dnsRouteAuto {
 		return resolveDNSOnRoute(query, spec, spec.route, timeout)
 	}

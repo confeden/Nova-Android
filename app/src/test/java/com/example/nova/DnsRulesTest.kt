@@ -156,7 +156,7 @@ class DnsRulesTest {
         // Провайдерский — единственный незашифрованный во всём списке.
         assertEquals(1, defaults.count { !it.encrypted })
         assertEquals(
-            listOf("owner", "comss", "geohide", "xbox", "cloudflare", "google", "provider"),
+            listOf("owner", "comss", "geohide", "cloudflare", "google", "provider"),
             defaults.map { it.id },
         )
     }
@@ -184,11 +184,11 @@ class DnsRulesTest {
     fun `the owner rule can be pointed at either transport`() {
         val rule = DnsRulesStore.defaults().first()
         assertEquals(
-            "${PriorityDns.DOH_URL}|192.144.59.14|186.246.49.127",
+            "${PriorityDns.DOH_URL}|2a12:5940:d4ef::219|2a00:b700:5::3:62|194.87.196.13|45.151.102.219",
             rule.toUpstream(DnsRouteMode.DIRECT, PriorityDns.DOH_URL),
         )
         assertEquals(
-            "${PriorityDns.DOT_URL}|192.144.59.14|186.246.49.127",
+            "${PriorityDns.DOT_URL}|2a12:5940:d4ef::219|2a00:b700:5::3:62|194.87.196.13|45.151.102.219",
             rule.toUpstream(DnsRouteMode.DIRECT, PriorityDns.DOT_URL),
         )
     }
@@ -232,7 +232,7 @@ class DnsRulesTest {
     @Test
     fun `the shipped resolvers ask on whichever transport answers first`() {
         assertEquals(
-            listOf("owner", "comss", "geohide", "xbox", "cloudflare", "google"),
+            listOf("owner", "comss", "geohide", "cloudflare", "google"),
             DnsRulesStore.defaults()
                 .filter { it.transport == DnsRule.Transport.ANY }
                 .map { it.id },
@@ -337,6 +337,26 @@ class DnsRulesTest {
                 "dns.quad9.net",
                 transport = DnsRule.Transport.DOT,
             )?.transport,
+        )
+    }
+
+    /** Мёртвый Xbox DNS уходит из старого списка, но правка пользователя остаётся. */
+    @Test
+    fun `migration to v5 drops only the unedited xbox rule`() {
+        val xbox = DnsRule(
+            id = "xbox",
+            kind = DnsRule.Kind.DOH,
+            value = "https://xbox-dns.ru/dns-query",
+            bootstrap = listOf("111.88.96.50", "111.88.96.51"),
+            transport = DnsRule.Transport.ANY,
+        )
+        val other = DnsRulesStore.defaults().first { it.id == "cloudflare" }
+        assertEquals(listOf(other), DnsRulesStore.withoutDeadXboxRule(listOf(xbox, other)))
+
+        val edited = xbox.copy(value = "https://my.example/dns-query")
+        assertEquals(
+            listOf(edited, other),
+            DnsRulesStore.withoutDeadXboxRule(listOf(edited, other)),
         )
     }
 }

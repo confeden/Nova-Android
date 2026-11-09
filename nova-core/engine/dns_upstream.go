@@ -26,6 +26,8 @@ import (
 //	       | via=tunnel      — идти через туннель
 //	       | via=direct      — идти мимо туннеля (по умолчанию)
 //	       | via=auto        — измерить оба и выбрать быстрый
+//	       | via=obfs        — сначала мимо туннеля с фрагментированным ClientHello,
+//	                           при отказе — через туннель (правило владельца для DNS-AI)
 //
 // Нераспознанный токен пропускается молча — это намеренно: старое ядро уже
 // пропускало всё, что не IP, и новый флаг на нём просто не сработает вместо того
@@ -51,6 +53,11 @@ const (
 	dnsRouteDirect dnsUpstreamRoute = iota
 	dnsRouteTunnel
 	dnsRouteAuto
+	// dnsRouteObfsFirst — режим апстрима: прямой путь с обфускацией, туннель запасной.
+	dnsRouteObfsFirst
+	// dnsRouteDirectObfs — путь одной попытки: protect() плюс фрагментированный
+	// ClientHello. В строке апстрима не пишется, его выбирает dnsRouteObfsFirst.
+	dnsRouteDirectObfs
 )
 
 const (
@@ -99,6 +106,8 @@ func parseDNSUpstream(raw string) (*dnsUpstreamSpec, error) {
 					spec.route = dnsRouteTunnel
 				case "auto":
 					spec.route = dnsRouteAuto
+				case "obfs":
+					spec.route = dnsRouteObfsFirst
 				default:
 					spec.route = dnsRouteDirect
 				}
@@ -151,7 +160,7 @@ func parseDNSUpstream(raw string) (*dnsUpstreamSpec, error) {
 
 	// Открытый UDP не участвует в гонке путей: подделанный ответ приходит
 	// быстрее настоящего, и «автоматически» выбрало бы подделку.
-	if spec.route == dnsRouteAuto && !spec.encrypted() {
+	if (spec.route == dnsRouteAuto || spec.route == dnsRouteObfsFirst) && !spec.encrypted() {
 		spec.route = dnsRouteDirect
 	}
 	return spec, nil
@@ -195,11 +204,15 @@ func resetDNSRouteChoices() {
 	dnsRouteChoiceMu.Lock()
 	dnsRouteChoices = make(map[string]dnsRouteChoice)
 	dnsRouteChoiceMu.Unlock()
+	resetObfsDirectState()
 }
 
 // DNSRouteChoiceLabel отдаёт выбранный путь для журнала приложения.
 // Пусто — выбор ещё не сделан или устарел.
 func DNSRouteChoiceLabel(raw string) string {
+	if label := obfsDirectLabel(strings.TrimSpace(raw)); label != "" {
+		return label
+	}
 	route, ok := recallDNSRoute(strings.TrimSpace(raw))
 	if !ok {
 		return ""
@@ -340,6 +353,7 @@ func dialDoT(spec *dnsUpstreamSpec, route dnsUpstreamRoute, timeout time.Duratio
 			lastErr = err
 			continue
 		}
+		raw = obfuscateDNSConn(raw, route)
 		tlsConn := tls.Client(raw, &tls.Config{
 			ServerName: serverName,
 			MinVersion: tls.VersionTLS12,
@@ -426,6 +440,8 @@ func routeKey(raw string, route dnsUpstreamRoute) string {
 	switch route {
 	case dnsRouteTunnel:
 		return raw + "#tunnel"
+	case dnsRouteDirectObfs:
+		return raw + "#obfs"
 	default:
 		return raw + "#direct"
 	}

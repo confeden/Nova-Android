@@ -62,8 +62,6 @@ func localCloudflareProxyURL() string {
 
 var (
 	warpRegistrationDNS = []string{
-		"111.88.96.50:53",
-		"111.88.96.51:53",
 		"1.1.1.1:53",
 		"1.0.0.1:53",
 		"8.8.8.8:53",

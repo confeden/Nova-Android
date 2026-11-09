@@ -457,7 +457,7 @@
  "изменено {0} {1}": "updated {0} {1}",
  "сброс к умолчаниям": "reset to defaults",
  "Вернуть резолверы по умолчанию?": "Reset resolvers to defaults?",
- "Список заменится штатным: наш резолвер, затем Comss, GeoHide, Xbox, Cloudflare и Google — все шифрованные, — и последней ступенью открытый резолвер провайдера. Ваши правила и их порядок пропадут.": "The list will be replaced with defaults: our resolver, then Comss, GeoHide, Xbox, Cloudflare, and Google — all encrypted, — and the ISP unencrypted resolver as the last step. Your rules and their order will be lost.",
+ "Список заменится штатным: наш резолвер, затем Comss, GeoHide, Cloudflare и Google — все шифрованные, — и последней ступенью открытый резолвер провайдера. Ваши правила и их порядок пропадут.": "The list will be replaced with defaults: our resolver, then Comss, GeoHide, Cloudflare, and Google — all encrypted, — and the ISP unencrypted resolver as the last step. Your rules and their order will be lost.",
  "Сбросить": "Reset",
  "Список резолверов сброшен.": "Resolver list reset.",
  "Отменить правило": "Remove rule",

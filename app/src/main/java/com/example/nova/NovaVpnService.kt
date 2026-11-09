@@ -8278,7 +8278,7 @@ class NovaVpnService : OperaNativeVpnService() {
             // Вырез — это `excludeRoute` на весь адрес, а не на порт 53: адрес с
             // ним не попадает в TUN вообще, ни для DNS, ни для чего-либо ещё.
             // Умолчания теперь везут `1.1.1.1`, `1.0.0.1`, `8.8.8.8`, `8.8.4.4` и
-            // адреса Xbox как bootstrap-адреса DoH-правил, и вырез для них означал
+            // адреса Cloudflare как bootstrap-адреса DoH-правил, и вырез для них означал
             // бы, что любое приложение с зашитым `8.8.8.8` шлёт открытый запрос
             // мимо туннеля — ровно та утечка, ради которой открытый хвост и
             // убирали. Дозвониться этим правилам вырез не нужен: ядро дёргает их
@@ -8373,7 +8373,7 @@ class NovaVpnService : OperaNativeVpnService() {
         // Порядок здесь и есть каскад: ядро берёт следующий апстрим ровно тогда,
         // когда предыдущий не ответил.
         //
-        // Зашитого открытого хвоста (Xbox + Cloudflare по 53/udp) больше нет.
+        // Зашитого открытого хвоста (Cloudflare по 53/udp) больше нет.
         // Он был не запасом, а утечкой по построению: каждый его адрес уезжал в
         // `directBypassDnsAddresses`, оттуда в `excludeRoute`, и запрос к нему
         // покидал туннель в открытом виде — на WARP, MASQUE, Proton и Opera
@@ -8619,7 +8619,7 @@ class NovaVpnService : OperaNativeVpnService() {
      *
      * **Открытый хвост сюда не дописывается.** Он был убран из первой сборки
      * цепочки, а эта ветка возвращала его в середине сеанса:
-     * `getPreferredVpnDnsServers` отдаёт литеральные адреса (Xbox, Cloudflare),
+     * `getPreferredVpnDnsServers` отдаёт литеральные адреса (Cloudflare),
      * ядро разбирает их как открытый апстрим с прямым путём и шлёт запрос
      * открытым UDP наружу. В журнал при этом уходило нейтральное «обновляем
      * порядок». Незашифрованной остаётся ровно одна ступень — провайдерская, и
@@ -8711,14 +8711,14 @@ class NovaVpnService : OperaNativeVpnService() {
             .filter { it.isNotBlank() }
             .distinct()
         // У импортированного профиля свой DNS, и он почти всегда живёт внутри туннеля
-        // (`10.2.0.1` и подобные). Порядок тот же, что и в конфиге ядра: сначала Xbox,
-        // потом резолвер профиля.
+        // (`10.2.0.1` и подобные). Порядок тот же, что и в конфиге ядра: сначала
+        // Cloudflare, потом резолвер профиля.
         val (dnsServers, dnsLabel) = if (importedDnsServers.isNotEmpty()) {
             val (novaDns, _) = resolveDnsServersForBuilder(
                 clientData = clientData,
                 backendLabel = BACKEND_WARP,
             )
-            (novaDns + importedDnsServers).distinct() to "xbox-then-imported"
+            (novaDns + importedDnsServers).distinct() to "cloudflare-then-imported"
         } else {
             resolveDnsServersForBuilder(
                 clientData = clientData,
@@ -8728,7 +8728,7 @@ class NovaVpnService : OperaNativeVpnService() {
         // G149. Системе отдаём только адреса IPv4.
         //
         // Замер на Pixel 4a 2026-09-07 (Proton, «Частный DNS: Автоматически»): netd
-        // провалидировал DoT на выданных v6-адресах Xbox (`2a00:ab00:1233:26::50/::51`)
+        // провалидировал DoT на выданных v6-адресах бывшего Xbox DNS (`2a00:ab00:1233:26::50/::51`)
         // и увёл на них весь резолвинг, а IPv6 сквозь этот туннель мёртв целиком —
         // `ping6` 100 % потерь и TCP не встаёт ни к одному v6-адресу при живом IPv4.
         // Резолвинг вставал намертво, `ping ya.ru` не возвращался минутами.
@@ -8739,7 +8739,7 @@ class NovaVpnService : OperaNativeVpnService() {
         //
         // Ничего при этом не теряем: перехват ловит любой UDP на 53 независимо от
         // семейства адреса, а адрес IPv4 у TUN есть всегда (I7). Зато освобождаются
-        // места под пределом Android — теперь в четвёрку входят и Xbox, и Cloudflare.
+        // места под пределом Android — теперь в четвёрку входит Cloudflare.
         //
         // G148. Сам предел: резолвер Android держит не больше `MAXNS` адресов и лишние
         // выбрасывает молча — в журнале телефона это строка
@@ -8815,7 +8815,9 @@ class NovaVpnService : OperaNativeVpnService() {
             bypassAddresses = directBypassDnsAddresses(
                 connectivityManager = connectivityManager,
                 underlyingNetwork = underlyingNetwork,
-                ownerDnsViaTunnel = ownerDnsViaTunnel(BACKEND_WARP),
+                // `via=obfs` (applyOwnerDnsRoute): прямая попытка идёт по защищённому
+                // сокету и выреза не требует, а запасной путь обязан попасть в TUN.
+                ownerDnsViaTunnel = true,
             ) + domainBypassAddresses(underlyingNetwork),
         )
         applyUnderlyingNetworkHint(
@@ -12386,7 +12388,7 @@ class NovaVpnService : OperaNativeVpnService() {
             // запасных, и если сервер провайдера недоступен, имена перестают
             // разрешаться совсем.
             //
-            // Порядок один и не зависит от страны выхода: сначала Xbox DNS, затем DNS
+            // Порядок один и не зависит от страны выхода: сначала Cloudflare, затем DNS
             // из профиля как запасной. Раньше на зарубежном выходе профиль вставал
             // первым, и одно и то же приложение резолвило имена по-разному в
             // зависимости от того, куда его вывел узел. WireGuard перебирает список по
@@ -25800,7 +25802,7 @@ class NovaVpnService : OperaNativeVpnService() {
     /**
      * Адреса DNS, которые надо вывести из маршрутов туннеля.
      *
-     * Требование владельца: запросы к Xbox DNS идут напрямую к провайдеру в любом
+     * Требование владельца: запросы к открытому DNS идут напрямую к провайдеру в любом
      * режиме. Способ — не заворачивать их в TUN: тогда пакет уходит по сети оператора
      * и в WARP/MASQUE (перехват DNS в ядре его не увидит), и в Opera с VLESS (в
      * tun2proxy он не попадёт). Возвращаем только те адреса, которые действительно
@@ -25811,7 +25813,7 @@ class NovaVpnService : OperaNativeVpnService() {
      * Адреса, которые выводятся из маршрутов туннеля.
      *
      * Наружу идёт **только** шифрованный резолвер. Раньше сюда же попадал открытый
-     * Xbox DNS, и это была утечка по построению: пакет к нему не заходил в TUN вовсе,
+     * резолвер (Xbox DNS), и это была утечка по построению: пакет к нему не заходил в TUN вовсе,
      * то есть провайдер видел каждое запрашиваемое имя — при живом WARP, MASQUE,
      * Proton, Opera и VLESS одинаково. Решение владельца 2026-08-30: важнее
      * отсутствие утечек.
@@ -25819,8 +25821,8 @@ class NovaVpnService : OperaNativeVpnService() {
      * Что происходит без carve-out. В WARP/MASQUE/Proton запрос к любому адресу из
      * списка интерфейса заходит в TUN, там его забирает перехват ядра (он берёт любой
      * UDP с портом 53) и отвечает через приоритетный DoH — зашифрованно, по
-     * защищённому сокету мимо туннеля. Xbox DNS при этом не пропадает: он остаётся
-     * следующим апстримом перехвата и опрашивается, когда DoH не ответил.
+     * защищённому сокету мимо туннеля. Остальные резолверы при этом не пропадают: они остаются
+     * следующими апстримами перехвата и опрашиваются, когда DoH не ответил.
      *
      * В Opera и VLESS перехвата нет (fd у tun2proxy, G22), и запрос обслуживает
      * виртуальный DNS tun2proxy: имя разрешается на выходном узле, наружу не уходит
@@ -25856,9 +25858,9 @@ class NovaVpnService : OperaNativeVpnService() {
         // вообще, и оставленный вырез сделал бы настройку недействующей.
         val userBypass = runCatching { userDnsPlan().bypass }.getOrDefault(emptyList())
         val ownerAddresses = priorityDohAddresses().filter { it.isNotBlank() }.toSet()
-        // Proton, Opera, VLESS, TOR, DNS-VPN: решение владельца — запросы к DNS-AI
-        // идут через VPN, а не мимо него. Вырез для его адресов не делаем вовсе; в
-        // WARP/MASQUE действует прежнее правило (напрямую через провайдера).
+        // DNS-AI во всех режимах — `via=obfs`: прямая попытка ядра идёт по сокету с
+        // `protect()`, которому вырез не нужен, а запасной путь через VPN вырез бы
+        // сломал. Поэтому все вызовы передают ownerDnsViaTunnel = true.
         val priorityDoh = if (tunnelRouted) {
             emptySet()
         } else {
@@ -25972,33 +25974,21 @@ class NovaVpnService : OperaNativeVpnService() {
     }
 
     /**
-     * Должен ли DNS-AI идти через туннель, а не напрямую через провайдера.
+     * Путь DNS-AI в цепочке перехвата ядра — правило владельца (2026-11-09), одно для
+     * всех режимов: сначала напрямую с обфускацией (фрагментированный ClientHello),
+     * а если так не выходит — через активный VPN. Это `via=obfs` в ядре
+     * (`nova-core/engine/dns_obfs.go`): после отказа прямой путь снимается на минуту
+     * и перепроверяется в фоне, запросы в это время идут через туннель без ожидания.
      *
-     * Решение владельца: в Proton, Opera, VLESS, TOR и DNS-VPN — через VPN; в
-     * WARP/MASQUE — напрямую. Proton ставит в службе то же ядро и тот же
-     * `establishTunnelInterface`, что и WARP, поэтому его отличает только источник
-     * профилей.
+     * Раньше в Proton, Opera, VLESS, TOR и DNS-VPN DNS-AI шёл только через туннель, а
+     * в WARP/MASQUE — только напрямую и без обфускации. Чужие апстримы не трогаем.
      */
-    private fun ownerDnsViaTunnel(backendLabel: String?): Boolean {
-        if (isOperaBackendLabel(backendLabel) || isVlessBackendLabel(backendLabel) ||
-            isTorBackendLabel(backendLabel) || isDnsBackendLabel(backendLabel)
-        ) {
-            return true
-        }
-        return runCatching { ClientData(applicationContext).isProtonSourceActive() }.getOrDefault(false)
-    }
-
-    /**
-     * Дописывает `via=tunnel` апстримам DNS-AI в цепочке перехвата ядра, если в этом
-     * режиме он обязан идти через VPN. Чужие апстримы не трогаем.
-     */
-    private fun applyOwnerDnsRoute(upstreams: List<String>, backendLabel: String?): List<String> {
-        if (!ownerDnsViaTunnel(backendLabel)) return upstreams
+    private fun applyOwnerDnsRoute(upstreams: List<String>, @Suppress("UNUSED_PARAMETER") backendLabel: String?): List<String> {
         return upstreams.map { entry ->
             if (!entry.startsWith(PriorityDns.DOH_URL) && !entry.startsWith(PriorityDns.DOT_URL)) {
                 entry
             } else {
-                entry.split('|').filter { !it.startsWith("via=") }.joinToString("|") + "|via=tunnel"
+                entry.split('|').filter { !it.startsWith("via=") }.joinToString("|") + "|via=obfs"
             }
         }
     }
@@ -26457,7 +26447,7 @@ class NovaVpnService : OperaNativeVpnService() {
      * нельзя: первый список **возвращает** адрес в туннель, вычитая его из подсетей
      * обхода (так DNS импортированного профиля из частной сети остаётся доступным
      * через туннель), а второй, наоборот, **выводит** конкретные адреса наружу —
-     * этим уходят мимо VPN запросы к Xbox DNS.
+     * этим уходят мимо VPN запросы к открытому DNS.
      */
     private fun buildLocalNetworkBypassPrefixes(
         connectivityManager: android.net.ConnectivityManager?,
@@ -26874,7 +26864,7 @@ class NovaVpnService : OperaNativeVpnService() {
         //
         // Дефект, который это чинит: `connectTimeout` у HttpURLConnection ограничивает
         // соединение, но не разрешение имени. Резолвер здесь пользовательский
-        // (xbox-primary-warp-ru), и с чужого выхода он вполне может не отвечать — тогда
+        // (cloudflare-primary-warp), и с чужого выхода он вполне может не отвечать — тогда
         // каждая проверка висела до собственного отказа резолвера. Замер на тестовом устройстве:
         // проба с бюджетом 1200мс занимала 4.8 секунды и съедала попытку целиком — при
         // живом туннеле, где TCP до 1.1.1.1:443 проходил за 36мс.

@@ -64,6 +64,7 @@ class TunnelMtuActivity : AppCompatActivity() {
         NovaTheme.apply(this)
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_tunnel_mtu)
+        findViewById<TextView>(R.id.tv_mtu_intro).collapseToInfoIcon()
         LogManager.setAppContext(this)
         clientData = ClientData(this)
 

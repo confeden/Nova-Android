@@ -25,6 +25,8 @@ class NotificationSettingsActivity : AppCompatActivity() {
         LogManager.setAppContext(this)
         setContentView(R.layout.activity_notification_settings)
         NovaFontHelper.apply(findViewById(android.R.id.content))
+        findViewById<TextView>(R.id.tv_notification_details_hint).collapseToInfoIcon()
+        findViewById<TextView>(R.id.tv_notification_collapse_hint).collapseToInfoIcon()
 
         val clientData = ClientData(this)
         val switch = findViewById<Switch>(R.id.sw_notification_details)

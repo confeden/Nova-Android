@@ -67,8 +67,11 @@ object LocalAppProxyManager {
         GatewayWireGuard.syncServer(
             context = appContext,
             shouldRun = shouldRun,
-            egressAllowed = serviceState == NovaVpnService.STATE_CONNECTED ||
-                clientData.isGatewayAllowDirectWithoutVpn(),
+            egressAllowed = GatewayPassthroughPolicy.egressAllowed(
+                connected = serviceState == NovaVpnService.STATE_CONNECTED,
+                allowDirect = clientData.isGatewayAllowDirectWithoutVpn(),
+                passthrough = clientData.isGatewayPassthroughMode(),
+            ),
             logger = logger,
         )
         val endpoints = GatewayEndpoints.discover(appContext)
@@ -169,6 +172,7 @@ object LocalAppProxyManager {
             endpoints = endpoints,
         )
         val tunnelNote = when {
+            clientData.isGatewayPassthroughMode() -> "режим релея, трафик идёт по системной сети"
             serviceState == NovaVpnService.STATE_CONNECTED -> "трафик идёт в VPN"
             clientData.isGatewayAllowDirectWithoutVpn() -> "VPN не подключён, трафик пойдёт напрямую"
             else -> "VPN не подключён, трафик пока не выпускается"
@@ -396,7 +400,11 @@ object LocalAppProxyManager {
             writeHttpError(output, 400, "Bad Target")
             return
         }
-        val usingOperaBackend = isOperaBackend(ClientData(context).getServiceBackend())
+        val proxyData = ClientData(context)
+        val usingOperaBackend = GatewayPassthroughPolicy.useOperaUpstream(
+            proxyData.getServiceBackend(),
+            proxyData.isGatewayPassthroughMode(),
+        )
         val upstream = if (usingOperaBackend) {
             openOperaProxySocket(context)
         } else {
@@ -581,7 +589,11 @@ object LocalAppProxyManager {
     private fun tunnelBlocksTraffic(context: Context): Boolean {
         val clientData = ClientData(context)
         if (clientData.getServiceState() == NovaVpnService.STATE_CONNECTED) return false
-        return !clientData.isGatewayAllowDirectWithoutVpn()
+        return GatewayPassthroughPolicy.tunnelBlocksTraffic(
+            connected = false,
+            allowDirect = clientData.isGatewayAllowDirectWithoutVpn(),
+            passthrough = clientData.isGatewayPassthroughMode(),
+        )
     }
 
     private fun writeCredentialsPage(
@@ -653,7 +665,12 @@ object LocalAppProxyManager {
     }
 
     private fun openTargetSocket(context: Context, host: String, port: Int): Socket? {
-        return if (isOperaBackend(ClientData(context).getServiceBackend())) {
+        val clientData = ClientData(context)
+        val viaOpera = GatewayPassthroughPolicy.useOperaUpstream(
+            clientData.getServiceBackend(),
+            clientData.isGatewayPassthroughMode(),
+        )
+        return if (viaOpera) {
             openHttpConnectTunnelViaOpera(context, host, port)
         } else {
             openDirectSocket(context, host, port)
@@ -743,10 +760,6 @@ object LocalAppProxyManager {
             socket.keepAlive = true
             socket.tcpNoDelay = true
         }
-    }
-
-    private fun isOperaBackend(backendLabel: String): Boolean {
-        return backendLabel.trim().uppercase(Locale.US).startsWith(NovaVpnService.BACKEND_OPERA)
     }
 
     private fun sanitizeOutgoingHeaders(

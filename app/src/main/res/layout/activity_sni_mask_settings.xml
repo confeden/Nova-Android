@@ -31,6 +31,7 @@
             android:textStyle="bold" />
 
         <TextView
+            android:id="@+id/tv_sni_intro"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
@@ -64,6 +65,7 @@
                     android:textSize="16sp" />
 
                 <TextView
+                    android:id="@+id/tv_sni_auto_hint"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginStart="32dp"
@@ -81,6 +83,7 @@
                     android:textSize="16sp" />
 
                 <TextView
+                    android:id="@+id/tv_sni_custom_hint"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginStart="32dp"
@@ -144,6 +147,17 @@
         </LinearLayout>
 
         <TextView
+            android:id="@+id/tv_sni_wg_title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="WireGuard и AmneziaWG"
+            android:textColor="?attr/novaTextTitle"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tv_sni_wg_hint"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"

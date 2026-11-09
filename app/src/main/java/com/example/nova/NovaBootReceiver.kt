@@ -37,12 +37,16 @@ class NovaBootReceiver : BroadcastReceiver() {
         val vpnWasOn = persistedState == NovaVpnService.STATE_CONNECTED ||
             persistedState == NovaVpnService.STATE_CONNECTING
         val gatewayWasOn = clientData.isLocalProxyEnabled()
-        if (!vpnWasOn && !gatewayWasOn) return
+        if (!vpnWasOn && !gatewayWasOn && !clientData.isGatewayPassthroughMode()) return
 
         // Туннель поднимаем через восстановление последней сессии — оно вернёт и
         // выбранный профиль, и режим. Если VPN не был включён, ограничиваемся
         // шлюзом: поднимать туннель за пользователя не наше дело.
-        val serviceAction = if (vpnWasOn) {
+        // Режим релея важнее: свой VPN Nova выбил бы VPN другого приложения.
+        val passthrough = clientData.isGatewayPassthroughMode()
+        val serviceAction = if (passthrough) {
+            NovaVpnService.ACTION_START_PASSTHROUGH
+        } else if (vpnWasOn) {
             NovaVpnService.ACTION_RESTORE_LAST_SESSION
         } else {
             NovaVpnService.ACTION_SYNC_LOCAL_PROXY
@@ -56,7 +60,7 @@ class NovaBootReceiver : BroadcastReceiver() {
             )
             LogManager.log(
                 "После \"$action\" восстанавливаем: " +
-                    (if (vpnWasOn) "VPN" else "только раздачу") + "."
+                    (if (passthrough) "режим релея" else if (vpnWasOn) "VPN" else "только раздачу") + "."
             )
         }.onFailure { error ->
             LogManager.log("Не удалось восстановить состояние после \"$action\": ${error.message}")

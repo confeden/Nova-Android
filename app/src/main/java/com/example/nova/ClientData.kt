@@ -1034,6 +1034,23 @@ class ClientData(context: Context) {
         writeGatewayFlag("allow_direct" to enabled)
     }
     /**
+     * Режим релея (внутреннее имя `passthrough`, не путать с NovaRelay): Nova не
+     * поднимает свой VPN, а только держит прокси и WireGuard-шлюз раздачи. Их
+     * исходящие сокеты не защищены `protect()` и идут по системной сети по умолчанию —
+     * если включён VPN другого приложения, трафик клиентов уходит в него.
+     *
+     * По умолчанию выключено. Файл флагов главнее prefs (I2): службу `:vpn` видит
+     * свежее значение без перезапуска процесса.
+     */
+    fun isGatewayPassthroughMode(): Boolean {
+        readGatewayFlags()?.let { if (it.has("passthrough_mode")) return it.optBoolean("passthrough_mode", false) }
+        return prefs.getBoolean("gateway_passthrough_mode", false)
+    }
+    fun setGatewayPassthroughMode(enabled: Boolean) {
+        prefs.edit().putBoolean("gateway_passthrough_mode", enabled).commit()
+        writeGatewayFlag("passthrough_mode" to enabled)
+    }
+    /**
      * Короткое пояснение для интерфейса, когда работает не тот транспорт, который
      * выбрал пользователь. Пустая строка — сказать нечего, всё идёт как выбрано.
      *

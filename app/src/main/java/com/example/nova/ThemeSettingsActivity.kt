@@ -54,6 +54,8 @@ class ThemeSettingsActivity : AppCompatActivity() {
         NovaTheme.apply(this)
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_theme_settings)
+        findViewById<TextView>(R.id.tv_theme_intro).collapseToInfoIcon()
+        findViewById<TextView>(R.id.tv_texture_hint).collapseToInfoIcon()
         LogManager.setAppContext(this)
 
         // Сохранённые значения, а не текущие: «Сбросить» возвращает к тому, что

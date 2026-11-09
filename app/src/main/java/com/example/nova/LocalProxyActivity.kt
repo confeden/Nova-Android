@@ -38,6 +38,8 @@ class LocalProxyActivity : AppCompatActivity() {
     private lateinit var tvOpenTetheredHint: TextView
     private lateinit var btnToggleAllowDirect: TextView
     private lateinit var tvAllowDirectHint: TextView
+    private lateinit var btnTogglePassthrough: TextView
+    private lateinit var tvPassthroughStatus: TextView
     private lateinit var tvGatewayLead: TextView
     private lateinit var wgDevicesContainer: LinearLayout
     private lateinit var btnWgAddDevice: TextView
@@ -81,6 +83,8 @@ class LocalProxyActivity : AppCompatActivity() {
         tvOpenTetheredHint = findViewById(R.id.tv_open_tethered_hint)
         btnToggleAllowDirect = findViewById(R.id.btn_toggle_allow_direct)
         tvAllowDirectHint = findViewById(R.id.tv_allow_direct_hint)
+        btnTogglePassthrough = findViewById(R.id.btn_toggle_passthrough)
+        tvPassthroughStatus = findViewById(R.id.tv_passthrough_status)
         tvGatewayLead = findViewById(R.id.tv_gateway_lead)
         wgDevicesContainer = findViewById(R.id.container_wg_devices)
         btnWgAddDevice = findViewById(R.id.btn_wg_add_device)
@@ -93,8 +97,14 @@ class LocalProxyActivity : AppCompatActivity() {
             btnRegenerate,
             btnToggleOpenTethered,
             btnToggleAllowDirect,
+            btnTogglePassthrough,
             btnWgAddDevice,
         )
+        findViewById<TextView>(R.id.tv_wg_hint).collapseToInfoIcon()
+        tvOpenTetheredHint.collapseToInfoIcon()
+        tvAllowDirectHint.collapseToInfoIcon()
+        findViewById<TextView>(R.id.tv_bypass_hint).collapseToInfoIcon()
+        findViewById<TextView>(R.id.tv_unauthorized_hint).collapseToInfoIcon()
         btnWgAddDevice.setOnClickListener {
             val device = GatewayWireGuard.addDevice(this, "")
             if (device == null) {
@@ -120,6 +130,29 @@ class LocalProxyActivity : AppCompatActivity() {
                 },
                 Toast.LENGTH_SHORT,
             ).show()
+        }
+
+        btnTogglePassthrough.setOnClickListener {
+            if (clientData.isGatewayPassthroughMode()) {
+                disablePassthrough()
+                return@setOnClickListener
+            }
+            val novaActive = clientData.getServiceState().let {
+                it == NovaVpnService.STATE_CONNECTED || it == NovaVpnService.STATE_CONNECTING
+            }
+            if (!novaActive) {
+                enablePassthrough(stopNovaFirst = false)
+                return@setOnClickListener
+            }
+            android.app.AlertDialog.Builder(this)
+                .setTitle("Отключить VPN Nova?")
+                .setMessage(
+                    "Режим релея работает без своего VPN: раздача уходит в VPN другого " +
+                        "приложения или напрямую. Отключить Nova и включить релей?"
+                )
+                .setPositiveButton("Отключить") { _, _ -> enablePassthrough(stopNovaFirst = true) }
+                .setNegativeButton("Отмена", null)
+                .showNova()
         }
 
         btnToggleOpenTethered.setOnClickListener {
@@ -155,6 +188,11 @@ class LocalProxyActivity : AppCompatActivity() {
                 clientData.ensureLocalProxyCredentials()
             }
             clientData.setLocalProxyEnabled(enabled)
+            // Релей без раздачи бессмыслен: выключая раздачу, снимаем и его,
+            // иначе после перезагрузки он поднял бы раздачу обратно.
+            if (!enabled && clientData.isGatewayPassthroughMode()) {
+                clientData.setGatewayPassthroughMode(false)
+            }
             requestProxySyncIfNeeded()
             renderState()
         }
@@ -244,7 +282,9 @@ class LocalProxyActivity : AppCompatActivity() {
         }
 
         btnToggle.text = if (enabled) "Выключить" else "Включить"
+        val passthrough = clientData.isGatewayPassthroughMode()
         tvStatus.text = when {
+            running && passthrough -> "Раздача работает в режиме релея, без своего VPN"
             running && serviceConnected -> "Раздача работает, выход через ${formatBackend(backend)}"
             running && allowDirect -> "Раздача работает, но VPN не подключён — трафик идёт открыто"
             running -> "Раздача включена, ждёт подключения VPN"
@@ -293,6 +333,22 @@ class LocalProxyActivity : AppCompatActivity() {
             if (allowDirect) android.graphics.Color.parseColor("#FF6B6B")
             else android.graphics.Color.parseColor("#AAAAAA")
         )
+        btnTogglePassthrough.text = if (passthrough) "Режим релея: вкл" else "Режим релея: выкл"
+        if (passthrough) {
+            val foreignVpn = isForeignVpnVisible()
+            tvPassthroughStatus.visibility = View.VISIBLE
+            tvPassthroughStatus.text = if (foreignVpn) {
+                "Другой VPN найден"
+            } else {
+                "Другого VPN нет — трафик пойдёт напрямую"
+            }
+            tvPassthroughStatus.setTextColor(
+                if (foreignVpn) android.graphics.Color.parseColor("#50C878")
+                else android.graphics.Color.parseColor("#FFB347")
+            )
+        } else {
+            tvPassthroughStatus.visibility = View.GONE
+        }
         tvUsername.text = "Логин: $username"
         tvPassword.text = "Пароль: $password"
         tvUnauthorizedCounter.text = "Неудачных входов: $unauthorizedCount"
@@ -302,6 +358,53 @@ class LocalProxyActivity : AppCompatActivity() {
         )
         renderUnauthorizedAttempts(attempts)
         renderWgDevices()
+    }
+
+    private fun enablePassthrough(stopNovaFirst: Boolean) {
+        if (!clientData.isLocalProxyEnabled()) {
+            clientData.ensureLocalProxyCredentials()
+            clientData.setLocalProxyEnabled(true)
+        }
+        clientData.setGatewayPassthroughMode(true)
+        if (stopNovaFirst) {
+            NovaTunnelControl.stop(this, "Режим релея")
+        }
+        runCatching {
+            ContextCompat.startForegroundService(
+                this,
+                Intent(this, NovaVpnService::class.java).apply {
+                    action = NovaVpnService.ACTION_START_PASSTHROUGH
+                },
+            )
+        }.onFailure { LogManager.log("Режим релея: служба не запустилась: ${it.message}") }
+        renderState()
+        Toast.makeText(this, "Режим релея включён", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun disablePassthrough() {
+        clientData.setGatewayPassthroughMode(false)
+        runCatching {
+            ContextCompat.startForegroundService(
+                this,
+                Intent(this, NovaVpnService::class.java).apply {
+                    action = NovaVpnService.ACTION_STOP_PASSTHROUGH
+                },
+            )
+        }.onFailure { LogManager.log("Режим релея: служба не ответила на выключение: ${it.message}") }
+        renderState()
+        Toast.makeText(this, "Режим релея выключен", Toast.LENGTH_SHORT).show()
+    }
+
+    /** Виден ли системе VPN, который не принадлежит Nova. */
+    private fun isForeignVpnVisible(): Boolean {
+        val state = clientData.getServiceState()
+        if (state == NovaVpnService.STATE_CONNECTED || state == NovaVpnService.STATE_CONNECTING) return false
+        val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return false
+        return runCatching {
+            val active = cm.activeNetwork ?: return@runCatching false
+            cm.getNetworkCapabilities(active)
+                ?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true
+        }.getOrDefault(false)
     }
 
     private fun renderWgDevices() {

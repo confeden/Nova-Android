@@ -1065,6 +1065,12 @@ class NovaVpnService : OperaNativeVpnService() {
         const val ACTION_FORCE_HEALTH_RECHECK = "FORCE_HEALTH_RECHECK"
         const val ACTION_CONFIRM_STOP_CLEANUP = "CONFIRM_STOP_CLEANUP"
         const val ACTION_SYNC_LOCAL_PROXY = "SYNC_LOCAL_PROXY"
+        // Режим релея (внутреннее имя passthrough; NovaRelay — другое). Своего VPN
+        // нет, работают только прокси и WireGuard-шлюз раздачи.
+        const val ACTION_START_PASSTHROUGH = "START_PASSTHROUGH"
+        const val ACTION_STOP_PASSTHROUGH = "STOP_PASSTHROUGH"
+        const val PASSTHROUGH_NOTIFICATION_TEXT =
+            "Режим релея: трафик раздачи идёт через системную сеть (другой VPN, если он включён)"
         const val ACTION_BACKGROUND_HEARTBEAT = "BACKGROUND_HEARTBEAT"
         const val ACTION_WARP_CONFIG_DISCOVERY = "com.example.nova.WARP_CONFIG_DISCOVERY"
 
@@ -1915,6 +1921,14 @@ class NovaVpnService : OperaNativeVpnService() {
             return if (isRunning || currentState == STATE_CONNECTED) START_STICKY else START_NOT_STICKY
         }
 
+        if (intent?.action == ACTION_START_PASSTHROUGH) {
+            return startPassthroughMode(clientData, reason = "passthrough-start")
+        }
+
+        if (intent?.action == ACTION_STOP_PASSTHROUGH) {
+            return stopPassthroughMode(clientData)
+        }
+
         if (intent?.action == ACTION_BACKGROUND_HEARTBEAT) {
             // Подбор `I1` едет на уже существующем сердцебиении, а не заводит свой
             // будильник: собственный таймер — это ещё одно пробуждение устройства
@@ -2045,6 +2059,19 @@ class NovaVpnService : OperaNativeVpnService() {
             return START_NOT_STICKY
         }
 
+        // Перезапуск службы системой (START_STICKY) в режиме релея: поднимаем релей,
+        // а не восстановление сеанса — свой VPN выбил бы VPN другого приложения.
+        if (intent == null && clientData.isGatewayPassthroughMode()) {
+            return startPassthroughMode(clientData, reason = "passthrough-sticky-restart")
+        }
+        if (
+            intent?.action == ACTION_SWITCH_VLESS_PROFILE ||
+            intent?.action == ACTION_REAPPLY_CURRENT_SESSION ||
+            intent?.action == ACTION_RESTORE_LAST_SESSION
+        ) {
+            clearPassthroughBeforeConnect(clientData, intent?.action)
+        }
+
         if (intent?.action == ACTION_SWITCH_VLESS_PROFILE) {
             if (requestVlessProfileSwitchInPlace(intent.getStringExtra(EXTRA_VLESS_TARGET_LINK))) return START_STICKY
             // Перебор ещё не идёт — поднимаем сессию обычным путём, а следующий профиль
@@ -2108,7 +2135,9 @@ class NovaVpnService : OperaNativeVpnService() {
                 START_NOT_STICKY
             }
         }
-        
+
+        clearPassthroughBeforeConnect(clientData, intent?.action)
+
         val privateKey = intent?.getStringExtra("PRIVATE_KEY")
         val ipv4 = intent?.getStringExtra("IPV4")
         val ipv6 = intent?.getStringExtra("IPV6")
@@ -2538,7 +2567,12 @@ class NovaVpnService : OperaNativeVpnService() {
             !hasRestartSession
         ) {
             cancelBackgroundKeepAlive()
-            if (!isRunning && currentState != STATE_CONNECTED && currentState != STATE_CONNECTING) {
+            if (
+                !isRunning &&
+                currentState != STATE_CONNECTED &&
+                currentState != STATE_CONNECTING &&
+                !clientData.isGatewayPassthroughMode()
+            ) {
                 stopSelfResult(startId)
             }
             return START_NOT_STICKY
@@ -2843,6 +2877,65 @@ class NovaVpnService : OperaNativeVpnService() {
                 tileRefreshHandler.postDelayed(request, 1600L)
             }
         }
+    }
+
+    /**
+     * Режим релея: служба живёт в foreground только ради раздачи, свой VPN не
+     * поднимается. Перехват DNS выключаем, чтобы DNS шлюза шёл обычными
+     * резолверами по системной сети, а не защищённой цепочкой Nova мимо чужого VPN.
+     */
+    private fun startPassthroughMode(clientData: ClientData, reason: String): Int {
+        if (!clientData.isGatewayPassthroughMode()) clientData.setGatewayPassthroughMode(true)
+        if (!clientData.isLocalProxyEnabled()) clientData.setLocalProxyEnabled(true)
+        if (isRunning || currentState == STATE_CONNECTED || currentState == STATE_CONNECTING || cleanupInProgress.get()) {
+            // Туннель ещё жив или разбирается: хвост cleanup сам оставит раздачу
+            // и повесит уведомление релея, а перехват DNS снимет остановка ядра.
+            LogManager.log(
+                "Режим релея запрошен ($reason), но туннель Nova ещё активен " +
+                    "(state=$currentState, running=$isRunning) — включится после его остановки."
+            )
+            return START_STICKY
+        }
+        runCatching { Nova.setDnsInterceptPolicy(false, "", "", "") }
+            .onFailure { LogManager.log("Режим релея: не удалось выключить перехват DNS: ${it.message}") }
+        runCatching {
+            startForeground(NOTIFICATION_ID, createNotification(PASSTHROUGH_NOTIFICATION_TEXT))
+            foregroundNotificationActive = true
+        }
+        syncLocalAppProxy(reason = reason)
+        LogManager.log(
+            "Режим релея включён ($reason): свой VPN не поднимаем, прокси и WireGuard-шлюз " +
+                "выпускают трафик по системной сети."
+        )
+        return START_STICKY
+    }
+
+    private fun stopPassthroughMode(clientData: ClientData): Int {
+        clientData.setGatewayPassthroughMode(false)
+        LogManager.log("Режим релея выключен пользователем.")
+        syncLocalAppProxy(reason = "passthrough-stop")
+        val tunnelActive = isRunning || currentState == STATE_CONNECTED || currentState == STATE_CONNECTING
+        if (tunnelActive) return START_STICKY
+        if (!clientData.isLocalProxyEnabled()) {
+            LogManager.log("Раздача выключена, VPN не активен — останавливаем службу.")
+            finishForegroundShutdown()
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        runCatching {
+            startForeground(NOTIFICATION_ID, createNotification("VPN выключен, работает только раздача"))
+            foregroundNotificationActive = true
+        }
+        return START_NOT_STICKY
+    }
+
+    private fun clearPassthroughBeforeConnect(clientData: ClientData, action: String?) {
+        if (!clientData.isGatewayPassthroughMode()) return
+        clientData.setGatewayPassthroughMode(false)
+        LogManager.log(
+            "Режим релея снят: Nova поднимает свой VPN (action=${action ?: "null"}). " +
+                "VPN другого приложения система при этом отключит."
+        )
     }
 
     private fun syncLocalAppProxy(reason: String) {
@@ -6347,7 +6440,13 @@ class NovaVpnService : OperaNativeVpnService() {
                 runCatching {
                     startForeground(
                         NOTIFICATION_ID,
-                        createNotification("VPN выключен, работает только раздача"),
+                        createNotification(
+                            if (ClientData(this).isGatewayPassthroughMode()) {
+                                PASSTHROUGH_NOTIFICATION_TEXT
+                            } else {
+                                "VPN выключен, работает только раздача"
+                            }
+                        ),
                     )
                     foregroundNotificationActive = true
                 }
@@ -15651,6 +15750,10 @@ class NovaVpnService : OperaNativeVpnService() {
 
     private fun reconcileSystemVpnConsistency() {
         if (cleanupInProgress.get() || warpConfigDiscoveryRunning.get()) return
+        // Режим релея: системный VPN, если он есть, принадлежит другому приложению.
+        // Принять его за свой значит снести его forceDetachVpnStack или поверх него
+        // восстановить сеанс Nova — ровно то, чего релей обещает не делать.
+        if (ClientData(this).isGatewayPassthroughMode()) return
         val connectivityManager = getSystemService(android.net.ConnectivityManager::class.java) ?: return
         val currentVpn = findCurrentVpnNetwork(connectivityManager)
         val selectedUnderlying = selectUnderlyingNetwork(connectivityManager)

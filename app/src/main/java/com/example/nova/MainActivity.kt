@@ -3623,6 +3623,8 @@ class MainActivity : AppCompatActivity() {
     private fun reconcileSystemVpnStateIfNeeded() {
         if (isManualStopUiSuppressed() || isRecentLocalStop()) return
         if (isStartFlowActive) return
+        // Режим релея: системный VPN, если есть, чужой — не восстанавливать поверх него сеанс.
+        if (clientData.isGatewayPassthroughMode()) return
         if (isNovaVpnServiceRunning()) return
         val persistedState = getPersistedServiceState()
         val activeVpn = findCurrentVpnNetwork() ?: return

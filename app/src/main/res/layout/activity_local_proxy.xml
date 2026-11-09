@@ -111,6 +111,7 @@
                 android:textStyle="bold" />
 
             <TextView
+                android:id="@+id/tv_wg_hint"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
@@ -240,6 +241,40 @@
                 android:text="Если выключить, при отсутствии туннеля Nova честно отвечает клиенту ошибкой. Пока включено, интернет у клиентов работает даже без VPN — но идёт открыто, со своим обычным адресом."
                 android:textColor="?attr/novaTextHint"
                 android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/btn_toggle_passthrough"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/bg_settings_action_green"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:minHeight="48dp"
+                android:paddingTop="12dp"
+                android:paddingBottom="12dp"
+                android:text="Режим релея: выкл"
+                android:textColor="?attr/novaAccentOn"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tv_passthrough_hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="Без своего VPN: трафик уходит в VPN другого приложения"
+                android:textColor="?attr/novaTextHint"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/tv_passthrough_status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:textSize="12sp"
+                android:visibility="gone" />
         </LinearLayout>
 
         <LinearLayout
@@ -259,6 +294,7 @@
                 android:textStyle="bold" />
 
             <TextView
+                android:id="@+id/tv_bypass_hint"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
@@ -285,6 +321,7 @@
                 android:textStyle="bold" />
 
             <TextView
+                android:id="@+id/tv_unauthorized_hint"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"

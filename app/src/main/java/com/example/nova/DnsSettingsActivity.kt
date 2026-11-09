@@ -107,6 +107,7 @@ class DnsSettingsActivity : AppCompatActivity() {
         applyZeroTransitionOpen()
         setContentView(R.layout.activity_dns_settings)
         NovaFontHelper.apply(findViewById(android.R.id.content))
+        findViewById<TextView>(R.id.tv_dns_rules_hint).collapseToInfoIcon(findViewById(R.id.sw_global_dns))
 
         clientData = ClientData(this)
         bindViews()

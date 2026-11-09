@@ -38,6 +38,8 @@ class BackgroundSettingsActivity : AppCompatActivity() {
             }
         }
 
+        tvHint.collapseToInfoIcon()
+
         when (clientData.getMainBackgroundMode()) {
             MainBackgroundPolicy.MODE_IMAGE -> rgMode.check(R.id.rb_background_image)
             MainBackgroundPolicy.MODE_NONE -> rgMode.check(R.id.rb_background_none)

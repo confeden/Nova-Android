@@ -33,6 +33,10 @@ class SniMaskSettingsActivity : AppCompatActivity() {
         NovaTheme.apply(this)
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_sni_mask_settings)
+        findViewById<TextView>(R.id.tv_sni_intro).collapseToInfoIcon()
+        findViewById<TextView>(R.id.tv_sni_auto_hint).collapseToInfoIcon()
+        findViewById<TextView>(R.id.tv_sni_custom_hint).collapseToInfoIcon()
+        findViewById<TextView>(R.id.tv_sni_wg_hint).collapseToInfoIcon()
         LogManager.setAppContext(this)
         clientData = ClientData(this)
 

@@ -27,10 +27,10 @@ import urllib.request
 from pathlib import Path
 
 HOSTS = ["https://vpn-api.proton.me", "https://api.protonvpn.ch"]
-APP_VERSION = "android-vpn@5.4.44.0"
+APP_VERSION = "android-vpn@5.20.21.0"
 CHALLENGE_FRAME_KEY = "vpn-android-v4-challenge-0"
 CHALLENGE_VERSION = "2.0.7"
-USER_AGENT = "ProtonVPN/5.4.44.0 (Android 14; Pixel 7)"
+USER_AGENT = "ProtonVPN/5.20.21.0 (Android 14; Pixel 7)"
 SOURCE = "vpn-api.proton.me /vpn/logicals?Tier=0"
 NOTE = "Only public server facts. No keys, no account: each device registers its own."
 MIN_NODES = 10

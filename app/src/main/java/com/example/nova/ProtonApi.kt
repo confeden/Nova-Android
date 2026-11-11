@@ -27,7 +27,7 @@ object ProtonApi {
     /** Оба хоста рабочие; второй остаётся на случай, если первый недоступен из сети. */
     private val HOSTS = listOf("https://vpn-api.proton.me", "https://api.protonvpn.ch")
 
-    private const val APP_VERSION = "android-vpn@5.4.44.0"
+    private const val APP_VERSION = "android-vpn@5.20.21.0"
     private const val CHALLENGE_FRAME_KEY = "vpn-android-v4-challenge-0"
     private const val CHALLENGE_VERSION = "2.0.7"
 
@@ -93,7 +93,7 @@ object ProtonApi {
     )
 
     private fun userAgent(profile: ProtonDeviceProfile): String =
-        "ProtonVPN/5.4.44.0 (Android ${profile.androidVersion}; ${profile.model})"
+        "ProtonVPN/5.20.21.0 (Android ${profile.androidVersion}; ${profile.model})"
 
     /**
      * Найденный запасной узел живёт до конца процесса.

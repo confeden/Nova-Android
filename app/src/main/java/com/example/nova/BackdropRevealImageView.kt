@@ -108,6 +108,9 @@ class BackdropRevealImageView @JvmOverloads constructor(
             postInvalidateOnAnimation()
         }
 
+    /** Скорость погружения: 1 — минута на цикл, 0 — стоит. Задаёт главный экран по оформлению. */
+    var diveSpeed: Float = 1f
+
     /** Включает и выключает погружение; выключенное оставляет картинку как была. */
     fun setDiveEnabled(enabled: Boolean) {
         if (diveEnabled == enabled) return
@@ -218,7 +221,7 @@ class BackdropRevealImageView @JvmOverloads constructor(
      */
     private fun drawLiveDive(canvas: Canvas, live: NovaAppearanceDrawable) {
         // На остановленных часах фаза стоит: кадр, нарисованный в паузе, её не двигает.
-        val t = DivePhase.time(NovaAnimationClock.now())
+        val t = DiveClock.time(NovaAnimationClock.now(), diveSpeed)
         val phaseA = DivePhase.phaseOf(t, 0.0)
         val phaseB = DivePhase.phaseOf(t, 0.5)
         val weightB = DivePhase.weightB(phaseB)
@@ -243,7 +246,7 @@ class BackdropRevealImageView @JvmOverloads constructor(
             return
         }
 
-        val t = DivePhase.time(NovaAnimationClock.now())
+        val t = DiveClock.time(NovaAnimationClock.now(), diveSpeed)
         val cycleA = DivePhase.cycleOf(t)
         val cycleB = DivePhase.cycleOf(t + 0.5)
         val phaseA = DivePhase.phaseOf(t, 0.0)

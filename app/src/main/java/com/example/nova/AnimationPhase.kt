@@ -45,6 +45,33 @@ internal object DivePhase {
 }
 
 /**
+ * Время погружения со скоростью из оформления («Скорость погружения»).
+ *
+ * `DivePhase.time` делит общие часы на длину цикла, и менять скорость, домножая
+ * часы, нельзя: фаза скакнула бы в момент движения ползунка. Поэтому время
+ * **накапливается**: каждый кадр добавляет прошедшее по часам, умноженное на
+ * скорость. Накопитель живёт в процессе, как и сами часы, — пересоздание вида или
+ * экрана его не обнуляет. 1.0 — прежний ход (минута на цикл), 0 — стоит.
+ */
+internal object DiveClock {
+    private var lastClock = Double.NaN
+    private var accumulated = 0.0
+
+    @Synchronized
+    fun time(clockSeconds: Double, speed: Float): Double {
+        if (!lastClock.isNaN()) {
+            val delta = clockSeconds - lastClock
+            // Разрыв больше пяти секунд — это пауза без явной остановки часов.
+            if (delta > 0.0 && delta < MAX_STEP_SECONDS) accumulated += delta * speed
+        }
+        lastClock = clockSeconds
+        return DivePhase.time(accumulated)
+    }
+
+    private const val MAX_STEP_SECONDS = 5.0
+}
+
+/**
  * Точка, которая идёт с постоянной скоростью и упруго отражается от стенок
  * `[0, length]`. Положение считается по пройденному пути, поэтому оно зависит
  * только от времени, а не от числа кадров, и совпадает с прежним пошаговым отскоком.

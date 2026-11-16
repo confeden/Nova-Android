@@ -62,6 +62,14 @@
     <attr name="novaSwitchThumbOn" format="color" />
     <attr name="novaSwitchThumbOff" format="color" />
 
+    <!-- Фигуры оформления (`bg_nova_*`) одни на все оттенки и читают цвета отсюда. -->
+    <attr name="novaFieldFill" format="color" />
+    <attr name="novaFieldStroke" format="color" />
+    <attr name="novaScreenTop" format="color" />
+    <attr name="novaScreenMid" format="color" />
+    <attr name="novaScreenBottom" format="color" />
+    <attr name="novaDialogFill" format="color" />
+
     <attr name="novaIconTint" format="color" />
 
 </resources>

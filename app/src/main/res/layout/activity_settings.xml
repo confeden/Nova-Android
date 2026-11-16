@@ -15,6 +15,7 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:clipToPadding="false"
     android:orientation="vertical"
     android:paddingLeft="16dp"
     android:paddingTop="16dp"
@@ -106,6 +107,19 @@
                         android:buttonTint="?attr/novaAccent"/>
 
                     <RadioButton
+                        android:id="@+id/rb_exit_nova"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="NOVA"
+                        android:textColor="?attr/novaTextTitle"
+                        android:textSize="11sp"
+                        android:paddingStart="0dp"
+                        android:paddingEnd="0dp"
+                        android:layout_marginEnd="10dp"
+                        android:maxLines="1"
+                        android:buttonTint="?attr/novaAccent"/>
+
+                    <RadioButton
                         android:id="@+id/rb_exit_ru"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
@@ -158,19 +172,6 @@
                         android:buttonTint="?attr/novaAccent"/>
 
                     <RadioButton
-                        android:id="@+id/rb_exit_nova"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="NOVA"
-                        android:textColor="?attr/novaTextTitle"
-                        android:textSize="11sp"
-                        android:paddingStart="0dp"
-                        android:paddingEnd="0dp"
-                        android:layout_marginEnd="10dp"
-                        android:maxLines="1"
-                        android:buttonTint="?attr/novaAccent"/>
-
-                    <RadioButton
                         android:id="@+id/rb_exit_tor"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
@@ -187,7 +188,7 @@
                         android:id="@+id/rb_exit_dns"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="DNS"
+                        android:text="WHITE"
                         android:textColor="?attr/novaTextTitle"
                         android:textSize="11sp"
                         android:paddingStart="0dp"
@@ -285,7 +286,7 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Конфигурации"
+                        android:text="Профили"
                         android:textColor="?attr/novaTextTitle"
                         android:textSize="16sp"
                         android:textStyle="bold"
@@ -346,9 +347,10 @@
                         android:orientation="vertical">
 
                         <TextView
+                            android:id="@+id/tv_white_profiles_title"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="Профили для DNS"
+                            android:text="Профили для White"
                             android:textColor="?attr/novaTextTitle"
                             android:textSize="16sp"
                             android:textStyle="bold"
@@ -361,9 +363,19 @@
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="3dp"
-                            android:text="Импорт профилей по ссылке и списки адресов DNS"
+                            android:text="Принимает slipnet, stormdns, cottendns, masterdns, whitedns и списки адресов"
                             android:textColor="?attr/novaTextHint"
                             android:textSize="12sp" />
+
+                        <!-- Что умеет White: открывается значком «i» у заголовка (collapseToInfoIcon). -->
+                        <TextView
+                            android:id="@+id/tv_white_support_hint"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="White — туннель поверх DNS-запросов: нужен там, где обычные соединения закрыты, а DNS ещё проходит. Скорость низкая (около 380 кбит/с вниз и 42 вверх), поэтому режим для экстремальных условий.&#10;&#10;Что принимает импорт:&#10;• slipnet:// — dnstt: зона, ключ сервера, список резолверов (профиль dnstt_ssh с SSH-стадией пока не подключается);&#10;• stormdns://, cottendns://, masterdns://, whitedns:// — семейство MasterDNS / StormDNS / CottenDNS с общим ключом, шифры XOR, ChaCha20 и AES-GCM;&#10;• список адресов резолверов: IPv4, IPv6, имена и https:// (DoH), по одному в строке или файлом.&#10;&#10;Встроенный профиль Nova работает на нашем сервере; импортированные стоят выше него."
+                            android:textColor="?attr/novaTextHint"
+                            android:textSize="12sp"
+                            android:visibility="gone" />
                     </LinearLayout>
 
                     <TextView
@@ -1118,58 +1130,6 @@
             </LinearLayout>
 
             <LinearLayout
-                android:id="@+id/row_main_background"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:background="?attr/novaCardBackground"
-                android:minHeight="64dp"
-                android:paddingLeft="16dp"
-                android:paddingTop="8dp"
-                android:paddingRight="16dp"
-                android:paddingBottom="8dp"
-                android:layout_marginBottom="6dp"
-                android:clickable="true"
-                android:focusable="true">
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Фон главного экрана"
-                        android:textColor="?attr/novaTextTitle"
-                        android:textSize="16sp"
-                        android:textStyle="bold"
-                        android:drawableStart="@drawable/ic_nova_palette"
-                        android:drawablePadding="14dp"
-                        android:drawableTint="?attr/novaIconTint" />
-
-                    <TextView
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="3dp"
-                        android:text="Фактура оформления, анимация или чистый фон"
-                        android:textColor="?attr/novaTextHint"
-                        android:textSize="12sp" />
-                </LinearLayout>
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="12dp"
-                    android:text="›"
-                    android:textColor="?attr/novaTextTitle"
-                    android:textSize="24sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
-
-            <LinearLayout
                 android:id="@+id/row_app_theme"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -1194,7 +1154,7 @@
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="Тема оформления"
+                        android:text="Оформление"
                         android:textColor="?attr/novaTextTitle"
                         android:textSize="16sp"
                         android:textStyle="bold"
@@ -1207,7 +1167,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="3dp"
-                        android:text="Aurora mint"
+                        android:text="Бирюза"
                         android:textColor="?attr/novaTextHint"
                         android:textSize="12sp" />
                 </LinearLayout>
@@ -1653,33 +1613,33 @@
         шагом в 1sp. Вместе с `maxLines=1` это и значит «никогда не переносить»:
         сузиться есть куда, а переноситься уже нечему.
 
-        Подпись сидит ниже середины подложки, а сама подложка — ниже по экрану.
-        Поле снизу было 20dp, и подвал висел заметно выше края; теперь 8dp, а
-        отбивка внутри несимметрична (сверху 11dp, снизу 4dp), поэтому за
-        подписью опускается и нижняя граница подложки. Ниже 8dp опускать нельзя:
-        `NovaTheme.applyEdgeToEdge` уже добавляет отступ системной полосы, но
-        совсем прижатая к нему подложка читается как обрезанная.
+        Это сплошная серая полоса во всю ширину (боковые поля -16dp гасят отступ
+        корня) и до низа экрана. Нижний внутренний отступ и отступы содержимого
+        выставляет `SettingsActivity.sinkFooterToGestureBar`: подпись стоит на белой
+        полоске жестовой навигации, а заливка идёт под неё. Подпись прижата вправо.
     -->
     <androidx.appcompat.widget.AppCompatTextView
         android:id="@+id/tv_footer"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:minHeight="30dp"
-        android:background="@drawable/bg_liquid_glass_header"
+        android:minHeight="0dp"
+        android:background="@drawable/bg_nova_footer_opaque"
         android:textColor="?attr/novaTextTitle"
         android:maxLines="1"
         app:autoSizeTextType="uniform"
         app:autoSizeMinTextSize="10sp"
         app:autoSizeMaxTextSize="14sp"
         app:autoSizeStepGranularity="1sp"
-        android:gravity="center"
+        android:gravity="end|top"
         android:includeFontPadding="false"
-        android:paddingLeft="16dp"
-        android:paddingTop="11dp"
-        android:paddingRight="16dp"
-        android:paddingBottom="4dp"
-        android:layout_marginTop="10dp"
-        android:layout_marginBottom="8dp"/>
+        android:paddingLeft="32dp"
+        android:paddingTop="3dp"
+        android:paddingRight="32dp"
+        android:paddingBottom="0dp"
+        android:layout_marginLeft="-16dp"
+        android:layout_marginRight="-16dp"
+        android:layout_marginTop="0dp"
+        android:layout_marginBottom="0dp"/>
 
 
 </LinearLayout>

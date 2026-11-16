@@ -767,6 +767,9 @@ class MainActivity : AppCompatActivity() {
         // до события «экран создан», иначе смена языка этот экран не увидит.
         NovaLanguage.install(this)
         super.onCreate(savedInstanceState)
+        // «Случайная фактура при запуске»: выбор делается до сборки фона, и только на
+        // свежем запуске — пересоздание (поворот, язык) фон не меняет.
+        if (savedInstanceState == null) NovaAppearance.pickAtLaunch(this)
         // Диагностическая сборка уводит на экран самодиагностики: на устройстве,
         // где главный экран не открывается, дальше идти незачем. В обычных
         // сборках DIAGNOSTICS равен false и ветка вырезается компилятором.
@@ -800,6 +803,7 @@ class MainActivity : AppCompatActivity() {
         networkBackground = findViewById(R.id.nova_background_animation)
         tronBackdrop = findViewById(R.id.tron_backdrop)
         tronBackdrop.setYogurtIndigoEnabled(mainBackgroundMode() == MainBackgroundPolicy.MODE_ANIMATION)
+        appliedBackgroundMode = mainBackgroundMode()
         tvIpAddress = findViewById(R.id.tv_ip_address)
         tvCountryBadge = findViewById(R.id.tv_country_badge)
         tvAttemptProgress = findViewById(R.id.tvAttemptProgress)
@@ -1100,13 +1104,15 @@ class MainActivity : AppCompatActivity() {
             isStartFlowActive = true
         }
         tvVersion.text = "v${getAppVersionName()}"
+        // Скруглённые углы экрана (Pixel 10a и др.) срезают первую букву: сдвигаем подпись в зависимости от радиуса.
+        tvVersion.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> keepVersionClearOfRoundedCorners() }
         // Экран открыт — уведомление «Nova обновлена, открыть» больше не нужно,
         // независимо от того, сам он открылся или его открыл человек.
         AppUpdateManager.cancelUpdatedNotification(this)
         setTaskDescription(
             ActivityManager.TaskDescription(
                 getString(R.string.app_name),
-                BitmapFactory.decodeResource(resources, R.mipmap.ic_launcher),
+                launcherIconBitmap(),
                 Color.parseColor("#04070D")
             )
         )
@@ -1500,6 +1506,75 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Значок для карточки в «Недавних». Он адаптивный (XML), а `BitmapFactory.decodeResource`
+     * на XML возвращает null, поэтому рисуем drawable в растр сами.
+     */
+    private fun launcherIconBitmap(): Bitmap? = runCatching {
+        val drawable = ContextCompat.getDrawable(this, R.mipmap.ic_launcher) ?: return@runCatching null
+        val side = (resources.displayMetrics.density * 48f).toInt().coerceIn(48, 192)
+        val bitmap = Bitmap.createBitmap(side, side, Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bitmap)
+        drawable.setBounds(0, 0, side, side)
+        drawable.draw(canvas)
+        bitmap
+    }.getOrNull()
+
+    /**
+     * Подпись версии стоит в нижнем левом углу. Радиус скругления берётся у системы (API 31+),
+     * а не из константы: если угол подпись режет, она сдвигается по диагонали внутрь ровно настолько,
+     * чтобы ближайшая к углу точка легла на дугу. Не режет (прямые углы, подпись далеко от угла,
+     * горизонтальная раскладка) — сдвиг нулевой.
+     */
+    private fun keepVersionClearOfRoundedCorners() {
+        if (!::tvVersion.isInitialized || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        val root = tvVersion.rootView
+        val windowInsets = tvVersion.rootWindowInsets ?: return
+        val width = root.width
+        val height = root.height
+        if (width <= 0 || height <= 0 || tvVersion.width <= 0) return
+        val where = IntArray(2)
+        tvVersion.getLocationInWindow(where)
+        // Позиция без нашего же сдвига, иначе подпись «убегала» бы при каждой раскладке.
+        val left = where[0] - tvVersion.translationX
+        val top = where[1] - tvVersion.translationY
+        val right = left + tvVersion.width
+        val bottom = top + tvVersion.height
+        var shiftX = 0f
+        var shiftY = 0f
+        val corners = arrayOf(
+            Triple(android.view.RoundedCorner.POSITION_TOP_LEFT, left, top),
+            Triple(android.view.RoundedCorner.POSITION_TOP_RIGHT, right, top),
+            Triple(android.view.RoundedCorner.POSITION_BOTTOM_LEFT, left, bottom),
+            Triple(android.view.RoundedCorner.POSITION_BOTTOM_RIGHT, right, bottom),
+        )
+        for ((position, px, py) in corners) {
+            val radius = windowInsets.getRoundedCorner(position)?.radius?.toFloat() ?: continue
+            if (radius <= 0f) continue
+            val right_ = position == android.view.RoundedCorner.POSITION_TOP_RIGHT ||
+                position == android.view.RoundedCorner.POSITION_BOTTOM_RIGHT
+            val bottom_ = position == android.view.RoundedCorner.POSITION_BOTTOM_LEFT ||
+                position == android.view.RoundedCorner.POSITION_BOTTOM_RIGHT
+            val dx = if (right_) width - px else px
+            val dy = if (bottom_) height - py else py
+            if (dx >= radius || dy >= radius) continue
+            // Расстояние до центра дуги; снаружи дуги — сдвигаем по диагонали внутрь.
+            val dist = kotlin.math.hypot(radius - dx, radius - dy)
+            if (dist <= radius) continue
+            var step = 0f
+            while (step < radius &&
+                kotlin.math.hypot(radius - (dx + step), radius - (dy + step)) > radius
+            ) step += 1f
+            step += 2f * resources.displayMetrics.density
+            if (step > kotlin.math.abs(shiftX)) {
+                shiftX = if (right_) -step else step
+                shiftY = if (bottom_) -step else step
+            }
+        }
+        if (tvVersion.translationX != shiftX) tvVersion.translationX = shiftX
+        if (tvVersion.translationY != shiftY) tvVersion.translationY = shiftY
+    }
+
     private fun getAppVersionName(): String {
         return try {
             packageManager.getPackageInfo(packageName, 0).versionName ?: "1.12"
@@ -1575,7 +1650,32 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun mainBackgroundMode(): String {
-        return MainBackgroundPolicy.effectiveMode(this, clientData.getMainBackgroundMode())
+        // Режим выводится из выбранной фактуры: отдельной настройки фона больше нет.
+        return MainBackgroundPolicy.modeFor(this)
+    }
+
+    /** Режим, под который собран фон; сверяется на возврате с экрана оформления. */
+    private var appliedBackgroundMode: String? = null
+
+    /**
+     * Фактуру могли сменить с «Созвездий» на узор или обратно, пока главный экран
+     * лежал в стопке: состояние фона (кольца, раскрытие картинки) собрано под
+     * прежний режим и само его не меняет. Пересобирается то состояние, в котором
+     * сейчас экран.
+     */
+    private fun reapplyBackdropIfModeChanged() {
+        val mode = mainBackgroundMode()
+        val previous = appliedBackgroundMode
+        appliedBackgroundMode = mode
+        if (previous == null || previous == mode) return
+        if (::tronBackdrop.isInitialized) {
+            tronBackdrop.setYogurtIndigoEnabled(mode == MainBackgroundPolicy.MODE_ANIMATION)
+        }
+        when (backdropState) {
+            BackdropState.STOPPED -> setBackdropStopped()
+            BackdropState.CONNECTING -> setBackdropConnecting(forceRestart = true)
+            BackdropState.CONNECTED -> setBackdropConnectedInstant()
+        }
     }
 
     private fun ensureBackdropImageLoaded() {
@@ -1655,6 +1755,7 @@ class MainActivity : AppCompatActivity() {
         applySelectionGlowAccent()
         reapplyFontsIfFaceChanged()
         reloadBackdropIfAppearanceChanged()
+        reapplyBackdropIfModeChanged()
         refreshMainRegionSelector()
         refreshProtonAvailableCountries()
         refreshWarpDiscoverySnapshotFromStorage()
@@ -1713,6 +1814,7 @@ class MainActivity : AppCompatActivity() {
         // Погружение фона — только для фона-фактуры и только пока экран виден.
         if (::ivBackgroundArt.isInitialized) {
             ivBackgroundArt.setDiveEnabled(mainBackgroundMode() == MainBackgroundPolicy.MODE_IMAGE)
+            ivBackgroundArt.diveSpeed = NovaAppearance.speed(this) / NovaAppearance.SPEED_DEFAULT.toFloat()
         }
         val filter = android.content.IntentFilter(NovaVpnService.ACTION_VPN_STATE)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
@@ -2657,6 +2759,13 @@ class MainActivity : AppCompatActivity() {
             mainRegionScroll?.visibility = View.GONE
             return
         }
+        // Нажатие на NOVA просит свежий пинг и пересортировку списка, даже когда чип уже
+        // выбран: группа тогда молчит (выбор не менялся), и слышит нажатие только сама кнопка.
+        mainRegionButtons.getOrNull(ConnectionSelectorPolicy.ORDER.indexOf(ConnectionSelectorPolicy.CHIP_NOVA))
+            ?.setOnClickListener {
+                NovaProfileListController.markFreshPingWanted()
+                novaProfileList?.requestFreshPing()
+            }
         // Обработчик подрегионов — тоже один раз и на группу, а не на кнопки:
         // кнопки в ней пересобираются, а обработчик группы это переживает.
         mainSubRegionGroup?.setOnCheckedChangeListener { group, checkedId ->
@@ -2695,6 +2804,7 @@ class MainActivity : AppCompatActivity() {
         applyDnsFrostState(chipValue, animate = true)
         if (chipValue == ConnectionSelectorPolicy.CHIP_NOVA) {
             LogManager.log("Главный экран: выбран NOVA.")
+            NovaProfileListController.markFreshPingWanted()
             // Решение «пора ли сверять» читает файл списка — не на главном потоке.
             Thread({ NovaList.refreshInBackground(this, LogManager::log) }, "NovaChipTap")
                 .apply { isDaemon = true; start() }
@@ -2813,7 +2923,7 @@ class MainActivity : AppCompatActivity() {
             "не спрашивает их обычным запросом. " +
             (
                 if (viaDns) {
-                    "Через DNS-туннель такой DoT не проходит: канал для него слишком узок, " +
+                    "В режиме White такой DoT не проходит: канал для него слишком узок, " +
                         "а Nova в этом режиме в системный DNS не вмешивается. Поэтому туннель " +
                         "поднимется, а сайты не откроются — браузер покажет ERR_NAME_NOT_RESOLVED.\n\n"
                 } else {
@@ -2832,7 +2942,7 @@ class MainActivity : AppCompatActivity() {
             NovaTheme.optionFor(NovaTheme.current(this)).styleRes,
         )
         android.app.AlertDialog.Builder(themed)
-            .setTitle(if (viaDns) "Частный DNS мешает DNS-туннелю" else "Частный DNS мешает Tor")
+            .setTitle(if (viaDns) "Частный DNS мешает режиму White" else "Частный DNS мешает Tor")
             .setMessage(message)
             .setPositiveButton("Открыть настройки") { _, _ -> openPrivateDnsSettings() }
             .setNegativeButton("Понятно", null)
@@ -5359,7 +5469,7 @@ class MainActivity : AppCompatActivity() {
             NovaVpnService.isPublishedTransport(transport, NovaVpnService.TRANSPORT_DNS) ||
             isDnsBackend(backend)
         ) {
-            return "${NovaVpnService.TRANSPORT_DNS}: $effectiveCountry"
+            return "${ConnectionSelectorPolicy.WHITE_NAME}: $effectiveCountry"
         }
         // Импортированный профиль AmneziaWG подписывается своим именем: бэкенд у него
         // тот же `WARP`, и раньше бейдж обещал Cloudflare там, где туннель шёл на
@@ -7266,7 +7376,9 @@ class MainActivity : AppCompatActivity() {
             NovaTheme.optionFor(NovaTheme.current(this)).styleRes,
         )
         val accent = NovaTheme.color(themedForAccent, R.attr.novaAccent)
+        val accentChanged = accent != themeAccentColor
         themeAccentColor = accent
+        if (accentChanged) novaProfileList?.accentChanged()
         listOfNotNull(mainRegionGroup as? FlowRadioGroup, mainSubRegionGroup).forEach { group ->
             group.selectionGlowColor = accent
         }

@@ -26,28 +26,42 @@ class DnsRuleAdapter(
     private val onToggle: (Int, Boolean) -> Unit,
     private val onDelete: (Int) -> Unit,
     private val onStartDrag: (RecyclerView.ViewHolder) -> Unit,
+    private val onPersonalSlot: () -> Unit = {},
 ) : RecyclerView.Adapter<DnsRuleAdapter.ViewHolder>() {
 
     private val items = mutableListOf<DnsRule>()
 
     /**
-     * Режим «Изменить порядок»: только в нём строку вообще можно потянуть.
+     * Строка «Персональный DNS-AI», пока личной ссылки в списке нет.
      *
-     * Вне режима ручки нет, а вместе с ней нет и случайного перетаскивания:
-     * палец, опустившийся на левый край строки ради прокрутки, менял порядок
-     * опроса резолверов и ничего об этом не говорил.
+     * Это не правило и в [snapshot] не попадает: пустое значение хранилище не примет, а
+     * незаполненная строка и не должна опрашиваться. Стоит всегда **после** правил, поэтому
+     * позиции настоящих правил от неё не зависят. Как только ссылка добавлена и проверена,
+     * строка становится обычным правилом, а место заполнения исчезает; удалили правило — оно
+     * возвращается.
      */
-    var reorderEnabled: Boolean = false
-        set(value) {
-            if (field == value) return
-            field = value
-            notifyItemRangeChanged(0, items.size)
-        }
+    private var slotShown = false
+
+    private fun wantSlot(): Boolean = items.none { DnsAiEntrances.personalLinkOf(it.value) != null }
+
+    private fun syncSlot() {
+        val want = wantSlot()
+        if (want == slotShown) return
+        slotShown = want
+        if (want) notifyItemInserted(items.size) else notifyItemRemoved(items.size)
+    }
+
+    /** Строка — не правило, а место заполнения персонального DNS-AI. */
+    fun isSlot(position: Int): Boolean = slotShown && position == items.size
+
+    /** Сколько настоящих правил в списке (без места заполнения). */
+    val ruleCount: Int get() = items.size
 
     @SuppressLint("NotifyDataSetChanged")
     fun submit(newItems: List<DnsRule>) {
         items.clear()
         items.addAll(newItems)
+        slotShown = wantSlot()
         notifyDataSetChanged()
     }
 
@@ -56,21 +70,31 @@ class DnsRuleAdapter(
 
     fun itemAt(position: Int): DnsRule? = items.getOrNull(position)
 
-    fun addItem(rule: DnsRule) {
-        items.add(rule)
-        notifyItemInserted(items.size - 1)
+    /**
+     * Добавляет правило и возвращает его место. Строка открытого резолвера провайдера, если она
+     * стоит последней, остаётся последней: новый сторонний резолвер встаёт перед ней, потому что
+     * открытый DNS отвечает только когда не ответил ни один защищённый выше.
+     */
+    fun addItem(rule: DnsRule): Int {
+        val at = if (items.lastOrNull()?.kind == DnsRule.Kind.PROVIDER) items.size - 1 else items.size
+        items.add(at, rule)
+        notifyItemInserted(at)
+        syncSlot()
+        return at
     }
 
     fun replaceAt(position: Int, rule: DnsRule) {
         if (position !in items.indices) return
         items[position] = rule
         notifyItemChanged(position)
+        syncSlot()
     }
 
     fun removeAt(position: Int): DnsRule? {
         if (position !in items.indices) return null
         val removed = items.removeAt(position)
         notifyItemRemoved(position)
+        syncSlot()
         return removed
     }
 
@@ -108,12 +132,23 @@ class DnsRuleAdapter(
         // Шрифт ставим здесь: NovaFontHelper обходит дерево экрана, но внутрь
         // RecyclerView не заходит — строки создаются позже него.
         NovaFontHelper.apply(view)
-        return ViewHolder(view)
+        return ViewHolder(view).also {
+            // Без автопереноса: «Персональный DNS-AI» иначе рвалось посреди слова на узкой строке.
+            it.value.hyphenationFrequency = android.text.Layout.HYPHENATION_FREQUENCY_NONE
+            it.value.breakStrategy = android.text.Layout.BREAK_STRATEGY_SIMPLE
+        }
     }
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
+        if (isSlot(position)) {
+            bindSlot(holder)
+            return
+        }
         val rule = items[position]
+        holder.enabled.isEnabled = true
+        holder.kind.visibility = View.VISIBLE
+        holder.itemView.contentDescription = null
         holder.kind.text = transportLabel(rule)
         holder.value.text = valueLabel(rule)
         // Bootstrap-адреса с экрана убраны: владелец попросил список защищённых
@@ -154,12 +189,7 @@ class DnsRuleAdapter(
         // обычный DoH, то есть молча выбрасывала половину, ради которой автовыбор
         // и заведён (443 и 853 блокируют порознь), и первым делом показывала
         // ошибку «нужен адрес вида https://…» на строке, которую никто не менял.
-        //
-        // В режиме изменения порядка правка и удаление выключены у всех строк:
-        // палец там занят перетаскиванием, и нажатие, не доехавшее до порога,
-        // открывало бы диалог вместо того, чтобы ничего не делать.
-        val editable = !reorderEnabled &&
-            rule.kind != DnsRule.Kind.PROVIDER && rule.kind != DnsRule.Kind.AUTO
+        val editable = rule.kind != DnsRule.Kind.PROVIDER && rule.kind != DnsRule.Kind.AUTO
         holder.itemView.isClickable = editable
         holder.itemView.setOnClickListener(
             if (!editable) null else View.OnClickListener {
@@ -174,41 +204,60 @@ class DnsRuleAdapter(
                 if (current != RecyclerView.NO_POSITION) onDelete(current)
             }
         )
-        if (reorderEnabled) {
-            holder.drag.visibility = View.VISIBLE
-            holder.drag.setOnTouchListener { _, event ->
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> {
-                        holder.dragDownY = event.rawY
-                        holder.dragArmed = true
-                    }
-                    // Тянем не с нажатия, а с движения: `startDrag` входит в
-                    // перетаскивание сразу, без всякого порога, и палец,
-                    // опустившийся на ручку, уносил строку ещё до того, как
-                    // человек решил, тянет он её или просто листает.
-                    MotionEvent.ACTION_MOVE ->
-                        if (holder.dragArmed &&
-                            abs(event.rawY - holder.dragDownY) >= holder.dragSlopPx
-                        ) {
-                            holder.dragArmed = false
-                            onStartDrag(holder)
-                        }
-                    else -> holder.dragArmed = false
+        // Ручка перетаскивания стоит у каждой строки всегда: отдельного режима
+        // изменения порядка больше нет. От случайного сдвига при прокрутке
+        // защищает порог движения, а не режим, — см. [ViewHolder.dragSlopPx].
+        holder.drag.visibility = View.VISIBLE
+        holder.drag.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    holder.dragDownY = event.rawY
+                    holder.dragArmed = true
                 }
-                // Событие забираем себе: тот, кто не взял ACTION_DOWN, ни
-                // одного ACTION_MOVE потом не увидит, и порог мерить будет нечем.
-                true
+                // Тянем не с нажатия, а с движения: `startDrag` входит в
+                // перетаскивание сразу, без всякого порога, и палец,
+                // опустившийся на ручку, уносил строку ещё до того, как
+                // человек решил, тянет он её или просто листает.
+                MotionEvent.ACTION_MOVE ->
+                    if (holder.dragArmed &&
+                        abs(event.rawY - holder.dragDownY) >= holder.dragSlopPx
+                    ) {
+                        holder.dragArmed = false
+                        onStartDrag(holder)
+                    }
+                else -> holder.dragArmed = false
             }
-        } else {
-            // Слушателя снимаем, а не только прячем: переиспользованная строка
-            // иначе унесла бы его с собой и тянулась бы при выключенном режиме.
-            holder.drag.setOnTouchListener(null)
-            holder.drag.visibility = View.GONE
-            holder.dragArmed = false
+            // Событие забираем себе: тот, кто не взял ACTION_DOWN, ни
+            // одного ACTION_MOVE потом не увидит, и порог мерить будет нечем.
+            true
         }
     }
 
-    override fun getItemCount(): Int = items.size
+    /**
+     * Незаполненная строка «Персональный DNS-AI»: переключателя, ручки и удаления нет, нажатие
+     * открывает окно, куда вставляют ссылку из Витрины. Пока ссылки нет, строка не действует.
+     */
+    private fun bindSlot(holder: ViewHolder) {
+        // Метки «DoH» у пустой строки нет: без неё названию хватает ширины в одну строку.
+        holder.kind.visibility = View.GONE
+        holder.value.text = "Персональный DNS-AI"
+        holder.bootstrap.visibility = View.VISIBLE
+        holder.bootstrap.text = "не заполнено — нажмите и вставьте ссылку из Витрины"
+        holder.kind.alpha = 0.6f
+        holder.value.alpha = 0.6f
+        holder.bootstrap.alpha = 1f
+        holder.enabled.setOnCheckedChangeListener(null)
+        holder.enabled.isChecked = false
+        holder.enabled.isEnabled = false
+        holder.delete.visibility = View.INVISIBLE
+        holder.delete.setOnClickListener(null)
+        holder.drag.visibility = View.INVISIBLE
+        holder.drag.setOnTouchListener(null)
+        holder.itemView.isClickable = true
+        holder.itemView.setOnClickListener { onPersonalSlot() }
+    }
+
+    override fun getItemCount(): Int = items.size + if (slotShown) 1 else 0
 
     companion object {
         /**
@@ -233,13 +282,18 @@ class DnsRuleAdapter(
         /** Что показать в строке вместо технического значения. */
         fun valueLabel(rule: DnsRule): String = when (rule.kind) {
             DnsRule.Kind.PROVIDER -> "Резолвер провайдера"
-            else -> rule.value
+            // Встроенный вход показываем именем, а не полным адресом.
+            DnsRule.Kind.DOH -> DnsAiEntrances.shortLabel(rule.value) ?: DnsAiEntrances.displayValue(rule.value)
+            // Токен личной ссылки — секрет: на экране видны только первые два знака.
+            else -> DnsAiEntrances.displayValue(rule.value)
         }
 
         /** Пояснение под адресом. Пусто — пояснять нечего. */
         fun noteLabel(rule: DnsRule): String = when {
             rule.kind == DnsRule.Kind.PROVIDER ->
                 "без шифрования, только когда не ответил ни один защищённый выше"
+            DnsAiEntrances.personalLinkOf(rule.value) != null -> "личная ссылка DNS-AI, только DoH"
+            DnsAiEntrances.isDohOnly(rule.value) -> "DNS-AI за Cloudflare, только DoH"
             // Пояснение принадлежит транспорту, а не нашей строке: с тех пор как
             // «любой» можно выбрать любому резолверу, оно нужно каждому такому.
             //

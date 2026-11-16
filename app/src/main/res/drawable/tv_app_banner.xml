@@ -26,13 +26,10 @@
         </shape>
     </item>
 
+    <!-- значок теперь адаптивный (XML): <bitmap> его не читает, поэтому слой берёт drawable напрямую -->
     <item
-        android:left="52dp"
-        android:right="52dp"
-        android:top="24dp"
-        android:bottom="24dp">
-        <bitmap
-            android:gravity="center"
-            android:src="@mipmap/ic_launcher" />
-    </item>
+        android:width="132dp"
+        android:height="132dp"
+        android:gravity="center"
+        android:drawable="@mipmap/ic_launcher" />
 </layer-list>

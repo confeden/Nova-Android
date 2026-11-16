@@ -38,6 +38,17 @@ object WarpProfileGenerator {
     /** Сколько профилей выпускаем. Столько же, сколько встроенных семян. */
     const val TARGET_COUNT = 50
 
+    /**
+     * Меньше стольких проверенных точек набор «не набран».
+     *
+     * Сканер ядра ходит по адресам **по одному**, а каждая проба — это 20-50 пакетов мусора
+     * через 80-150 мс (`tools/warp-plus/ipscanner/ping/warp.go`), то есть за 45 с он успевает
+     * проверить десяток адресов. Замер Mi A1 2026-11-14: в `warp_generated.json` один профиль.
+     * Такой набор нельзя ни ставить поверх работающего большего, ни отмечать выпущенным на
+     * версию: иначе «один раз на версию» закрепило бы один адрес до следующего обновления.
+     */
+    const val MIN_USEFUL_PROFILES = 8
+
     /** Потолок одного прохода сканера: дольше ждать бессмысленно, точки входа anycast'овые. */
     private const val SCAN_TIMEOUT_MS = 45_000
 
@@ -92,6 +103,9 @@ object WarpProfileGenerator {
      *        это «трафик встал, пока идёт выпуск». Поэтому при живом туннеле личность
      *        всегда новая: старая остаётся в хранилище нетронутой, пока новая не
      *        выпущена, а сканер работает ключом, которого туннель не знает.
+     * @param background фоновый выпуск, которого никто не ждёт: нить в низком приоритете,
+     *        сканер делает **один** проход (второй — только по кнопке), набор подменяется
+     *        одной записью в самом конце (см. [WarpGeneratedStore.commitIssue]).
      * @return true, если прогон начался. false — он уже идёт, и второй заводить
      *         нельзя: два сканера писали бы один файл наперегонки.
      */
@@ -99,6 +113,7 @@ object WarpProfileGenerator {
         context: Context,
         force: Boolean,
         tunnelLive: Boolean = false,
+        background: Boolean = false,
         register: (onProgress: (Int) -> Unit) -> WarpConfig?,
     ): Boolean {
         if (!running.compareAndSet(false, true)) {
@@ -107,10 +122,18 @@ object WarpProfileGenerator {
         }
         val appContext = context.applicationContext
         val store = WarpGeneratedStore(appContext)
+        if (background) {
+            runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND) }
+        }
         try {
             publish(appContext, STATE_RUNNING, "WARP: готовлю личность", 0, TARGET_COUNT)
 
             val existing = store.read()
+            // Новая личность на место работающей не пишется, пока нет профилей к ней:
+            // иначе очередь, пересобранная в окне сканирования, берёт новый ключ со
+            // старыми точками входа. Пустое место подменять нечем, и там личность
+            // пишется сразу — следующий прогон не будет регистрироваться заново.
+            val replacing = existing.identity != null && (force || tunnelLive)
             val identity = if (!force && !tunnelLive && existing.identity != null) {
                 LogManager.log("WARP-генератор: личность уже есть, регистрацию пропускаем.")
                 existing.identity
@@ -142,17 +165,23 @@ object WarpProfileGenerator {
                     reserved = config.reserved.orEmpty(),
                     createdAt = System.currentTimeMillis(),
                 ).also {
-                    store.writeIdentity(it)
+                    if (!replacing) store.writeIdentity(it)
                     LogManager.log("WARP-генератор: личность зарегистрирована, адрес ${it.ipv4}.")
                 }
             }
 
             publish(appContext, STATE_RUNNING, "WARP: ищу точки входа", 0, TARGET_COUNT)
-            val scanned = diversify(collectVerified(identity, appContext).sortedBy { it.rttMs })
+            val scanned = diversify(
+                collectVerified(identity, appContext, singlePass = background).sortedBy { it.rttMs }
+            )
             if (scanned.isEmpty()) {
                 LogManager.log(
                     "WARP-генератор: сканер не нашёл ни одной точки входа за ${SCAN_TIMEOUT_MS / 1000} с. " +
-                        "Личность сохранена — следующий прогон начнёт со сканирования."
+                        if (replacing) {
+                            "Рабочий набор не тронут, новая личность отброшена."
+                        } else {
+                            "Личность сохранена — следующий прогон начнёт со сканирования."
+                        }
                 )
                 publish(appContext, STATE_FAILED, "WARP: точки входа не найдены", 0, TARGET_COUNT)
                 return true
@@ -200,7 +229,28 @@ object WarpProfileGenerator {
                 "WARP-генератор: своё прикрытие I1 собрано для $withOwnI1 из ${profiles.size} профилей " +
                     "(имён в пуле ${sniPool.size})."
             )
-            store.writeProfiles(profiles)
+            val thin = profiles.size < MIN_USEFUL_PROFILES
+            if (replacing && thin && existing.profiles.size > profiles.size) {
+                // Рабочий набор больше добытого — не подменяем его меньшим (D45).
+                LogManager.log(
+                    "WARP-генератор: добыто ${profiles.size} точек, у рабочего набора " +
+                        "${existing.profiles.size} — оставляем рабочий, новая личность отброшена."
+                )
+                publish(appContext, STATE_FAILED, "WARP: точек мало, набор не тронут", 0, TARGET_COUNT)
+                return true
+            }
+            if (replacing) store.commitIssue(identity, profiles) else store.writeProfiles(profiles)
+            // Метка версии ставится только здесь, когда набор записан целиком, — и ручным
+            // запуском тоже: после кнопки автоматика новый набор уже не трогает (D45). Тонкий
+            // набор записан, но выпущенным на версию не считается: останется попытка с паузой.
+            if (thin) {
+                LogManager.log(
+                    "WARP-генератор: проверенных точек ${profiles.size} < $MIN_USEFUL_PROFILES — " +
+                        "набор записан, но на версию не отмечен."
+                )
+            } else {
+                ProfileIssueLedger(appContext).noteIssued(ProfileIssuePolicy.Kind.WARP)
+            }
             val best = profiles.minByOrNull { if (it.rttMs > 0) it.rttMs else Int.MAX_VALUE }
             LogManager.log(
                 "WARP-генератор: выпущено ${profiles.size} профилей, лучший " +
@@ -360,7 +410,11 @@ object WarpProfileGenerator {
         }
     }
 
-    private fun collectVerified(identity: WarpGeneratedStore.Identity, context: Context): List<Endpoint> {
+    private fun collectVerified(
+        identity: WarpGeneratedStore.Identity,
+        context: Context,
+        singlePass: Boolean = false,
+    ): List<Endpoint> {
         val first = withScanTicker(context, 1, 1) { scanEndpoints(identity) }
         val verified = first.filter { it.rttMs > 0 }
         val padded = first.size - verified.size
@@ -371,6 +425,14 @@ object WarpProfileGenerator {
             )
         }
         if (verified.size >= ENOUGH_VERIFIED) return verified
+        if (singlePass) {
+            // Второй проход — ещё 45 с сканера; в фоне его не делаем: набор поменьше
+            // лучше, чем лишняя минута работы под живым туннелем (D45).
+            LogManager.log(
+                "WARP-генератор: проверенных точек ${verified.size} — в фоне второй проход не делаем."
+            )
+            return verified
+        }
         LogManager.log(
             "WARP-генератор: проверенных точек ${verified.size}, это меньше $ENOUGH_VERIFIED — " +
                 "идём вторым проходом."

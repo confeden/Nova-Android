@@ -50,12 +50,45 @@ object NovaList {
         "https://cdn.jsdelivr.net/gh/confeden/nova_updates@main/Github%20list/nova-list.json",
     )
 
+    /**
+     * Постраничная лента: `index.json` и `page-NNN.json` по [PAGE_SIZE] профилей, свежепроверенные
+     * сверху. Сначала берётся только первая страница, следующие — когда живых не хватило
+     * ([scan]). Тот же формат у Nova PC. Нет индекса — прежний целый файл [FEED_URLS].
+     */
+    val PAGE_BASES: List<String> = listOf(
+        "https://raw.githack.com/confeden/nova_updates/main/Github%20list/pages/",
+        "https://raw.githubusercontent.com/confeden/nova_updates/main/Github%20list/pages/",
+        "https://cdn.jsdelivr.net/gh/confeden/nova_updates@main/Github%20list/pages/",
+    )
+
+    /** Сколько профилей качается и меряется за раз: страница ленты = пачка замера. */
+    const val PAGE_SIZE = 50
+
+    /**
+     * Меньше живых (ответивших на замер), чем это, — добираем следующую пачку из [PAGE_SIZE]
+     * (D41, владелец 2026-11-14). Те же имена и числа у Nova PC (`nova_list_pages.py`).
+     */
+    const val MIN_ALIVE = 25
+
+    /** Для самого подключения хватает одного живого: добор до [MIN_ALIVE] идёт уже в фоне. */
+    const val CONNECT_MIN_ALIVE = 1
+
+    /** Сколько настоящих неудачных подключений подряд делают профиль негодным (не пинг!). */
+    const val CONNECT_FAIL_STRIKES = 2
+
+    /** Удалённый негодный профиль не возвращается из ленты столько часов. */
+    const val BAD_TTL_HOURS = 24L
+    private const val BAD_TTL_MS = BAD_TTL_HOURS * 60 * 60 * 1000
+
+    /** Лента обновляется раз в это число часов, свежие профили сверху. */
     const val REFRESH_HOURS = 12L
     private const val FRESH_WINDOW_MS = REFRESH_HOURS * 60 * 60 * 1000
     private const val RETRY_AFTER_FAILURE_MS = 15 * 60 * 1000L
     private const val CONNECT_TIMEOUT_MS = 12_000
     private const val READ_TIMEOUT_MS = 45_000
     private const val TOTAL_BUDGET_MS = 120_000L
+    /** Сколько фоновой сверке разрешено добирать и мерить пачки. */
+    const val WORKER_SCAN_BUDGET_MS = 180_000L
     private const val BODY_LIMIT_BYTES = 32 * 1024 * 1024
     private const val MAX_NODES = 20_000
     private const val WORK_NAME = "nova-list-refresh"
@@ -64,6 +97,7 @@ object NovaList {
     private const val FILE_PING = "nova_list_ping.json"
     private const val FILE_CHOICE = "nova_list_choice.json"
     private const val FILE_ACTIVE = "nova_list_active.json"
+    private const val FILE_VERDICT = "nova_list_verdict.json"
 
     /** Замер старше этого считается устаревшим, и экран меряет заново. */
     const val PING_STALE_MS = 2 * 60 * 60 * 1000L
@@ -199,9 +233,12 @@ object NovaList {
     fun nodes(context: Context?): List<Node> {
         val o = readJson(context, FILE_LIST) ?: return emptyList()
         val proxies = o.optJSONArray("proxies") ?: return emptyList()
+        // Негодные (признанные настоящим подключением) не возвращаются из ленты, пока не истёк срок.
+        val bad = readVerdicts(context).bad.keys
         val out = ArrayList<Node>(proxies.length())
         for (i in 0 until proxies.length()) {
-            proxies.optJSONObject(i)?.let { nodeOf(it, i, o.optJSONArray("ms")) }?.let(out::add)
+            val node = proxies.optJSONObject(i)?.let { nodeOf(it, i, o.optJSONArray("ms")) } ?: continue
+            if (node.id !in bad) out += node
         }
         return out
     }
@@ -266,6 +303,115 @@ object NovaList {
         synchronized(fileLock) { writeJson(context, FILE_ACTIVE, JSONObject().put("id", id.trim())) }
     }
 
+    // ---- негодные профили: только по настоящему подключению -----------------------------
+
+    /** Подряд неудачных настоящих подключений через профиль и когда была последняя. */
+    data class Strike(val count: Int, val at: Long)
+
+    private class Verdicts(val strikes: Map<String, Strike>, val bad: Map<String, Long>)
+
+    /**
+     * Итог настоящего подключения: удача стирает счёт, неудача прибавляет единицу. Счёт старше
+     * [BAD_TTL_HOURS] начинается заново. Отсутствие пинга сюда не попадает никогда: узел, не
+     * ответивший на замер, мог быть просто закрыт для провайдера, а не мёртв.
+     */
+    fun strikeAfter(prev: Strike?, connected: Boolean, now: Long): Strike? {
+        if (connected) return null
+        val base = prev?.takeIf { now - it.at <= BAD_TTL_MS }?.count ?: 0
+        return Strike(base + 1, now)
+    }
+
+    /**
+     * Какие профили можно удалить: и только они. Нужны все три условия сразу — [CONNECT_FAIL_STRIKES]
+     * неудачных настоящих подключений, нет свежего ответа на замер, и другие профили на замер
+     * отвечают (иначе виновата сеть, а не список). Без подключений пинг не решает ничего.
+     */
+    fun unfit(nodes: List<Node>, pings: Map<String, Ping>, strikes: Map<String, Strike>, now: Long): Set<String> {
+        fun answers(id: String) = pings[id]?.let { it.ok && now - it.at <= PING_STALE_MS } == true
+        if (nodes.none { answers(it.id) }) return emptySet()
+        return nodes.asSequence()
+            .filter { (strikes[it.id]?.count ?: 0) >= CONNECT_FAIL_STRIKES && !answers(it.id) }
+            .mapTo(HashSet()) { it.id }
+    }
+
+    /**
+     * Порядок обхода после «>»: узлы за текущим по возрастанию пинга, затем те, что перед ним
+     * (текущий — последним). [ordered] обязан быть собран по свежему замеру ([order]).
+     */
+    fun rotationAfter(ordered: List<Node>, currentId: String): List<Node> {
+        val at = ordered.indexOfFirst { it.id == currentId }
+        return if (at >= 0) ordered.drop(at + 1) + ordered.take(at + 1) else ordered
+    }
+
+    /**
+     * Записывает итог настоящего подключения через профиль [id] и, если неудача доказала
+     * негодность, удаляет профиль из списка. Возвращает число удалённых.
+     */
+    fun recordConnect(context: Context?, id: String, connected: Boolean, logger: (String) -> Unit = LogManager::log): Int =
+        synchronized(fileLock) {
+            val now = System.currentTimeMillis()
+            val v = readVerdicts(context)
+            val strikes = HashMap(v.strikes)
+            val next = strikeAfter(strikes[id], connected, now)
+            if (next == null) strikes.remove(id) else strikes[id] = next
+            writeVerdicts(context, strikes, v.bad, now)
+            if (connected) 0 else pruneUnfit(context, logger)
+        }
+
+    /** Удаляет из снимка профили, признанные негодными ([unfit]); их id помнятся [BAD_TTL_HOURS]. */
+    fun pruneUnfit(context: Context?, logger: (String) -> Unit = LogManager::log): Int = synchronized(fileLock) {
+        val now = System.currentTimeMillis()
+        val v = readVerdicts(context)
+        val drop = unfit(nodes(context), pings(context), v.strikes, now)
+        if (drop.isEmpty()) return 0
+        val list = readJson(context, FILE_LIST) ?: return 0
+        val proxies = list.optJSONArray("proxies") ?: return 0
+        val ms = list.optJSONArray("ms")
+        val keptProxies = JSONArray()
+        val keptMs = JSONArray()
+        for (i in 0 until proxies.length()) {
+            val map = proxies.optJSONObject(i) ?: continue
+            val id = nodeOf(map, i)?.id
+            if (id != null && id in drop) continue
+            keptProxies.put(map)
+            keptMs.put(ms?.optInt(i, 0) ?: 0)
+        }
+        writeJson(context, FILE_LIST, list.put("proxies", keptProxies).put("ms", keptMs))
+        val strikes = HashMap(v.strikes).apply { drop.forEach { remove(it) } }
+        val bad = HashMap(v.bad).apply { drop.forEach { put(it, now) } }
+        writeVerdicts(context, strikes, bad, now)
+        logger("Список Nova: удалено негодных профилей — ${drop.size} (не подключились $CONNECT_FAIL_STRIKES раза подряд, остальные отвечают).")
+        drop.size
+    }
+
+    private fun readVerdicts(context: Context?): Verdicts {
+        val o = readJson(context, FILE_VERDICT) ?: return Verdicts(emptyMap(), emptyMap())
+        val now = System.currentTimeMillis()
+        val strikes = HashMap<String, Strike>()
+        o.optJSONObject("strikes")?.let { s ->
+            for (key in s.keys()) {
+                val e = s.optJSONObject(key) ?: continue
+                strikes[key] = Strike(e.optInt("n", 0), e.optLong("at", 0L))
+            }
+        }
+        val bad = HashMap<String, Long>()
+        o.optJSONObject("bad")?.let { b ->
+            for (key in b.keys()) {
+                val at = b.optLong(key, 0L)
+                if (now - at <= BAD_TTL_MS) bad[key] = at
+            }
+        }
+        return Verdicts(strikes, bad)
+    }
+
+    private fun writeVerdicts(context: Context?, strikes: Map<String, Strike>, bad: Map<String, Long>, now: Long) {
+        val s = JSONObject()
+        for ((id, e) in strikes) if (now - e.at <= BAD_TTL_MS) s.put(id, JSONObject().put("n", e.count).put("at", e.at))
+        val b = JSONObject()
+        for ((id, at) in bad) if (now - at <= BAD_TTL_MS) b.put(id, at)
+        writeJson(context, FILE_VERDICT, JSONObject().put("strikes", s).put("bad", b))
+    }
+
     // ---- сверка с лентой ---------------------------------------------------------
 
     fun syncSchedule(context: Context) {
@@ -324,9 +470,14 @@ object NovaList {
         synchronized(fileLock) {
             writeJson(context, FILE_LIST, (previous ?: JSONObject()).put("attemptAt", startedAt))
         }
+        when (refreshPaged(context, logger, previous, startedAt)) {
+            PagedOutcome.SYNCED, PagedOutcome.UPDATED -> return true
+            PagedOutcome.UNAVAILABLE -> Unit
+        }
         val etag = previous?.optString("etag").orEmpty()
         val lastModified = previous?.optString("lastModified").orEmpty()
-        val havePrevious = previous?.optJSONArray("proxies") != null
+        // Целый файл: условный GET только если прежний снимок сам пришёл целым файлом.
+        val havePrevious = previous?.optJSONArray("proxies") != null && previous.optString("pagesBase").isEmpty()
         var lastError = "нет ответа"
         for (url in FEED_URLS) {
             if (System.currentTimeMillis() - startedAt > TOTAL_BUDGET_MS) break
@@ -369,6 +520,200 @@ object NovaList {
         }
         logger("Список Nova не обновился ($lastError). Остаются прежние профили.")
         return false
+    }
+
+    private enum class PagedOutcome { SYNCED, UPDATED, UNAVAILABLE }
+
+    /**
+     * Берёт индекс и первую страницу. 304 на индекс — такая же удачная сверка. Новый индекс
+     * заменяет всё прежде загруженное первой страницей: голова списка сместилась, и старые
+     * следующие страницы уже не стыкуются с ней.
+     */
+    private fun refreshPaged(
+        context: Context,
+        logger: (String) -> Unit,
+        previous: JSONObject?,
+        startedAt: Long,
+    ): PagedOutcome {
+        val pagedBefore = previous?.optJSONArray("proxies") != null && previous.optString("pagesBase").isNotEmpty()
+        val etag = if (pagedBefore) previous?.optString("indexEtag").orEmpty() else ""
+        val lastModified = if (pagedBefore) previous?.optString("indexLastModified").orEmpty() else ""
+        for (base in PAGE_BASES) {
+            if (System.currentTimeMillis() - startedAt > TOTAL_BUDGET_MS) break
+            try {
+                val index = fetch(base + "index.json", etag, lastModified)
+                val now = System.currentTimeMillis()
+                if (index.notModified) {
+                    synchronized(fileLock) {
+                        val cur = readJson(context, FILE_LIST) ?: JSONObject()
+                        writeJson(context, FILE_LIST, cur.put("syncedAt", now).put("attemptAt", now))
+                    }
+                    LogManager.d("Список Nova сверен: индекс не изменился (304).")
+                    return PagedOutcome.SYNCED
+                }
+                val meta = JSONObject(index.body).optJSONObject("nova_list_pages") ?: continue
+                val pages = meta.optInt("pages", 0)
+                if (meta.optInt("version", 0) != 1 || pages < 1 || meta.optInt("count", 0) < 1) continue
+                val first = fetch(base + "page-001.json", "", "")
+                val nodes = parse(first.body) ?: continue
+                val root = JSONObject(first.body)
+                val state = JSONObject()
+                    .put("proxies", root.getJSONArray("proxies"))
+                    .put("ms", root.optJSONArray("ms") ?: JSONArray())
+                    .put("checkedAt", meta.optString("checked_at"))
+                    .put("syncedAt", now)
+                    .put("attemptAt", now)
+                    .put("indexEtag", index.etag)
+                    .put("indexLastModified", index.lastModified)
+                    .put("pagesBase", base)
+                    .put("pagesTotal", pages)
+                    .put("pagesLoaded", 1)
+                    .put("source", base)
+                synchronized(fileLock) { writeJson(context, FILE_LIST, state) }
+                logger("Список Nova обновлён: страница 1 из $pages, ${nodes.size} профилей.")
+                return PagedOutcome.UPDATED
+            } catch (e: Exception) {
+                LogManager.d("Список Nova: страницы ${base.substringAfter("//").substringBefore('/')} — ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
+        return PagedOutcome.UNAVAILABLE
+    }
+
+    /** Есть ли у ленты страницы, которые ещё не подгружены. */
+    fun hasMorePages(context: Context?): Boolean {
+        val o = readJson(context, FILE_LIST) ?: return false
+        return o.optString("pagesBase").isNotEmpty() && o.optInt("pagesLoaded", 0) < o.optInt("pagesTotal", 0)
+    }
+
+    /**
+     * Подгружает следующую страницу и дописывает её узлы в хвост снимка.
+     * Возвращает число новых узлов, 0 — страниц больше нет, -1 — не удалось скачать.
+     * Сеть — вне блокировки: под замком только запись.
+     */
+    fun loadNextPage(context: Context, logger: (String) -> Unit): Int {
+        val state = readJson(context, FILE_LIST) ?: return 0
+        val total = state.optInt("pagesTotal", 0)
+        val loaded = state.optInt("pagesLoaded", 0)
+        val preferred = state.optString("pagesBase")
+        if (preferred.isEmpty() || loaded >= total) return 0
+        val number = loaded + 1
+        val file = "page-%03d.json".format(Locale.ROOT, number)
+        var body: String? = null
+        for (base in listOf(preferred) + PAGE_BASES.filter { it != preferred }) {
+            try {
+                val answer = fetch(base + file, "", "")
+                if (parse(answer.body) != null) {
+                    body = answer.body
+                    break
+                }
+            } catch (e: Exception) {
+                LogManager.d("Список Nova: страница $number — ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
+        val text = body ?: return -1
+        val page = JSONObject(text)
+        val pageProxies = page.getJSONArray("proxies")
+        val pageMs = page.optJSONArray("ms")
+        var added = 0
+        synchronized(fileLock) {
+            val cur = readJson(context, FILE_LIST) ?: return -1
+            // Голова могла смениться, пока шла загрузка: тогда страница чужая.
+            if (cur.optInt("pagesLoaded", 0) != loaded || cur.optString("indexEtag") != state.optString("indexEtag")) return 0
+            val proxies = cur.optJSONArray("proxies") ?: JSONArray()
+            val ms = cur.optJSONArray("ms") ?: JSONArray()
+            while (ms.length() < proxies.length()) ms.put(0)
+            val known = HashSet<String>()
+            for (i in 0 until proxies.length()) proxies.optJSONObject(i)?.let { nodeOf(it, i)?.id }?.let(known::add)
+            for (i in 0 until pageProxies.length()) {
+                val map = pageProxies.optJSONObject(i) ?: continue
+                val id = nodeOf(map, i)?.id ?: continue
+                if (!known.add(id)) continue
+                proxies.put(map)
+                ms.put(pageMs?.optInt(i, 0) ?: 0)
+                added++
+            }
+            cur.put("proxies", proxies).put("ms", ms).put("pagesLoaded", number)
+            writeJson(context, FILE_LIST, cur)
+        }
+        logger("Список Nova: подгружена страница $number из $total (+$added).")
+        return added
+    }
+
+    /**
+     * Меряет голову списка пачками по [PAGE_SIZE] и, пока живых меньше [minAlive], берёт
+     * следующую пачку — из уже загруженных узлов, а когда их нет, подгружает страницу ленты.
+     * Целый список никогда не меряется. Первая пачка с [force] меряется заново, вне
+     * зависимости от возраста прежних замеров; остальные — только не мерянные или устаревшие.
+     *
+     * [staleMs] — возраст замера, после которого он считается устаревшим (служба берёт минуту:
+     * подключение должно опираться на свежие задержки). Вызывать с фонового потока.
+     * Возвращает число живых со свежим замером.
+     */
+    fun scan(
+        context: Context,
+        force: Boolean,
+        minAlive: Int = MIN_ALIVE,
+        budgetMs: Long = Long.MAX_VALUE,
+        workers: Int = 16,
+        timeoutSeconds: Int = 6,
+        staleMs: Long = PING_STALE_MS,
+        shouldAbort: () -> Boolean,
+        logger: (String) -> Unit = LogManager::log,
+        onProgress: () -> Unit = {},
+    ): Int {
+        val startedAt = System.currentTimeMillis()
+        val probed = HashSet<String>()
+        var firstBatch = true
+
+        fun alive(): Int {
+            val now = System.currentTimeMillis()
+            val known = pings(context)
+            return nodes(context).count { n -> known[n.id]?.let { it.ok && now - it.at <= staleMs } == true }
+        }
+
+        var guard = 0
+        while (guard++ < 60 && !shouldAbort() && System.currentTimeMillis() - startedAt < budgetMs) {
+            val now = System.currentTimeMillis()
+            val known = pings(context)
+            val batch = nodes(context).asSequence()
+                .filter { it.id !in probed }
+                .filter { n ->
+                    (firstBatch && force) || known[n.id].let { p -> p == null || now - p.at > staleMs }
+                }
+                .take(PAGE_SIZE)
+                .toList()
+            if (batch.isEmpty()) {
+                if (alive() >= minAlive || !hasMorePages(context)) break
+                if (loadNextPage(context, logger) < 0) break
+                continue
+            }
+            val pending = HashMap<String, Ping>()
+            var flushedAt = System.currentTimeMillis()
+            fun flush() {
+                if (pending.isEmpty()) return
+                recordPings(context, HashMap(pending))
+                pending.clear()
+                onProgress()
+            }
+            NovaProxyProcess.probe(
+                context, batch, workers = workers, timeoutSeconds = timeoutSeconds,
+                shouldAbort = { shouldAbort() || System.currentTimeMillis() - startedAt >= budgetMs },
+                onResult = { node, ping ->
+                    pending[node.id] = ping
+                    if (System.currentTimeMillis() - flushedAt >= 1_000L) {
+                        flushedAt = System.currentTimeMillis()
+                        flush()
+                    }
+                },
+            )
+            flush()
+            probed += batch.map { it.id }
+            firstBatch = false
+            val living = alive()
+            logger("Список Nova: измерено ${batch.size}, живых $living.")
+            if (living >= minAlive) break
+        }
+        return alive()
     }
 
     private class Answer(val body: String, val notModified: Boolean, val etag: String, val lastModified: String)
@@ -449,6 +794,14 @@ class NovaListWorker(
         val chip = ClientData(applicationContext).getExitRegionPreference().trim().lowercase(Locale.ROOT)
         if (chip == ConnectionSelectorPolicy.CHIP_DNS) return Result.success()
         NovaList.refresh(applicationContext, LogManager::log)
+        // Добор: живых меньше NovaList.MIN_ALIVE — качаем и меряем следующие пачки по 50. Замер
+        // идёт с канала провайдера, мимо любого VPN (NovaProxyProcess.probe).
+        if (NovaProxyProcess.isAvailable(applicationContext)) {
+            NovaList.scan(
+                applicationContext, force = false, minAlive = NovaList.MIN_ALIVE,
+                budgetMs = NovaList.WORKER_SCAN_BUDGET_MS, shouldAbort = { isStopped },
+            )
+        }
         return Result.success()
     }
 }

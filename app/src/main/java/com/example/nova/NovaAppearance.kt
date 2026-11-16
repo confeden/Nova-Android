@@ -1,47 +1,62 @@
 package com.example.nova
 
 import android.content.Context
+import android.graphics.Color
 
 /**
- * Оформление сверх темы: фактура поверхности и температура оттенка.
+ * Оформление: оттенок, фон и три ползунка — одним местом.
  *
- * ## Почему это отдельно от [NovaTheme]
+ * ## Что убрано и почему
  *
- * Тема — это палитра и фигуры, то есть ресурсы: их выдаёт XML, и меняются они
- * только пересозданием экрана. Фактура и температура — слой поверх, он рисуется
- * кодом ([NovaAppearanceDrawable]) и к ресурсам отношения не имеет. Смешать их
- * значило бы либо плодить XML-темы по числу сочетаний (12 тем × 15 фактур × 41
- * положение ползунка), либо держать в теме то, чего она не умеет.
+ * Раньше были двенадцать готовых тем, отдельная «температура» и отдельный экран
+ * «Фон главного экрана» с тремя режимами. Владелец свёл всё в один экран по образцу
+ * ПК-версии: **оттенок** (ползунок на 64 шага), **яркость**, **насыщенность**,
+ * **скорость погружения**, плитки фактур и переключатель «случайная фактура при
+ * запуске». Тем больше нет: палитру целиком выводит оттенок (`tools/gen_nova_themes.py`).
  *
- * ## Предпросмотр
+ * ## Что чем управляет
  *
- * Владелец попросил, чтобы любое изменение оформления было видно **сразу**, ещё
- * до «Применить». Поэтому у каждого значения два слоя: сохранённый и
- * предпросмотр. Предпросмотр живёт в памяти процесса интерфейса и старше
- * сохранённого; «Применить» переписывает сохранённый и снимает предпросмотр,
- * уход с экрана — просто снимает. Ни один экран об этом не знает: все они
- * спрашивают [texture] и [temperature], а те сами решают, что отдать.
+ * - **Оттенок** — единственное, что меняет ресурсы (цвета интерфейса), поэтому
+ *   экран пересоздаётся только на нём. Остальное — это слой фона, он рисуется
+ *   кодом и применяется на месте, без пересоздания и без прыжка прокрутки.
+ * - **Яркость** — прозрачность фактуры; 60 — вид, который был до появления ползунка.
+ * - **Насыщенность** — насыщенность цвета самой фактуры; интерфейс остаётся в
+ *   палитре оттенка.
+ * - **Скорость погружения** — скорость медленного «полёта» фона на главном экране.
  *
- * В файл предпросмотр не пишется намеренно: он не должен пережить ни закрытие
- * экрана, ни тем более смерть процесса — иначе «посмотрел и передумал»
- * превращается в «поменял навсегда».
+ * ## Фон главного экрана — тоже фактура
+ *
+ * «Созвездия» (прежняя анимация) и «Без фона» — плитки того же списка. Режим
+ * главного экрана выводится из выбранной фактуры ([MainBackgroundPolicy.modeFor]), а не
+ * хранится второй раз: два источника правды на одно решение расходятся.
+ *
+ * ## Случайная фактура при запуске
+ *
+ * Включена по умолчанию. Выбор делает [pickAtLaunch] — один раз на запуск главного
+ * экрана — и записывает его как обычный выбор, поэтому дальше экраны ничем не
+ * отличают «выбрано случайно» от «выбрано пальцем».
  */
 object NovaAppearance {
 
     private const val PREFS = "nova_appearance"
     private const val KEY_TEXTURE = "surface_texture"
-    private const val KEY_TEMPERATURE = "surface_temperature"
     private const val KEY_VARIANT = "surface_variant"
+    private const val KEY_HUE = "accent_hue"
+    private const val KEY_BRIGHTNESS = "brightness"
+    private const val KEY_SATURATION = "saturation"
+    private const val KEY_SPEED = "dive_speed"
+    private const val KEY_RANDOM = "random_texture_on_start"
 
     /**
      * Фактура поверхности.
      *
-     * Названия английские — так попросил владелец. `NONE` — «без фактуры», и это
-     * умолчание: приложение обязано выглядеть так же, как до появления этого
-     * списка, пока человек не выбрал иное.
+     * `NONE` — «Без фона»: на главном экране это пустое поле, на экранах настроек —
+     * просто цвет оттенка. `CONSTELLATION` — прежняя анимация главного экрана; на
+     * экранах настроек у неё нет узора, там тоже один цвет.
      */
     enum class Texture(val key: String, val title: String) {
-        NONE("none", "None"),
+        CONSTELLATION("constellation", "Созвездия"),
+        NONE("none", "Без фона"),
         BASALT("basalt", "Basalt"),
         MARBLE("marble", "Marble"),
         WOOD("wood", "Wood"),
@@ -60,110 +75,183 @@ object NovaAppearance {
         MATRIX("matrix", "Matrix"),
         ;
 
+        /** Есть ли у фактуры растровый узор, который строит [NovaTexturePatterns]. */
+        val hasPattern: Boolean get() = this != NONE && this != CONSTELLATION
+
         companion object {
-            fun of(key: String?): Texture =
-                entries.firstOrNull { it.key == key?.trim()?.lowercase() } ?: NONE
+            fun of(key: String?): Texture? =
+                entries.firstOrNull { it.key == key?.trim()?.lowercase() }
         }
     }
 
-    /** Пределы ползунка температуры: минус — тёплый, плюс — холодный, ноль — как есть. */
-    const val TEMPERATURE_MIN = -100
-    const val TEMPERATURE_MAX = 100
-    const val TEMPERATURE_NEUTRAL = 0
+    const val HUE_COUNT = 64
 
-    @Volatile
-    private var previewTexture: Texture? = null
+    /** 168,75° — бирюза между голубым и зелёным. Совпадает с `DEFAULT_HUE` генератора. */
+    const val DEFAULT_HUE = 30
 
-    @Volatile
-    private var previewTemperature: Int? = null
+    const val BRIGHTNESS_MAX = 100
+    const val BRIGHTNESS_DEFAULT = 60
 
-    @Volatile
-    private var previewTheme: String? = null
+    const val SATURATION_MAX = 200
+    const val SATURATION_DEFAULT = 100
 
-    @Volatile
-    private var previewVariant: Int? = null
+    const val SPEED_MAX = 200
+    const val SPEED_DEFAULT = 100
 
-    /** Фактура, которую надо рисовать прямо сейчас. */
-    fun texture(context: Context): Texture =
-        previewTexture ?: Texture.of(prefs(context).getString(KEY_TEXTURE, Texture.NONE.key))
+    /** Состояние оформления целиком — то, что экран оформления читает и пишет. */
+    data class State(
+        val hue: Int,
+        val texture: Texture,
+        val variant: Int,
+        val brightness: Int,
+        val saturation: Int,
+        val speed: Int,
+        val randomOnStart: Boolean,
+    )
 
-    /** Температура оттенка, которую надо применять прямо сейчас. */
-    fun temperature(context: Context): Int =
-        previewTemperature ?: prefs(context)
-            .getInt(KEY_TEMPERATURE, TEMPERATURE_NEUTRAL)
-            .coerceIn(TEMPERATURE_MIN, TEMPERATURE_MAX)
+    fun state(context: Context): State = State(
+        hue = hue(context),
+        texture = texture(context),
+        variant = variant(context),
+        brightness = brightness(context),
+        saturation = saturation(context),
+        speed = speed(context),
+        randomOnStart = randomOnStart(context),
+    )
+
+    fun hue(context: Context): Int =
+        prefs(context).getInt(KEY_HUE, DEFAULT_HUE).coerceIn(0, HUE_COUNT - 1)
 
     /**
-     * Номер пересева узора.
-     *
-     * Фактура — это правило построения, а не одна картинка: у «Молнии» разряды
-     * могут пройти иначе, у «Снега» вырасти другие кристаллы. Владелец попросил,
-     * чтобы повторное касание уже выбранной фактуры строило узор заново, — этот
-     * счётчик и есть то, чем «заново» отличается от «то же самое». Он входит в
-     * зерно случайности ([NovaTexturePatterns.render]) и в ключ кэша
-     * ([NovaAppearanceDrawable]), поэтому пересев не берётся из кэша, а прежний
-     * вариант из него не пропадает.
+     * Выбранная фактура. По умолчанию — анимация «Созвездия», а при включённом
+     * «случайно при запуске» её тут же заменяет [pickAtLaunch]. На устройстве, не
+     * тянущем анимацию, умолчание — пустой фон: полноэкранный растр там дороже пустоты.
      */
-    fun variant(context: Context): Int =
-        previewVariant ?: prefs(context).getInt(KEY_VARIANT, 0)
+    fun texture(context: Context): Texture =
+        Texture.of(prefs(context).getString(KEY_TEXTURE, null))
+            ?: if (MainBackgroundPolicy.isAnimationSupported(context)) Texture.CONSTELLATION else Texture.NONE
 
-    fun storedVariant(context: Context): Int = prefs(context).getInt(KEY_VARIANT, 0)
+    fun variant(context: Context): Int = prefs(context).getInt(KEY_VARIANT, 0)
 
-    /** Ключ темы для предпросмотра, если он задан. Читается из [NovaTheme.current]. */
-    fun previewThemeKey(): String? = previewTheme
+    fun brightness(context: Context): Int =
+        prefs(context).getInt(KEY_BRIGHTNESS, BRIGHTNESS_DEFAULT).coerceIn(0, BRIGHTNESS_MAX)
 
-    /** Сохранённая тема — мимо предпросмотра. */
-    fun storedThemeKey(context: Context): String =
-        context.applicationContext
-            .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString("settings_theme", NovaTheme.DEFAULT_KEY)
-            .orEmpty()
-            .ifBlank { NovaTheme.DEFAULT_KEY }
+    fun saturation(context: Context): Int =
+        prefs(context).getInt(KEY_SATURATION, SATURATION_DEFAULT).coerceIn(0, SATURATION_MAX)
 
-    /** Сохранённые значения — нужны экрану оформления, чтобы знать, что отменять. */
-    fun storedTexture(context: Context): Texture =
-        Texture.of(prefs(context).getString(KEY_TEXTURE, Texture.NONE.key))
+    fun speed(context: Context): Int =
+        prefs(context).getInt(KEY_SPEED, SPEED_DEFAULT).coerceIn(0, SPEED_MAX)
 
-    fun storedTemperature(context: Context): Int =
-        prefs(context).getInt(KEY_TEMPERATURE, TEMPERATURE_NEUTRAL)
-            .coerceIn(TEMPERATURE_MIN, TEMPERATURE_MAX)
+    fun randomOnStart(context: Context): Boolean = prefs(context).getBoolean(KEY_RANDOM, true)
 
-    /** Показать, не сохраняя. */
-    fun preview(theme: String?, texture: Texture?, temperature: Int?, variant: Int?) {
-        previewTheme = theme
-        previewTexture = texture
-        previewTemperature = temperature?.coerceIn(TEMPERATURE_MIN, TEMPERATURE_MAX)
-        previewVariant = variant
+    /** Ключ темы оттенка (`hue30`) — им пользуются зеркало уведомления и виджет. */
+    fun storedThemeKey(context: Context): String = "hue${hue(context)}"
+
+    /**
+     * Цвет, которым красится фактура: оттенок плюс насыщенность. Яркость сюда не
+     * входит — она задаёт прозрачность узора, а не светлоту его цвета.
+     */
+    fun surfaceColor(context: Context): Int = surfaceColor(hue(context), saturation(context))
+
+    fun surfaceColor(hue: Int, saturation: Int): Int {
+        val s = (BASE_SATURATION * saturation / SATURATION_DEFAULT.toFloat()).coerceIn(0f, 1f)
+        return hsl(hue * 360f / HUE_COUNT, s, BASE_LIGHTNESS)
     }
 
-    /** Снять предпросмотр: дальше действуют сохранённые значения. */
-    fun clearPreview() {
-        previewTheme = null
-        previewTexture = null
-        previewTemperature = null
-        previewVariant = null
+    /** Множитель прозрачности узора по ползунку яркости. 60 даёт ровно прежний вид. */
+    fun alphaFactor(context: Context): Float = brightness(context) / BRIGHTNESS_DEFAULT.toFloat()
+
+    // ------------------------------------------------------------------ запись
+
+    fun setHue(context: Context, hue: Int) {
+        val value = hue.coerceIn(0, HUE_COUNT - 1)
+        val previous = hue(context)
+        prefs(context).edit().putInt(KEY_HUE, value).apply()
+        if (previous != value) {
+            // Службе `:vpn` из всей темы нужен один акцент (заливка уведомления), и
+            // виджет на столе красится тем же цветом (I2).
+            NovaNotificationPalette.onThemeStored(context, "hue$value")
+            runCatching { NovaWidgetProvider.refreshAll(context.applicationContext) }
+        }
     }
 
-    /** Записать выбор насовсем и снять предпросмотр. */
-    fun store(
-        context: Context,
-        theme: String,
-        texture: Texture,
-        temperature: Int,
-        variant: Int,
-    ) {
-        NovaTheme.store(context, theme)
+    fun setTexture(context: Context, texture: Texture, variant: Int = variant(context)) {
         prefs(context).edit()
             .putString(KEY_TEXTURE, texture.key)
-            .putInt(KEY_TEMPERATURE, temperature.coerceIn(TEMPERATURE_MIN, TEMPERATURE_MAX))
             .putInt(KEY_VARIANT, variant)
             .apply()
-        clearPreview()
     }
 
-    /** Есть ли что рисовать поверх темы. Пустой слой не стоит и одного вида. */
-    fun hasOverlay(context: Context): Boolean =
-        texture(context) != Texture.NONE || temperature(context) != TEMPERATURE_NEUTRAL
+    fun setBrightness(context: Context, value: Int) {
+        prefs(context).edit().putInt(KEY_BRIGHTNESS, value.coerceIn(0, BRIGHTNESS_MAX)).apply()
+    }
+
+    fun setSaturation(context: Context, value: Int) {
+        prefs(context).edit().putInt(KEY_SATURATION, value.coerceIn(0, SATURATION_MAX)).apply()
+    }
+
+    fun setSpeed(context: Context, value: Int) {
+        prefs(context).edit().putInt(KEY_SPEED, value.coerceIn(0, SPEED_MAX)).apply()
+    }
+
+    fun setRandomOnStart(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_RANDOM, enabled).apply()
+    }
+
+    // ------------------------------------------------------------------ случайный выбор
+
+    /**
+     * Случайная фактура запуска. Зовётся из `onCreate` главного экрана, когда он
+     * создаётся с нуля (`savedInstanceState == null`): пересоздание из-за поворота
+     * или смены оттенка фон не меняет.
+     *
+     * Выбор записывается как обычный — так экраны настроек и главный экран видят
+     * одно и то же без отдельного «временного» слоя.
+     */
+    fun pickAtLaunch(context: Context) {
+        if (!randomOnStart(context)) return
+        val pool = randomPool(context)
+        if (pool.isEmpty()) return
+        val current = texture(context)
+        // Тот же вид подряд выглядел бы как «не сработало».
+        val candidates = if (pool.size > 1) pool.filter { it != current } else pool
+        val pick = candidates.random()
+        setTexture(context, pick, variant = (0..9999).random())
+    }
+
+    /** Из чего выбирает «случайно»: любая фактура, кроме «Без фона»; анимация — если тянет. */
+    fun randomPool(context: Context): List<Texture> {
+        val animation = MainBackgroundPolicy.isAnimationSupported(context)
+        return Texture.entries.filter {
+            it != Texture.NONE && (it != Texture.CONSTELLATION || animation)
+        }
+    }
+
+    // ------------------------------------------------------------------ цвет
+
+    /** Акцент по умолчанию ярче чуть насыщеннее ПК-версии — «немного неоновый». */
+    private const val BASE_SATURATION = 0.78f
+    private const val BASE_LIGHTNESS = 0.54f
+
+    private fun hsl(hueDegrees: Float, s: Float, l: Float): Int {
+        val c = (1f - kotlin.math.abs(2f * l - 1f)) * s
+        val h = ((hueDegrees % 360f) + 360f) % 360f / 60f
+        val x = c * (1f - kotlin.math.abs(h % 2f - 1f))
+        val (r1, g1, b1) = when (h.toInt()) {
+            0 -> Triple(c, x, 0f)
+            1 -> Triple(x, c, 0f)
+            2 -> Triple(0f, c, x)
+            3 -> Triple(0f, x, c)
+            4 -> Triple(x, 0f, c)
+            else -> Triple(c, 0f, x)
+        }
+        val m = l - c / 2f
+        return Color.rgb(
+            ((r1 + m) * 255f + 0.5f).toInt().coerceIn(0, 255),
+            ((g1 + m) * 255f + 0.5f).toInt().coerceIn(0, 255),
+            ((b1 + m) * 255f + 0.5f).toInt().coerceIn(0, 255),
+        )
+    }
 
     private fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

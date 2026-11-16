@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 # Оба APK выпуска разом: github-флейвор на Windows и эталон F-Droid в WSL — параллельно.
 #
-#   bash tools/release/build_release.sh <ver> <code> [--runs N] [--upload] [--dry-run]
+#   bash tools/release/build_release.sh <ver> <code> [--runs N] [--upload] [--dry-run] [--refresh-profiles]
+#
+# Встроенные профили (D45). Перед выпуском точки входа WARP и узлы Proton освежаются с телефона
+# по adb (нужен root) или из одобренного набора `tools/release/approved/`; скрипт всегда сверяет
+# формат и отсутствие секретов (`refresh_bundled_profiles.py --check`). `--refresh-profiles`
+# запускает освежение здесь же, но если оно что-то изменило, сборка останавливается: изменения
+# должны попасть в публичный коммит выпуска, иначе эталон F-Droid и github-APK соберутся из
+# разных активов (I15, G138). Сам скрипт активы не коммитит.
 #
 # Запуск из Git Bash на Windows. До запуска публичный коммит уже составлен и припаркован:
 # `git update-ref refs/nova-release/<ver> <sha>` (kb/build-release.md, «Build the reference
@@ -35,12 +42,13 @@ die() { say "ОШИБКА: $*"; exit 1; }
 VER="${1:-}"; CODE="${2:-}"
 [ -n "$VER" ] && [ -n "$CODE" ] || die "использование: build_release.sh <ver> <code> [--runs N] [--upload] [--dry-run]"
 shift 2
-RUNS=2; UPLOAD=0; DRY=0
+RUNS=2; UPLOAD=0; DRY=0; REFRESH_PROFILES=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --runs) RUNS="${2:?число прогонов}"; shift 2 ;;
         --upload) UPLOAD=1; shift ;;
         --dry-run) DRY=1; shift ;;
+        --refresh-profiles) REFRESH_PROFILES=1; shift ;;
         *) die "неизвестный ключ: $1" ;;
     esac
 done
@@ -49,6 +57,17 @@ done
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 REPO_WIN="$(pwd -W)"
 to_wsl() { wsl.exe -d "$DISTRO" -- wslpath -a "$1" | tr -d '\r'; }
+
+# --- Встроенные профили: свежесть и формат. До проверки чистоты дерева — освежение его меняет.
+if [ "$REFRESH_PROFILES" = 1 ]; then
+    say "освежаем встроенные профили (телефон по adb или одобренный набор)"
+    python -I tools/release/refresh_bundled_profiles.py || die "освежение встроенных профилей не прошло"
+    if [ -n "$(git status --porcelain -- app/src/main/assets tools/release/approved)" ]; then
+        git status --short -- app/src/main/assets tools/release/approved
+        die "встроенные профили изменились: закоммитьте их, составьте публичный коммит выпуска заново (git update-ref refs/nova-release/$VER <sha>) и запустите скрипт снова"
+    fi
+fi
+python -I tools/release/refresh_bundled_profiles.py --check     || die "встроенные профили не прошли проверку формата/секретов (tools/release/refresh_bundled_profiles.py --check)"
 
 # --- Предусловия. Всё, что можно проверить до двадцати минут сборки, проверяется здесь.
 grep -qE "^\s*versionCode = $CODE\s*$" app/build.gradle.kts || die "в app/build.gradle.kts не versionCode = $CODE"

@@ -1,10 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Фон адаптивного значка: тёмно-бирюзовый с синим подтоном (вариант A2 «Неон»). Слой всегда
+     непрозрачный: лаунчер сам режет его маской (круг, «сквиркл»), поэтому края рисовать не нужно. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path
-        android:fillColor="#3DDC84"
-        android:pathData="M0,0h108v108h-108z"/>
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="54"
+                android:centerY="52"
+                android:gradientRadius="71">
+                <item android:offset="0" android:color="#FF0A3C44" />
+                <item android:offset="0.55" android:color="#FF062A32" />
+                <item android:offset="1" android:color="#FF021218" />
+            </gradient>
+        </aapt:attr>
+    </path>
 </vector>

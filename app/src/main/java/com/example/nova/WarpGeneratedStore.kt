@@ -159,6 +159,29 @@ class WarpGeneratedStore(context: Context) {
     }
 
     /**
+     * Личность и профили одной записью.
+     *
+     * При замене работающего набора по частям (сначала личность, потом профили) в окне
+     * между двумя записями очередь подключения строилась из **новой** личности и **старых**
+     * точек входа — а набор, пока выпуск не закончился, подменяться не должен. Здесь оба
+     * поля меняются в одном `mutate`, то есть одним `finishWrite`.
+     */
+    fun commitIssue(identity: Identity, profiles: List<WarpGeneratedProfile>) = mutate { json ->
+        json.put(
+            "identity",
+            JSONObject()
+                .put("private_key", identity.privateKey)
+                .put("public_key", identity.publicKey)
+                .put("ipv4", identity.ipv4)
+                .put("ipv6", identity.ipv6)
+                .put("peer_public_key", identity.peerPublicKey)
+                .put("reserved", identity.reserved)
+                .put("created_at", identity.createdAt)
+        )
+        json.put("profiles", encodeProfiles(profiles))
+    }
+
+    /**
      * Отмечает исход попытки на точке входа личного профиля.
      *
      * Успех обнуляет счётчик, отказ его повышает. Читает-меняет-пишет под тем же

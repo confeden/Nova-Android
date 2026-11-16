@@ -114,7 +114,7 @@ object NovaNotificationPalette {
         val accent = runCatching {
             val themed = ContextThemeWrapper(context.applicationContext, NovaTheme.optionFor(key).styleRes)
             NovaTheme.color(themed, R.attr.novaAccent)
-        }.getOrElse { ContextCompat.getColor(context, R.color.nova_aurora_accent) }
+        }.getOrElse { ContextCompat.getColor(context, R.color.nova_hue30_accent) }
         return derive(accent).also { cached = key to it }
     }
 

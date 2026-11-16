@@ -71,6 +71,35 @@ object VendorBackgroundSettingsHelper {
         return openFirstWorking(context, loadOrResolve(context).autoStart)
     }
 
+    /**
+     * Реальное состояние автозапуска, а не запомненная «подсказка».
+     *
+     * MIUI хранит его как AppOps-операцию 10008 (OP_AUTO_START): MODE_ALLOWED —
+     * включён, MODE_IGNORED — выключен. Проверено на MIUI 12.5: тумблер в списке
+     * «Автозапуск» и этот режим меняются вместе. `null` — состояние прочитать
+     * нельзя (не MIUI, закрытый скрытый API, неизвестный режим); тогда вызывающий
+     * вправе опереться на подсказку.
+     */
+    fun isAutoStartEnabled(context: Context): Boolean? {
+        if (detectSkin() != Skin.MIUI) return null
+        return runCatching {
+            val ops = context.getSystemService(Context.APP_OPS_SERVICE) as android.app.AppOpsManager
+            val check = ops.javaClass.getMethod(
+                "checkOpNoThrow",
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                String::class.java,
+            )
+            when (check.invoke(ops, MIUI_OP_AUTO_START, android.os.Process.myUid(), context.packageName) as Int) {
+                android.app.AppOpsManager.MODE_ALLOWED -> true
+                android.app.AppOpsManager.MODE_IGNORED, android.app.AppOpsManager.MODE_ERRORED -> false
+                else -> null
+            }
+        }.getOrNull()
+    }
+
+    private const val MIUI_OP_AUTO_START = 10008
+
     private fun openFirstWorking(context: Context, candidates: List<Candidate>): Boolean {
         for (candidate in candidates) {
             try {
@@ -118,6 +147,15 @@ object VendorBackgroundSettingsHelper {
      * нельзя: переключатель, который «не включается», читается как сломанный.
      */
     fun isVendorManagedBattery(): Boolean = detectSkin() != Skin.NONE
+
+    /**
+     * MIUI и HyperOS: режим «Нет ограничений» в «Контроле активности» сам кладёт
+     * приложение в список исключений Android, и наоборот — любой другой режим его
+     * оттуда убирает. Проверено на MIUI 12.5 (Redmi Note 8 Pro) и HyperOS 3 (Redmi
+     * Pad 2 Pro). Прежняя подсказка «это два разных разрешения» была ошибочной: её
+     * породил запоздалый перечит состояния, а не отдельное разрешение.
+     */
+    fun isBatteryFlagFollowsVendorMode(): Boolean = detectSkin() == Skin.MIUI
 
     private fun detectSkin(): Skin {
         val manufacturer = Build.MANUFACTURER.orEmpty().trim().lowercase()
@@ -194,10 +232,10 @@ object VendorBackgroundSettingsHelper {
                 ),
                 action("Автозапуск", "miui.intent.action.OP_AUTO_START"),
             ) else listOf(
-                // Классический MIUI: пер-app редактор разрешений с тумблером «Автозапуск».
-                action("Автозапуск Nova", "miui.intent.action.APP_PERM_EDITOR") {
-                    putExtra("extra_pkgname", appPackage)
-                },
+                // Классический MIUI (проверено на MIUI 12.5, Redmi Note 8 Pro): пер-app
+                // редактор разрешений (APP_PERM_EDITOR) тумблера автозапуска НЕ содержит —
+                // там ярлыки, экран блокировки и всплывающие окна. Автозапуск живёт
+                // только в общем списке Центра безопасности.
                 explicit(
                     "Автозапуск",
                     "com.miui.securitycenter",

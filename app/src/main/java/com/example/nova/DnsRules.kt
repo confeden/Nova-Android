@@ -121,6 +121,8 @@ data class DnsRule(
     fun toUpstream(route: DnsRouteMode, target: String): String = buildString {
         append(target)
         bootstrap.forEach { append('|').append(it) }
+        // Личная ссылка DNS-AI отвечает только на GET: CDN режет POST кодом 413.
+        DnsAiEntrances.methodToken(target)?.let { append('|').append(it) }
         // Открытый резолвер в гонке путей не участвует: подделанный ответ
         // приходит раньше настоящего, и «быстрейший» выбрал бы подделку. Ядро
         // проверяет это ещё раз у себя — здесь мы просто не пишем лишнего.
@@ -208,6 +210,9 @@ data class DnsRule(
                 Kind.AUTO -> trimmed.substringAfter("://").substringBefore('/')
                     .takeIf { it.isNotEmpty() && !it.any(Char::isWhitespace) }
                 Kind.DOH -> {
+                    // Личная ссылка DNS-AI — токен, `хост/токен`, шаблон `…{?dns}` — приводится к
+                    // одной форме `https://хост/токен`.
+                    DnsAiEntrances.parsePersonalLink(trimmed)?.let { return it.url }
                     if (!trimmed.startsWith("https://", ignoreCase = true)) return null
                     val uri = runCatching { java.net.URI(trimmed) }.getOrNull() ?: return null
                     if (uri.host.isNullOrBlank()) return null
@@ -262,8 +267,10 @@ data class DnsRule(
             transport: Transport = Transport.ANY,
         ): DnsRule? {
             val normalized = normalizeValue(kind, value) ?: return null
-            val effective = when (kind) {
-                Kind.AUTO, Kind.PLAIN, Kind.PROVIDER -> Transport.derive(kind)
+            val effective = when {
+                kind == Kind.AUTO || kind == Kind.PLAIN || kind == Kind.PROVIDER -> Transport.derive(kind)
+                // У `cf.` и личных ссылок DoT нет: «любой» дал бы вторую, заведомо пустую цель.
+                DnsAiEntrances.isDohOnly(normalized) -> Transport.DOH
                 else -> transport
             }
             return DnsRule(
@@ -367,21 +374,25 @@ object DnsRulesStore {
      * 5 — версия, в которой из умолчаний ушёл Xbox DNS: сервис перестал работать.
      * Формат файла не менялся, поэтому старая сборка читает его без вреда; она
      * просто покажет правило, которое уже не отвечает.
+     *
+     * 6 — версия, в которой в умолчания пришёл второй вход DNS-AI, `cf.dns-ai.ru`. Формат файла
+     * не менялся; старая сборка покажет правило как обычный DoH.
+     *
+     * 7 — версия, в которой из умолчаний ушли Comss, GeoHide, Cloudflare и Google (D48). Формат
+     * файла не менялся; старая сборка просто прочитает список без них.
      */
-    private const val VERSION = 5
+    private const val VERSION = 7
 
     private val writeLock = Any()
 
     /**
-     * Умолчания — резолвер владельца, дважды.
+     * Умолчания — только входы DNS-AI и резолвер провайдера последней ступенью.
      *
-     * Сначала DoH, следом DoT к тому же серверу: у него нет открытой версии
-     * (53/udp молчит, 53/tcp отказывает — измерено на МегаФон LTE), поэтому его
-     * адреса имеют смысл только как bootstrap, а не как отдельные строки списка.
-     * Два вида транспорта нужны потому, что 443 и 853 блокируются порознь.
-     *
-     * Дальше — открытые публичные резолверы запасной ступенью: они видят имена,
-     * но лучше отвечать через них, чем не отвечать вовсе.
+     * Наш резолвер — одной строкой, DoH или DoT по замеру (у него нет открытой
+     * версии, а 443 и 853 блокируются порознь), и `cf.dns-ai.ru` за Cloudflare.
+     * Чужие резолверы (Comss, GeoHide, Cloudflare, Google) из умолчаний убраны
+     * (D48): человек добавляет стороннего вручную, а личная ссылка DNS-AI — тоже
+     * правило этого списка.
      */
     fun defaults(): List<DnsRule> = listOf(
         // Наш резолвер — один строкой, транспорт выберет замер: 443 и 853
@@ -392,42 +403,15 @@ object DnsRulesStore {
             value = PriorityDns.HOST,
             bootstrap = PriorityDns.KNOWN_ADDRESSES,
         ),
-        // Дальше — порядок, который назвал владелец. Все адреса сверены со
-        // страницами самих операторов 2026-09-05; bootstrap нужен потому, что имя
-        // резолвера иначе пришлось бы разрешать через тот самый перехват, который
-        // его и спрашивает.
-        //
-        // Транспорт у всех — «любой»: спрашивается то, что отвечает быстрее, а
-        // порядок внутри пары решает замер. Значение остаётся DoH-ссылкой,
-        // потому что это форма адреса, а не выбор транспорта, и DoT-цель служба
-        // собирает из того же имени.
+        // Второй вход DNS-AI — за Cloudflare, только DoH. Адреса CDN плавают, поэтому
+        // bootstrap пуст намеренно: служба разворачивает имя мимо VPN при подключении
+        // (`DnsAiEntrances`). Идёт сразу за нашим прямым адресом: если провайдер режет его,
+        // этот вход обычно проходит.
         DnsRule(
-            id = "comss",
+            id = CF_RULE_ID,
             kind = DnsRule.Kind.DOH,
-            value = "https://dns.comss.one/dns-query",
-            bootstrap = listOf("83.220.169.155", "212.109.195.93", "195.133.25.16"),
-            transport = DnsRule.Transport.ANY,
-        ),
-        DnsRule(
-            id = "geohide",
-            kind = DnsRule.Kind.DOH,
-            value = "https://geohide.ru/dns-query",
-            bootstrap = listOf("193.233.112.67", "193.233.112.68", "46.8.158.6"),
-            transport = DnsRule.Transport.ANY,
-        ),
-        DnsRule(
-            id = "cloudflare",
-            kind = DnsRule.Kind.DOH,
-            value = "https://cloudflare-dns.com/dns-query",
-            bootstrap = listOf("1.1.1.1", "1.0.0.1"),
-            transport = DnsRule.Transport.ANY,
-        ),
-        DnsRule(
-            id = "google",
-            kind = DnsRule.Kind.DOH,
-            value = "https://dns.google/dns-query",
-            bootstrap = listOf("8.8.8.8", "8.8.4.4"),
-            transport = DnsRule.Transport.ANY,
+            value = DnsAiEntrances.CF_URL,
+            transport = DnsRule.Transport.DOH,
         ),
         // Последняя ступень — резолвер оператора, и он единственный открытый.
         // Выключается отдельно от остальных: это его и делает «запасным», а не
@@ -441,6 +425,9 @@ object DnsRulesStore {
 
     /** Идентификатор провайдерского правила — он же его выключатель. */
     const val PROVIDER_RULE_ID: String = "provider"
+
+    /** Идентификатор встроенного входа `cf.dns-ai.ru`. */
+    const val CF_RULE_ID: String = "cf"
 
     /** Идентификаторы умолчаний версии 2 — их миграция вправе выбросить. */
     private val LEGACY_DEFAULT_IDS = setOf("owner-doh", "owner-dot", "cloudflare", "cloudflare-2")
@@ -486,6 +473,8 @@ object DnsRulesStore {
         if (version < 3) current = migrateToV3(current)
         if (version < 4) current = migrateToV4(current)
         if (version < 5) current = migrateToV5(current)
+        if (version < 6) current = migrateToV6(current)
+        if (version < 7) current = migrateToV7(current)
         return current
     }
 
@@ -566,6 +555,76 @@ object DnsRulesStore {
         }
         return kept
     }
+
+    /**
+     * Дописывает встроенный вход `cf.dns-ai.ru`, если его в списке нет.
+     *
+     * Один раз, при переходе на версию 6 (I1): удалённая человеком строка не вернётся, потому
+     * что файл версии 6 миграцию уже не проходит. Встаёт сразу за нашим резолвером.
+     */
+    private fun migrateToV6(rules: List<DnsRule>): List<DnsRule> {
+        val added = withCfEntrance(rules)
+        if (added.size != rules.size && !v6MigrationLogged) {
+            v6MigrationLogged = true
+            LogManager.log("DNS-правила: добавлен вход cf.dns-ai.ru (DNS-AI за Cloudflare, только DoH).")
+        }
+        return added
+    }
+
+    /** Решение по списку — отдельно от записи в журнал. */
+    internal fun withCfEntrance(rules: List<DnsRule>): List<DnsRule> {
+        val present = rules.any {
+            it.id == CF_RULE_ID ||
+                it.value.substringAfter("://").substringBefore('/').equals(DnsAiEntrances.HOST_CF, ignoreCase = true)
+        }
+        if (present) return rules
+        val shipped = defaults().first { it.id == CF_RULE_ID }
+        val ownerIndex = rules.indexOfFirst { it.id == "owner" }
+        val at = if (ownerIndex >= 0) ownerIndex + 1 else 0
+        return rules.toMutableList().also { it.add(at, shipped) }
+    }
+
+    @Volatile
+    private var v6MigrationLogged = false
+
+    /**
+     * Прежние встроенные чужие резолверы: идентификатор и адрес, по которым их узнаёт миграция.
+     * Нужны только ей — в умолчаниях их больше нет.
+     */
+    private val RETIRED_BUILT_IN = mapOf(
+        "comss" to "https://dns.comss.one/dns-query",
+        "geohide" to "https://geohide.ru/dns-query",
+        "cloudflare" to "https://cloudflare-dns.com/dns-query",
+        "google" to "https://dns.google/dns-query",
+    )
+
+    /**
+     * Убирает встроенные Comss, GeoHide, Cloudflare и Google (D48, решение владельца).
+     *
+     * Условие узкое (I1): уходит строка, у которой совпали **и** идентификатор, **и** адрес;
+     * строка, которую человек добавил сам или поправил, остаётся. Если после этого список
+     * опустел, возвращаются умолчания: пустой список резолвера некому опрашивать.
+     */
+    private fun migrateToV7(rules: List<DnsRule>): List<DnsRule> {
+        val kept = withoutRetiredBuiltIn(rules)
+        if (kept.size != rules.size && !v7MigrationLogged) {
+            v7MigrationLogged = true
+            LogManager.log(
+                "DNS-правила: встроенные Comss, GeoHide, Cloudflare и Google убраны из списка — " +
+                    "сторонний резолвер добавляется вручную."
+            )
+        }
+        return kept.ifEmpty { defaults() }
+    }
+
+    /** Решение по списку — отдельно от записи в журнал. */
+    internal fun withoutRetiredBuiltIn(rules: List<DnsRule>): List<DnsRule> =
+        rules.filterNot { rule ->
+            RETIRED_BUILT_IN[rule.id]?.equals(rule.value, ignoreCase = true) == true
+        }
+
+    @Volatile
+    private var v7MigrationLogged = false
 
     /** Решение по списку — отдельно от записи в журнал. */
     internal fun withoutDeadXboxRule(rules: List<DnsRule>): List<DnsRule> =

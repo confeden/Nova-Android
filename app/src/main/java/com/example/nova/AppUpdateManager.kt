@@ -95,6 +95,7 @@ data class ManualUpdateCheckResult(
     enum class Kind {
         CHECKING,
         NO_UPDATE,
+        UPDATE_AVAILABLE,
         DOWNLOAD_STARTED,
         DOWNLOAD_IN_PROGRESS,
         READY,
@@ -110,6 +111,8 @@ object AppUpdateManager {
     )
     private const val GITHUB_LATEST_RELEASE_URL =
         "https://api.github.com/repos/confeden/Nova-Android/releases/latest"
+    private const val GITHUB_LATEST_RELEASE_PAGE =
+        "https://github.com/confeden/Nova-Android/releases/latest"
     private const val PERIODIC_WORK_NAME = "nova_update_check_periodic"
     private const val REPAIR_WORK_NAME = "nova_update_repair"
     private const val CHANNEL_ID = "nova_updates"
@@ -314,7 +317,7 @@ object AppUpdateManager {
 
     /** Что сказать человеку, когда за обновлением не пускает режим DNS. */
     const val DNS_MODE_BLOCK_MESSAGE: String =
-        "В режиме DNS обновления отключены: канал слишком узкий"
+        "В режиме White обновления отключены: канал слишком узкий"
 
     /**
      * Идёт ли сейчас сеанс по DNS — и значит, наружу за обновлением ходить нельзя.
@@ -494,7 +497,15 @@ object AppUpdateManager {
         }
     }
 
-    fun performManualUpdateCheck(context: Context): ManualUpdateCheckResult {
+    /**
+     * Проверка по нажатию.
+     *
+     * @param download ложь — только узнать, есть ли версия новее (кнопка «Проверить
+     *        обновления»): ничего не качается, найденная версия записывается, и плашка
+     *        на главном экране предлагает её скачать. Истина — ещё и начать загрузку
+     *        (кнопка «Скачать последнюю версию» → «С GitHub»).
+     */
+    fun performManualUpdateCheck(context: Context, download: Boolean = true): ManualUpdateCheckResult {
         if (!isUpdaterEnabled) {
             // Молчаливый отказ здесь был бы хуже всего: пользователь жмёт кнопку
             // и не понимает, почему ничего не происходит. Кнопку в этой сборке
@@ -565,6 +576,15 @@ object AppUpdateManager {
                     kind = ManualUpdateCheckResult.Kind.DOWNLOAD_IN_PROGRESS,
                     version = metadata.version,
                     message = "Загрузка ${metadata.version} уже выполняется",
+                )
+            }
+
+            if (!download) {
+                broadcastUpdateStateChanged(appContext)
+                return ManualUpdateCheckResult(
+                    kind = ManualUpdateCheckResult.Kind.UPDATE_AVAILABLE,
+                    version = metadata.version,
+                    message = "Доступна версия ${metadata.version}",
                 )
             }
 
@@ -958,7 +978,64 @@ object AppUpdateManager {
         }
     }
 
+    /**
+     * Самая новая версия из двух источников: ленты `apk_version.json` и тега последнего
+     * релиза.
+     *
+     * Лента обновляется ботом уже после публикации и ещё сидит в кэше CDN, поэтому в
+     * первые минуты (а то и часы) она отдаёт прежнюю версию, и человек, нажавший
+     * «Проверить обновления» сразу после выхода релиза, слышал «Установлена последняя».
+     * Тег релиза появляется в момент публикации. Раньше он спрашивался только когда
+     * лента вовсе недоступна. Контрольная сумма берётся из ленты, если её версия та
+     * же, что у тега.
+     */
     private fun fetchMetadata(context: Context): ApkUpdateMetadata? {
+        val feed = fetchFeedMetadata()
+        val release = fetchLatestReleaseByTag()
+        if (feed == null) return release ?: fetchLatestGithubRelease()
+        if (release == null) return feed
+        return when {
+            compareVersions(release.version, feed.version) > 0 -> {
+                LogManager.log("Лента обновлений отстаёт: ${feed.version}, а релиз ${release.version}.")
+                release
+            }
+            else -> feed
+        }
+    }
+
+    /**
+     * Версия последнего опубликованного релиза по редиректу `/releases/latest`.
+     *
+     * Работает с `github.com`, а не с `api.github.com`: у API свой лимит запросов и своя
+     * доступность, а страница релизов открывается там же, где идёт сама загрузка APK.
+     * Черновики сюда не попадают. Имя файла — `Nova_<версия>.apk` (его задаёт сборка).
+     */
+    private fun fetchLatestReleaseByTag(): ApkUpdateMetadata? {
+        return try {
+            val connection = URL(GITHUB_LATEST_RELEASE_PAGE).openConnection() as HttpURLConnection
+            connection.connectTimeout = 6000
+            connection.readTimeout = 6000
+            connection.instanceFollowRedirects = false
+            connection.useCaches = false
+            connection.requestMethod = "HEAD"
+            connection.setRequestProperty("User-Agent", "NovaAndroidUpdater/1.12")
+            val location = connection.getHeaderField("Location").orEmpty()
+            connection.disconnect()
+            val tag = location.substringAfter("/releases/tag/", "").substringBefore('?').trim()
+            val version = tag.removePrefix("v").removePrefix("V")
+            if (version.isBlank() || parseVersionParts(version).isEmpty()) return null
+            ApkUpdateMetadata(
+                version = version,
+                url = "https://github.com/confeden/Nova-Android/releases/download/$tag/Nova_$version.apk",
+                sha256 = "",
+            )
+        } catch (error: Exception) {
+            LogManager.log("Тег последнего релиза недоступен: ${error.message}")
+            null
+        }
+    }
+
+    private fun fetchFeedMetadata(): ApkUpdateMetadata? {
         for (updateUrl in UPDATE_URLS) {
             try {
                 val connection = URL(updateUrl).openConnection() as HttpURLConnection
@@ -982,7 +1059,7 @@ object AppUpdateManager {
                 continue
             }
         }
-        return fetchLatestGithubRelease()
+        return null
     }
 
     /**

@@ -8,7 +8,7 @@ import android.util.TypedValue
 import android.widget.TextView
 
 /**
- * Тема оформления экранов настроек.
+ * Палитра экранов: 64 темы-оттенка ([NovaAppearance.hue]).
  *
  * Зачем. Палитра была прибита литералами в разметке: четырнадцать цветов текста на
  * десять экранов, четыре серых на одну роль, четыре зелёных на один акцент.
@@ -30,11 +30,8 @@ import android.widget.TextView
  */
 object NovaTheme {
 
-    private const val PREFS = "nova_appearance"
-    private const val KEY = "settings_theme"
-
-    /** Ключ по умолчанию — ближайшая к прежнему виду приложения. */
-    const val DEFAULT_KEY = "aurora"
+    /** Ключ по умолчанию — бирюзовый оттенок ([NovaAppearance.DEFAULT_HUE]). */
+    const val DEFAULT_KEY = "hue30"
 
     /**
      * Начертание всего интерфейса.
@@ -74,96 +71,17 @@ object NovaTheme {
     )
 
     /**
-     * Порядок здесь — порядок в списке выбора и в `tools/gen_nova_themes.py`.
-     * Расхождение ловит `NovaThemeTest`, а не глаз.
+     * 64 оттеночные темы: ключ `hue<N>`. Готовых тем больше нет — палитру целиком
+     * выводит оттенок (`tools/gen_nova_themes.py`). Начертание у всех штатное.
      */
-    val ORDER: List<Option> = listOf(
-        Option(
-            "aurora", "Aurora mint", R.style.Theme_Nova_Settings_Auroramint,
-            "Тёмный индиго и холодная мята — развитие прежнего вида",
-        ),
-        Option(
-            "dnsai", "DNS-AI", R.style.Theme_Nova_Settings_DNSAI,
-            "Графит и синий с мятой, как на dns-ai.ru",
-        ),
-        Option(
-            "proton", "Proton", R.style.Theme_Nova_Settings_Proton,
-            "Почти чёрный с фиолетовым, по мотивам Proton VPN",
-        ),
-        Option(
-            "charcoal", "Charcoal birch", R.style.Theme_Nova_Settings_Charcoalbirch,
-            "Уголь и бирюза, ничего лишнего",
-        ),
-        Option(
-            "graphene", "Graphene golden", R.style.Theme_Nova_Settings_Graphenegolden,
-            "Графит и тёплое золото",
-        ),
-        Option(
-            "neon", "Cyber neon", R.style.Theme_Nova_Settings_Cyberneon,
-            "Матовая ночь, бирюза и маджента — свечение только у заголовков",
-            face = Face.TECHNO,
-        ),
-        Option(
-            "poe1", "Path of Exile 1", R.style.Theme_Nova_Settings_PathofExile1,
-            "Тёплый чёрный, золотая обводка, прямые углы",
-            face = Face.SERIF_SC,
-        ),
-        Option(
-            "poe2", "Path of Exile 2", R.style.Theme_Nova_Settings_PathofExile2,
-            "Оружейная сталь и расплавленная медь, панель светлее сверху",
-            face = Face.ROMAN,
-        ),
-        Option(
-            "gta6sunset", "GTA VI Vice Sunset", R.style.Theme_Nova_Settings_GTAVIViceSunset,
-            "Индиго и лаванда, заголовки фирменным персик→розовый",
-            face = Face.HEAVY,
-        ),
-        Option(
-            "gta6night", "GTA VI Vice Night", R.style.Theme_Nova_Settings_GTAVIViceNight,
-            "Та же марка после заката: розовый на состояниях, ледяной на данных",
-            face = Face.HEAVY,
-        ),
-        Option(
-            "matrix", "Matrix", R.style.Theme_Nova_Settings_Matrix,
-            "Терминал на ЭЛТ: люминофорный зелёный по чёрному, моноширинный шрифт, прямые углы",
-            face = Face.MONOSPACE,
-        ),
-        Option(
-            "diablo2", "Diablo II", R.style.Theme_Nova_Settings_DiabloII,
-            "Камень и золотая филигрань: кнопка — плита с самоцветами, книжная антиква",
-            face = Face.OLD_STYLE,
-        ),
-    )
+    val ORDER: List<Option> = List(NovaAppearance.HUE_COUNT) { index ->
+        Option("hue$index", "hue$index", NovaHueThemes.SETTINGS[index], "")
+    }
 
     fun optionFor(key: String): Option =
-        ORDER.firstOrNull { it.key == key } ?: ORDER.first()
+        ORDER.firstOrNull { it.key == key } ?: ORDER[NovaAppearance.DEFAULT_HUE]
 
-    fun current(context: Context): String {
-        // Предпросмотр старше сохранённого: экран оформления показывает выбор до
-        // того, как его подтвердили (см. [NovaAppearance]).
-        NovaAppearance.previewThemeKey()?.let { preview ->
-            if (ORDER.any { it.key == preview }) return preview
-        }
-        val stored = context.applicationContext
-            .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY, DEFAULT_KEY)
-            .orEmpty()
-        // Неизвестный ключ — это откат на прошлую версию или правка prefs руками.
-        // Молча брать первый попавшийся нельзя было бы, если бы от темы что-то
-        // зависело; здесь зависит только внешний вид, и падать из-за него глупо.
-        return if (ORDER.any { it.key == stored }) stored else DEFAULT_KEY
-    }
-
-    fun store(context: Context, key: String) {
-        val chosen = optionFor(key).key
-        val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val previous = prefs.getString(KEY, DEFAULT_KEY)
-        prefs.edit().putString(KEY, chosen).apply()
-        if (previous != chosen) {
-            NovaNotificationPalette.onThemeStored(context, chosen)
-            runCatching { NovaWidgetProvider.refreshAll(context.applicationContext) }
-        }
-    }
+    fun current(context: Context): String = NovaAppearance.storedThemeKey(context)
 
     /**
      * Ставит тему экрану. Зовётся **до** `super.onCreate` и `setContentView`:
@@ -181,19 +99,17 @@ object NovaTheme {
     }
 
     /**
-     * Кладёт фактуру и температуру поверх фона окна.
+     * Кладёт фактуру поверх фона окна.
      *
      * Фон темы остаётся нижним слоем и берётся у самой темы
-     * (`android:windowBackground`), а не выписывается здесь: у двенадцати тем он
-     * разный, и вторая копия этого соответствия — это ровно G49.
-     *
-     * Слоя нет вовсе, пока нечего рисовать: «без фактуры» и нулевая температура
-     * обязаны стоить приложению столько же, сколько стоили до появления этого
-     * списка.
+     * (`android:windowBackground`), а не выписывается здесь. Слоя нет вовсе, пока
+     * нечего рисовать: «Без фона» и «Созвездия» стоят экрану настроек ровно столько,
+     * сколько он стоил без этого слоя.
      */
     private fun applySurfaceOverlay(activity: Activity) {
         val window = activity.window ?: return
-        if (!NovaAppearance.hasOverlay(activity)) return
+        val texture = NovaAppearance.texture(activity)
+        if (!texture.hasPattern) return
         val base = runCatching {
             val value = TypedValue()
             activity.theme.resolveAttribute(android.R.attr.windowBackground, value, true)
@@ -203,18 +119,51 @@ object NovaTheme {
                 android.graphics.drawable.ColorDrawable(value.data)
             }
         }.getOrNull()
-        val overlay = NovaAppearanceDrawable(
-            texture = NovaAppearance.texture(activity),
-            temperature = NovaAppearance.temperature(activity),
-            accent = color(activity, R.attr.novaAccent),
-            variant = NovaAppearance.variant(activity),
-        )
+        val overlay = surfaceOverlay(activity)
         val layers = if (base != null) {
             android.graphics.drawable.LayerDrawable(arrayOf(base, overlay))
         } else {
             overlay
         }
         runCatching { window.setBackgroundDrawable(layers) }
+    }
+
+    /** Слой фактуры под оформление [state]: цвет — оттенок и насыщенность, прозрачность — яркость. */
+    fun surfaceOverlay(
+        context: Context,
+        state: NovaAppearance.State = NovaAppearance.state(context),
+    ): NovaAppearanceDrawable {
+        val alpha = (NovaAppearanceDrawable.TEXTURE_ALPHA * state.brightness /
+            NovaAppearance.BRIGHTNESS_DEFAULT.toFloat()).toInt().coerceIn(0, 255)
+        return NovaAppearanceDrawable(
+            texture = state.texture,
+            accent = NovaAppearance.surfaceColor(state.hue, state.saturation),
+            variant = state.variant,
+            textureAlpha = alpha,
+            rainAlpha = alpha,
+        )
+    }
+
+    /**
+     * Меняет фон **уже созданного** окна на месте: без пересоздания экрана и без
+     * прыжка прокрутки. Так применяются фактура, яркость и насыщенность.
+     */
+    fun refreshSurface(
+        activity: Activity,
+        state: NovaAppearance.State = NovaAppearance.state(activity),
+    ) {
+        val window = activity.window ?: return
+        val base = runCatching {
+            val value = TypedValue()
+            activity.theme.resolveAttribute(android.R.attr.windowBackground, value, true)
+            androidx.core.content.ContextCompat.getDrawable(activity, value.resourceId)
+        }.getOrNull() ?: return
+        val drawable: android.graphics.drawable.Drawable = if (state.texture.hasPattern) {
+            android.graphics.drawable.LayerDrawable(arrayOf(base, surfaceOverlay(activity, state)))
+        } else {
+            base
+        }
+        runCatching { window.setBackgroundDrawable(drawable) }
     }
 
     /**

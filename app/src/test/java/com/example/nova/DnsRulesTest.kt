@@ -156,7 +156,7 @@ class DnsRulesTest {
         // Провайдерский — единственный незашифрованный во всём списке.
         assertEquals(1, defaults.count { !it.encrypted })
         assertEquals(
-            listOf("owner", "comss", "geohide", "cloudflare", "google", "provider"),
+            listOf("owner", "cf", "provider"),
             defaults.map { it.id },
         )
     }
@@ -232,7 +232,7 @@ class DnsRulesTest {
     @Test
     fun `the shipped resolvers ask on whichever transport answers first`() {
         assertEquals(
-            listOf("owner", "comss", "geohide", "cloudflare", "google"),
+            listOf("owner"),
             DnsRulesStore.defaults()
                 .filter { it.transport == DnsRule.Transport.ANY }
                 .map { it.id },
@@ -247,14 +247,15 @@ class DnsRulesTest {
      */
     @Test
     fun `the transport upgrade touches only untouched shipped rules`() {
-        val shipped = DnsRulesStore.defaults().first { it.id == "comss" }
+        // Из умолчаний «любой» остался у нашего резолвера: он единственный выбирает транспорт замером.
+        val shipped = DnsRulesStore.defaults().first { it.id == "owner" }
             .copy(transport = DnsRule.Transport.DOH)
         assertEquals(
             DnsRule.Transport.ANY,
             DnsRulesStore.upgradedToAnyTransport(shipped).transport,
         )
         // Адрес поправлен — строка больше не наша, выбор остаётся за человеком.
-        val edited = shipped.copy(value = "https://dns.comss.one/resolve")
+        val edited = shipped.copy(value = "dns.example.org")
         assertEquals(
             DnsRule.Transport.DOT,
             DnsRulesStore.upgradedToAnyTransport(
@@ -350,7 +351,7 @@ class DnsRulesTest {
             bootstrap = listOf("111.88.96.50", "111.88.96.51"),
             transport = DnsRule.Transport.ANY,
         )
-        val other = DnsRulesStore.defaults().first { it.id == "cloudflare" }
+        val other = DnsRulesStore.defaults().first { it.id == "cf" }
         assertEquals(listOf(other), DnsRulesStore.withoutDeadXboxRule(listOf(xbox, other)))
 
         val edited = xbox.copy(value = "https://my.example/dns-query")
@@ -358,5 +359,41 @@ class DnsRulesTest {
             listOf(edited, other),
             DnsRulesStore.withoutDeadXboxRule(listOf(edited, other)),
         )
+    }
+
+    private fun shippedThirdParty(id: String, url: String) =
+        DnsRule(id = id, kind = DnsRule.Kind.DOH, value = url, transport = DnsRule.Transport.ANY)
+
+    /** D48: встроенные Comss, GeoHide, Cloudflare и Google уходят, чужие и поправленные правки остаются. */
+    @Test
+    fun `migration to v7 drops only the unedited built in third party resolvers`() {
+        val comss = shippedThirdParty("comss", "https://dns.comss.one/dns-query")
+        val geohide = shippedThirdParty("geohide", "https://geohide.ru/dns-query")
+        val cloudflare = shippedThirdParty("cloudflare", "https://cloudflare-dns.com/dns-query")
+        val google = shippedThirdParty("google", "https://dns.google/dns-query")
+        val owner = DnsRulesStore.defaults().first { it.id == "owner" }
+        val provider = DnsRulesStore.defaults().last()
+        // Выключенное встроенное правило тоже уходит: решение владельца — их в списке нет.
+        val all = listOf(owner, comss.copy(enabled = false), geohide, cloudflare, google, provider)
+        assertEquals(listOf(owner, provider), DnsRulesStore.withoutRetiredBuiltIn(all))
+
+        // Правило, которое человек поправил или завёл сам, остаётся (I1).
+        val edited = comss.copy(value = "https://dns.comss.one/other-path")
+        val mine = DnsRule(id = "mine", kind = DnsRule.Kind.DOT, value = "tls://dns.quad9.net")
+        val sameIdOtherHost = google.copy(value = "https://dns.example.org/dns-query")
+        val kept = listOf(owner, edited, mine, sameIdOtherHost, provider)
+        assertEquals(kept, DnsRulesStore.withoutRetiredBuiltIn(kept))
+    }
+
+    @Test
+    fun `the defaults carry no third party resolver and the owner may still add one by hand`() {
+        val defaults = DnsRulesStore.defaults()
+        val hosts = defaults.map { it.value }
+        assertTrue(hosts.none { it.contains("comss") || it.contains("geohide") })
+        assertTrue(hosts.none { it.contains("cloudflare-dns.com") || it.contains("dns.google") })
+        val manual = DnsRule.create(DnsRule.Kind.DOH, "https://dns.quad9.net/dns-query")
+        assertEquals(DnsRule.Transport.ANY, manual?.transport)
+        val set = DnsRuleSet(defaults.take(2) + manual!! + defaults.last(), DnsRouteMode.AUTO)
+        assertTrue(set.upstreams().any { it.startsWith("https://dns.quad9.net/dns-query") })
     }
 }

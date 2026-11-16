@@ -1,216 +1,371 @@
 package com.example.nova
 
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.View
+import android.view.ViewTreeObserver
 import android.widget.Button
-import android.widget.RadioButton
+import android.widget.GridLayout
+import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.SeekBar
+import android.widget.Switch
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 
 /**
- * Экран «Оформление»: тема, фактура и температура — с живым предпросмотром.
+ * Единый экран «Оформление».
  *
- * ## Почему экран, а не диалог
+ * Раньше их было два: «Оформление» (двенадцать тем, фактуры чипами, температура) и
+ * «Фон главного экрана» (три режима). Теперь всё в одном месте, по образцу окна
+ * ПК-версии: плитки фактур, ползунки оттенка, яркости, насыщенности и скорости
+ * погружения, переключатель случайной фактуры при запуске.
  *
- * Тема выбиралась диалогом со списком в столбик. Владелец попросил меню, как у
- * выбора региона на главном экране; заодно в диалог не поместились бы ни
- * пятнадцать фактур, ни ползунок.
+ * ## Как это применяется
  *
- * ## Как устроен предпросмотр
+ * Любое изменение действует **сразу**, без «Применить», и ни одно не поднимает
+ * страницу наверх:
  *
- * Выбор кладётся в [NovaAppearance.preview] — это память процесса, не файл, — и
- * экран пересоздаёт себя. `NovaTheme.current` предпочитает предпросмотр
- * сохранённому, поэтому пересозданный экран рисуется уже по-новому, а ничего
- * записано ещё не было. «Применить» переписывает сохранённое и снимает
- * предпросмотр; уход с экрана снимает его молча.
+ * - плитки, яркость, насыщенность, скорость и переключатель меняют сохранённое и
+ *   фон окна **на месте** ([NovaTheme.refreshSurface]) — экран не пересоздаётся,
+ *   поэтому прокрутка не двигается вовсе;
+ * - оттенок — единственное, что меняет ресурсы (цвета интерфейса), а они выдаются
+ *   окну при создании. Поэтому во время движения пальца перекрашиваются фон и плитки,
+ *   а на отпускании экран пересоздаётся с сохранением позиции прокрутки.
  *
- * `recreate()`, а не точечная перекраска: тема — это ресурсы, они выдаются окну
- * при создании, и половину из них живому экрану не переставить вовсе. Пересоздание
- * стоит один кадр и даёт настоящий вид, а не его приближение.
- *
- * ## Почему выбор не теряется при пересоздании
- *
- * Он и не хранится в экране: единственный его носитель — предпросмотр в
- * [NovaAppearance]. Пересозданный экран читает оттуда же, откуда читает и тема.
+ * Состояние живёт в [NovaAppearance], а не в экране, — пересозданный экран просто
+ * читает его заново.
  */
 class ThemeSettingsActivity : AppCompatActivity() {
 
-    private lateinit var themeGroup: FlowRadioGroup
-    private lateinit var textureGroup: FlowRadioGroup
-    private lateinit var temperatureBar: SeekBar
-    private lateinit var temperatureValue: TextView
-    private lateinit var themeNote: TextView
+    private val main = Handler(Looper.getMainLooper())
+    private val tiles = LinkedHashMap<NovaAppearance.Texture, TextureTileView>()
+    private lateinit var scroll: ScrollView
+    private lateinit var randomSwitch: Switch
 
-    /** Что стояло на входе. Нужно «Отмене» и уходу назад. */
-    private var initialTheme: String = NovaTheme.DEFAULT_KEY
-    private var initialTexture: NovaAppearance.Texture = NovaAppearance.Texture.NONE
-    private var initialTemperature: Int = NovaAppearance.TEMPERATURE_NEUTRAL
+    private lateinit var hueBar: SeekBar
+    private lateinit var brightnessBar: SeekBar
+    private lateinit var saturationBar: SeekBar
+    private lateinit var speedBar: SeekBar
+    private lateinit var hueValue: TextView
+    private lateinit var brightnessValue: TextView
+    private lateinit var saturationValue: TextView
+    private lateinit var speedValue: TextView
 
-    /** Применили ли выбор. Снимать предпросмотр в `onDestroy` тогда не надо. */
-    private var applied = false
+    /** Оттенок, который показывает ползунок, пока он ещё не записан. */
+    private var liveHue = NovaAppearance.DEFAULT_HUE
+
+    /** Рисовать ли плитки и фон по движущемуся ползунку оттенка. */
+    private var draggingHue = false
+
+    private val commitHue = Runnable { commitHueAndRecreate() }
+    private val refreshLook = Runnable { refreshLookNow() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // Тему ставим до super.onCreate: позже окно уже создано со старым фоном.
         NovaTheme.apply(this)
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_theme_settings)
-        findViewById<TextView>(R.id.tv_theme_intro).collapseToInfoIcon()
-        findViewById<TextView>(R.id.tv_texture_hint).collapseToInfoIcon()
         LogManager.setAppContext(this)
+        findViewById<TextView>(R.id.tv_texture_hint).collapseToInfoIcon()
 
-        // Сохранённые значения, а не текущие: «Сбросить» возвращает к тому, что
-        // записано, и переживает любое число пересозданий экрана.
-        initialTheme = NovaAppearance.storedThemeKey(this)
-        initialTexture = NovaAppearance.storedTexture(this)
-        initialTemperature = NovaAppearance.storedTemperature(this)
+        scroll = findViewById(R.id.sv_theme_scroll)
+        liveHue = NovaAppearance.hue(this)
 
-        themeGroup = findViewById(R.id.rg_theme)
-        textureGroup = findViewById(R.id.rg_texture)
-        temperatureBar = findViewById(R.id.sb_temperature)
-        temperatureValue = findViewById(R.id.tv_temperature_value)
-        themeNote = findViewById(R.id.tv_theme_note)
+        buildTiles()
+        buildSliders()
 
-        val accent = NovaTheme.color(this, R.attr.novaAccent)
-        themeGroup.selectionGlowColor = accent
-        textureGroup.selectionGlowColor = accent
+        randomSwitch = findViewById(R.id.sw_random_texture)
+        randomSwitch.isChecked = NovaAppearance.randomOnStart(this)
+        randomSwitch.setOnCheckedChangeListener { _, checked ->
+            NovaAppearance.setRandomOnStart(this, checked)
+            LogManager.log("Оформление: случайная фактура при запуске ${if (checked) "включена" else "выключена"}.")
+        }
+        findViewById<View>(R.id.row_random_texture).setOnClickListener { randomSwitch.toggle() }
 
-        buildThemeChips()
-        buildTextureChips()
-        setupTemperature()
-
-        findViewById<Button>(R.id.btn_temperature_default).let { button ->
+        findViewById<Button>(R.id.btn_appearance_default).let { button ->
             NovaDialogs.styleButton(button, primary = false)
-            button.setOnClickListener {
-                if (NovaAppearance.temperature(this) == NovaAppearance.TEMPERATURE_NEUTRAL) return@setOnClickListener
-                previewWith(temperature = NovaAppearance.TEMPERATURE_NEUTRAL)
-            }
+            button.setOnClickListener { resetToDefaults() }
         }
 
         NovaFontHelper.apply(findViewById(android.R.id.content))
-        if (savedScrollY > 0) {
-            val scroll = findViewById<android.widget.ScrollView>(R.id.sv_theme_scroll)
-            val target = savedScrollY
-            savedScrollY = 0
-            scroll?.viewTreeObserver?.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
-                override fun onPreDraw(): Boolean {
-                    scroll.viewTreeObserver.removeOnPreDrawListener(this)
-                    scroll.scrollTo(0, target)
-                    return true
-                }
-            })
+        restoreScroll()
+    }
+
+    override fun onPause() {
+        // Оттенок, который ещё ждал отпускания, не теряется при уходе назад (I20).
+        if (draggingHue || hasHueChange()) {
+            main.removeCallbacks(commitHue)
+            NovaAppearance.setHue(this, liveHue)
         }
+        super.onPause()
     }
 
     override fun onDestroy() {
-        // Снимать предпросмотр можно только когда экран уходит **насовсем**.
-        //
-        // Дефект, который это чинит: `recreate()` — это уничтожение и создание
-        // заново, причём именно в таком порядке (`performDestroyActivity`, затем
-        // `handleLaunchActivity`). Безусловный сброс в `onDestroy` стирал
-        // предпросмотр за мгновение до того, как новый экран собирался его
-        // прочитать, — и тот поднимался в прежней теме. Снаружи это выглядело как
-        // «нажимаю на тему, ничего не происходит», а «Применить» следом сохраняла
-        // прежний выбор, потому что читала то же пустое место.
-        //
-        // `isFinishing` отличает одно от другого: при уходе назад он `true`, при
-        // пересоздании — `false`.
-        if (!applied && isFinishing) NovaAppearance.clearPreview()
+        main.removeCallbacks(commitHue)
+        main.removeCallbacks(refreshLook)
         super.onDestroy()
     }
 
-    private fun currentThemeKey(): String = NovaAppearance.previewThemeKey() ?: NovaTheme.current(this)
+    // ------------------------------------------------------------------ плитки
 
-    private fun buildThemeChips() {
-        themeGroup.removeAllViews()
-        val current = currentThemeKey()
-        NovaTheme.ORDER.forEachIndexed { index, option ->
-            val chip = RadioButton(this, null, 0, R.style.NovaAppearanceChip).apply {
-                id = 0x7100 + index
-                text = option.title
-                isChecked = option.key == current
-            }
-            themeGroup.addView(chip)
-            chip.setOnClickListener { previewWith(theme = option.key) }
+    private fun buildTiles() {
+        val grid = findViewById<GridLayout>(R.id.gl_textures)
+        grid.removeAllViews()
+        tiles.clear()
+        val state = NovaAppearance.state(this)
+        val gap = (4 * resources.displayMetrics.density).toInt()
+        val unsupported = !MainBackgroundPolicy.isAnimationSupported(this)
+        val textures = NovaAppearance.Texture.entries.filter {
+            // Анимация на слабом устройстве не показывается вовсе: выбрать её нельзя.
+            !(it == NovaAppearance.Texture.CONSTELLATION && unsupported)
         }
-        themeNote.text = NovaTheme.optionFor(current).note
-    }
-
-    private fun buildTextureChips() {
-        textureGroup.removeAllViews()
-        val current = NovaAppearance.texture(this)
-        NovaAppearance.Texture.entries.forEachIndexed { index, texture ->
-            val chip = RadioButton(this, null, 0, R.style.NovaAppearanceChip).apply {
-                id = 0x7200 + index
-                text = texture.title
-                isChecked = texture == current
-            }
-            textureGroup.addView(chip)
-            chip.setOnClickListener {
-                // Касание уже выбранной фактуры — это просьба построить узор
-                // заново: фактура задаёт правило, а не одну картинку. Нажатие на
-                // другую просто переключает, иначе выбор каждый раз выдавал бы
-                // ещё и случайный пересев, и вернуться к увиденному было бы
-                // нельзя.
-                if (texture == current && texture != NovaAppearance.Texture.NONE) {
-                    previewWith(texture = texture, variant = NovaAppearance.variant(this) + 1)
-                } else {
-                    previewWith(texture = texture)
+        textures.forEachIndexed { index, texture ->
+            val cell = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = GridLayout.LayoutParams(
+                    GridLayout.spec(index / COLUMNS),
+                    GridLayout.spec(index % COLUMNS, 1f),
+                ).apply {
+                    width = 0
+                    setMargins(gap, gap, gap, gap)
                 }
             }
+            val tile = TextureTileView(this, texture).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                )
+                contentDescription = texture.title
+                setOnClickListener { onTileClicked(texture) }
+            }
+            val caption = TextView(this).apply {
+                text = texture.title
+                textSize = 12f
+                gravity = android.view.Gravity.CENTER
+                maxLines = 1
+                setPadding(0, gap, 0, 0)
+                setTextColor(NovaTheme.color(this@ThemeSettingsActivity, R.attr.novaTextValue))
+            }
+            cell.addView(tile)
+            cell.addView(caption)
+            grid.addView(cell)
+            tiles[texture] = tile
+        }
+        paintTiles(state)
+    }
+
+    /** Цвета и выбор плиток из [state]; миниатюры достраиваются в фоне. */
+    private fun paintTiles(state: NovaAppearance.State) {
+        val tint = NovaAppearance.surfaceColor(liveHue, state.saturation)
+        val factor = state.brightness / NovaAppearance.BRIGHTNESS_DEFAULT.toFloat()
+        val ground = NovaTheme.color(this, R.attr.novaScreenMid)
+        val accent = NovaTheme.color(this, R.attr.novaAccent)
+        for ((texture, tile) in tiles) {
+            tile.tint = tint
+            tile.alphaFactor = factor
+            tile.ground = ground
+            tile.selectionColor = accent
+            tile.chosen = texture == state.texture
+            if (texture.hasPattern) {
+                // Выбранная плитка показывает свой пересев, остальные — первый.
+                val variant = if (texture == state.texture) state.variant else 0
+                NovaTextureThumbs.request(texture, variant) { bitmap ->
+                    if (!isDestroyed && tiles[texture] === tile &&
+                        (if (texture == NovaAppearance.texture(this)) NovaAppearance.variant(this) else 0) == variant
+                    ) {
+                        tile.mask = bitmap
+                        tile.invalidate()
+                    }
+                }
+            }
+            tile.invalidate()
         }
     }
 
-    private fun setupTemperature() {
-        val span = NovaAppearance.TEMPERATURE_MAX - NovaAppearance.TEMPERATURE_MIN
-        temperatureBar.max = span
-        val current = NovaAppearance.temperature(this)
-        temperatureBar.progress = current - NovaAppearance.TEMPERATURE_MIN
-        renderTemperature(current)
-        temperatureBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+    private fun onTileClicked(texture: NovaAppearance.Texture) {
+        val state = NovaAppearance.state(this)
+        // Касание уже выбранной фактуры — просьба построить узор заново: фактура
+        // задаёт правило, а не одну картинку. Другая плитка просто переключает,
+        // иначе выбор каждый раз выдавал бы ещё и случайный пересев и вернуться к
+        // увиденному было бы нельзя.
+        val variant = if (texture == state.texture && texture.hasPattern) state.variant + 1 else state.variant
+        NovaAppearance.setTexture(this, texture, variant)
+        LogManager.log("Оформление: фактура ${texture.title}.")
+        refreshLookNow()
+    }
+
+    // ------------------------------------------------------------------ ползунки
+
+    private fun buildSliders() {
+        val container = findViewById<LinearLayout>(R.id.ll_sliders)
+        container.removeAllViews()
+        val state = NovaAppearance.state(this)
+
+        val hueRow = addSliderRow(container, "Оттенок")
+        hueBar = hueRow.bar
+        hueValue = hueRow.value
+        hueBar.max = NovaAppearance.HUE_COUNT - 1
+        hueBar.progress = state.hue
+        hueBar.progressDrawable = RainbowTrackDrawable((8 * resources.displayMetrics.density).toInt())
+        hueBar.splitTrack = false
+        renderHue(state.hue)
+        hueBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) {
-                if (fromUser) renderTemperature(progress + NovaAppearance.TEMPERATURE_MIN)
+                if (!fromUser) return
+                liveHue = progress
+                renderHue(progress)
+                main.removeCallbacks(refreshLook)
+                main.postDelayed(refreshLook, LOOK_DEBOUNCE_MS)
+                // Кнопками пульта ползунок не «отпускают» — ждём паузу и применяем.
+                if (!draggingHue) {
+                    main.removeCallbacks(commitHue)
+                    main.postDelayed(commitHue, KEY_COMMIT_MS)
+                }
             }
 
-            override fun onStartTrackingTouch(bar: SeekBar) = Unit
+            override fun onStartTrackingTouch(bar: SeekBar) {
+                draggingHue = true
+                main.removeCallbacks(commitHue)
+            }
 
-            // Предпросмотр — на отпускании: пересоздавать экран на каждый шаг
-            // ползунка значило бы сорок пересозданий на одно движение пальца.
             override fun onStopTrackingTouch(bar: SeekBar) {
-                previewWith(temperature = bar.progress + NovaAppearance.TEMPERATURE_MIN)
+                draggingHue = false
+                main.removeCallbacks(commitHue)
+                commitHueAndRecreate()
+            }
+        })
+
+        val brightnessRow = addSliderRow(container, "Яркость")
+        brightnessBar = brightnessRow.bar
+        brightnessValue = brightnessRow.value
+        bindPlainSlider(brightnessBar, brightnessValue, NovaAppearance.BRIGHTNESS_MAX, state.brightness,
+            { "$it %" }) { NovaAppearance.setBrightness(this, it) }
+
+        val saturationRow = addSliderRow(container, "Насыщенность цвета")
+        saturationBar = saturationRow.bar
+        saturationValue = saturationRow.value
+        bindPlainSlider(saturationBar, saturationValue, NovaAppearance.SATURATION_MAX, state.saturation,
+            { "$it %" }) { NovaAppearance.setSaturation(this, it) }
+
+        val speedRow = addSliderRow(container, "Скорость погружения")
+        speedBar = speedRow.bar
+        speedValue = speedRow.value
+        // Скорость не перерисовывает ничего на этом экране: её читает главный.
+        bindPlainSlider(speedBar, speedValue, NovaAppearance.SPEED_MAX, state.speed,
+            { if (it == 0) "стоит" else "$it %" }, redraw = false) { NovaAppearance.setSpeed(this, it) }
+    }
+
+    private class SliderRow(val bar: SeekBar, val value: TextView)
+
+    private fun addSliderRow(parent: LinearLayout, caption: String): SliderRow {
+        val row = layoutInflater.inflate(R.layout.item_appearance_slider, parent, false)
+        row.findViewById<TextView>(R.id.tv_slider_caption).text = caption
+        parent.addView(row)
+        val bar = row.findViewById<SeekBar>(R.id.sb_slider)
+        // У четырёх ползунков один и тот же id: платформа сохраняла бы их состояние по
+        // id и после пересоздания записала бы значение последнего во все четыре.
+        // Правда о значениях живёт в [NovaAppearance], а не в виде.
+        bar.isSaveEnabled = false
+        return SliderRow(bar, row.findViewById(R.id.tv_slider_value))
+    }
+
+    private fun bindPlainSlider(
+        bar: SeekBar,
+        value: TextView,
+        max: Int,
+        initial: Int,
+        format: (Int) -> String,
+        redraw: Boolean = true,
+        store: (Int) -> Unit,
+    ) {
+        bar.max = max
+        bar.progress = initial
+        value.text = format(initial)
+        bar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seek: SeekBar, progress: Int, fromUser: Boolean) {
+                value.text = format(progress)
+                if (!fromUser) return
+                store(progress)
+                if (redraw) {
+                    main.removeCallbacks(refreshLook)
+                    main.postDelayed(refreshLook, LOOK_DEBOUNCE_MS)
+                }
+            }
+
+            override fun onStartTrackingTouch(seek: SeekBar) = Unit
+            override fun onStopTrackingTouch(seek: SeekBar) = Unit
+        })
+    }
+
+    private fun renderHue(hue: Int) {
+        hueValue.text = NovaAppearanceUi.hueName(hue)
+    }
+
+    // ------------------------------------------------------------------ применение
+
+    /** Применяет оформление к окну и плиткам на месте — без пересоздания и без прокрутки. */
+    private fun refreshLookNow() {
+        main.removeCallbacks(refreshLook)
+        val stored = NovaAppearance.state(this)
+        val shown = stored.copy(hue = liveHue)
+        NovaTheme.refreshSurface(this, shown)
+        paintTiles(shown)
+    }
+
+    private fun hasHueChange(): Boolean = liveHue != NovaAppearance.hue(this)
+
+    /** Записывает оттенок и пересоздаёт экран, сохранив позицию прокрутки. */
+    private fun commitHueAndRecreate() {
+        if (!hasHueChange()) return
+        NovaAppearance.setHue(this, liveHue)
+        LogManager.log("Оформление: оттенок $liveHue (${NovaAppearanceUi.hueName(liveHue)}).")
+        savedScrollY = scroll.scrollY
+        recreate()
+    }
+
+    private fun resetToDefaults() {
+        NovaAppearance.setBrightness(this, NovaAppearance.BRIGHTNESS_DEFAULT)
+        NovaAppearance.setSaturation(this, NovaAppearance.SATURATION_DEFAULT)
+        NovaAppearance.setSpeed(this, NovaAppearance.SPEED_DEFAULT)
+        NovaAppearance.setRandomOnStart(this, true)
+        LogManager.log("Оформление: ползунки возвращены к умолчаниям.")
+        val hueChanges = NovaAppearance.hue(this) != NovaAppearance.DEFAULT_HUE
+        liveHue = NovaAppearance.DEFAULT_HUE
+        if (hueChanges) {
+            NovaAppearance.setHue(this, NovaAppearance.DEFAULT_HUE)
+            savedScrollY = scroll.scrollY
+            recreate()
+            return
+        }
+        brightnessBar.progress = NovaAppearance.BRIGHTNESS_DEFAULT
+        saturationBar.progress = NovaAppearance.SATURATION_DEFAULT
+        speedBar.progress = NovaAppearance.SPEED_DEFAULT
+        randomSwitch.isChecked = true
+        refreshLookNow()
+    }
+
+    /** Возвращает прокрутку после пересоздания: оттенок не должен поднимать страницу наверх. */
+    private fun restoreScroll() {
+        val target = savedScrollY
+        if (target <= 0) return
+        savedScrollY = 0
+        scroll.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                scroll.viewTreeObserver.removeOnPreDrawListener(this)
+                scroll.scrollTo(0, target)
+                return true
             }
         })
     }
 
-    private fun renderTemperature(value: Int) {
-        temperatureValue.text = when {
-            value == NovaAppearance.TEMPERATURE_NEUTRAL -> "нейтрально"
-            value < 0 -> "теплее ${-value} %"
-            else -> "холоднее $value %"
-        }
-    }
+    private companion object {
+        const val COLUMNS = 3
+        const val LOOK_DEBOUNCE_MS = 30L
+        const val KEY_COMMIT_MS = 600L
 
-    /**
-     * Применяет выбор сразу: записывает и пересоздаёт экран. Кнопки «Применить»
-     * больше нет. Незаданные значения берутся из сохранённого.
-     */
-    private fun previewWith(
-        theme: String = currentThemeKey(),
-        texture: NovaAppearance.Texture = NovaAppearance.texture(this),
-        temperature: Int = NovaAppearance.temperature(this),
-        variant: Int = NovaAppearance.variant(this),
-    ) {
-        NovaAppearance.store(this, theme, texture, temperature, variant)
-        LogManager.log(
-            "Оформление: тема ${NovaTheme.optionFor(theme).title}, фактура ${texture.title}, " +
-                "температура $temperature."
-        )
-        // Пересоздание поднимало страницу наверх: запоминаем позицию прокрутки.
-        savedScrollY = findViewById<android.widget.ScrollView>(R.id.sv_theme_scroll)?.scrollY ?: 0
-        recreate()
-    }
-
-    companion object {
         /** Позиция прокрутки на время пересоздания экрана. */
-        private var savedScrollY = 0
+        var savedScrollY = 0
     }
 }

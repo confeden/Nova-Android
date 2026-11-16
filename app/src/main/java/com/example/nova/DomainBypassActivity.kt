@@ -94,6 +94,7 @@ class DomainBypassActivity : AppCompatActivity() {
         LogManager.setAppContext(this)
         setContentView(R.layout.activity_domain_bypass)
         NovaFontHelper.apply(findViewById(android.R.id.content))
+        findViewById<TextView>(R.id.tv_domain_bypass_how).collapseToInfoIcon()
 
         clientData = ClientData(this)
 

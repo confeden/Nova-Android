@@ -4,16 +4,13 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ColorFilter
-import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffColorFilter
 import android.graphics.Rect
-import android.graphics.Shader
 import android.graphics.drawable.Drawable
 import android.os.SystemClock
-import kotlin.math.abs
 
 /**
  * Фактура поверхности и температура оттенка — слой поверх фона темы.
@@ -53,19 +50,20 @@ import kotlin.math.abs
  *
  * Растр хранит только прозрачность: рисунок белый, а цвет ему даёт акцент темы
  * через `PorterDuff.SRC_IN`. Поэтому один и тот же рисунок годится всем
- * двенадцати темам, и смена темы кэш не сбрасывает.
+ * всем оттенкам, и смена оттенка кэш не сбрасывает.
  *
- * ## Температура
+ * ## Яркость и насыщенность
  *
- * Отдельный слой поверх фактуры: тёплый край — янтарь, холодный — лёд, ноль —
- * ничего. Прозрачность растёт линейно до 14 % на краю шкалы: это оттенок, под
- * которым читается текст, а не светофильтр.
+ * Яркость — прозрачность узора ([textureAlpha]), насыщенность — цвет, которым он
+ * окрашен ([accent]). Оба приходят снаружи готовыми числами: сам слой ничего не
+ * читает из настроек и поэтому не знает, откуда взялся его вид.
  */
 class NovaAppearanceDrawable(
     private val texture: NovaAppearance.Texture,
-    private val temperature: Int,
     private val accent: Int,
     private val variant: Int,
+    /** Прозрачность растрового узора 0..255 (ползунок яркости). */
+    private val textureAlpha: Int = TEXTURE_ALPHA,
     /** Залить чёрным под дождём: главный экран так и делал растром. */
     private val blackBase: Boolean = false,
     /** Прозрачность дождя; по умолчанию как у вуали на экранах настроек. */
@@ -81,9 +79,7 @@ class NovaAppearanceDrawable(
     private val blackPaint = Paint().apply { color = Color.BLACK }
 
     private val texturePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-    private val washPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val rainPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private var washShader: Shader? = null
 
     /** Следующий кадр живого дождя. */
     private val frameTick = Runnable { invalidateSelf() }
@@ -101,7 +97,7 @@ class NovaAppearanceDrawable(
         // дороже, чем задать оба.
         texturePaint.color = accent
         texturePaint.colorFilter = PorterDuffColorFilter(accent, PorterDuff.Mode.SRC_IN)
-        texturePaint.alpha = TEXTURE_ALPHA
+        texturePaint.alpha = textureAlpha
     }
 
     /**
@@ -113,7 +109,6 @@ class NovaAppearanceDrawable(
      */
     override fun onBoundsChange(bounds: Rect) {
         super.onBoundsChange(bounds)
-        washShader = buildWash(bounds)
         requestPattern(bounds)
     }
 
@@ -131,10 +126,6 @@ class NovaAppearanceDrawable(
         requestPattern(bounds)
         pattern?.let { bitmap ->
             if (!bitmap.isRecycled) canvas.drawBitmap(bitmap, null, bounds, texturePaint)
-        }
-        washShader?.let { shader ->
-            washPaint.shader = shader
-            canvas.drawRect(bounds, washPaint)
         }
     }
 
@@ -194,10 +185,6 @@ class NovaAppearanceDrawable(
         if (alpha < 255) canvas.saveLayerAlpha(null, alpha)
         if (blackBase) canvas.drawRect(bounds, blackPaint)
         drawRain(canvas, bounds, time)
-        washShader?.let { shader ->
-            washPaint.shader = shader
-            canvas.drawRect(bounds, washPaint)
-        }
         canvas.restoreToCount(checkpoint)
     }
 
@@ -225,7 +212,7 @@ class NovaAppearanceDrawable(
     }
 
     private fun requestPattern(bounds: Rect) {
-        if (texture == NovaAppearance.Texture.NONE) return
+        if (!texture.hasPattern) return
         if (texture == NovaAppearance.Texture.MATRIX) return
         val width = bounds.width()
         val height = bounds.height()
@@ -248,44 +235,12 @@ class NovaAppearanceDrawable(
         }
     }
 
-    /**
-     * Температурная заливка: сверху насыщеннее, книзу сходит на нет.
-     *
-     * Ровная заливка во весь экран читается как плёнка поверх приложения;
-     * градиент — как освещение, а именно им температура и является.
-     */
-    private fun buildWash(bounds: Rect): Shader? {
-        if (temperature == NovaAppearance.TEMPERATURE_NEUTRAL || bounds.isEmpty) return null
-        val strength = abs(temperature).coerceAtMost(100) / 100f
-        val tint = if (temperature < 0) WARM_TINT else COLD_TINT
-        val top = Color.argb(
-            (strength * WASH_MAX_ALPHA).toInt().coerceIn(0, 255),
-            Color.red(tint),
-            Color.green(tint),
-            Color.blue(tint),
-        )
-        val bottom = Color.argb(
-            (strength * WASH_MAX_ALPHA * 0.35f).toInt().coerceIn(0, 255),
-            Color.red(tint),
-            Color.green(tint),
-            Color.blue(tint),
-        )
-        return LinearGradient(
-            0f, bounds.top.toFloat(), 0f, bounds.bottom.toFloat(),
-            top, bottom,
-            Shader.TileMode.CLAMP,
-        )
-    }
-
     companion object {
 
-        private const val TEXTURE_ALPHA = 56
-        private const val WASH_MAX_ALPHA = 36f
+        /** Прозрачность узора на экранах настроек при яркости по умолчанию. */
+        const val TEXTURE_ALPHA = 56
 
         /** Около пятнадцати кадров в секунду: дождю не нужна плавность выше, а CPU нужен экономный. */
         private const val RAIN_FRAME_MS = 66L
-
-        private val WARM_TINT = Color.rgb(255, 168, 74)
-        private val COLD_TINT = Color.rgb(96, 170, 255)
     }
 }

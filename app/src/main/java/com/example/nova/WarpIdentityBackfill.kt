@@ -41,6 +41,7 @@ object WarpIdentityBackfill {
         tunnelStillUp: () -> Boolean,
         ignoreCooldown: Boolean = false,
         onIdentityReady: () -> Unit = {},
+        awaitWindow: () -> AutoCloseable? = { AutoCloseable { } },
     ) {
         val clientData = ClientData(context)
         if (!clientData.shouldAttemptWarpIdentityBackfill(ignoreCooldown = ignoreCooldown)) return
@@ -48,9 +49,14 @@ object WarpIdentityBackfill {
 
         Thread(
             {
+                var permit: AutoCloseable? = null
                 try {
                     Thread.sleep(SETTLE_DELAY_MS)
                     if (!tunnelStillUp()) return@Thread
+                    // Ворота (D45): не во время загрузки, не на слабом канале, не в роуминге,
+                    // не при экономии заряда или трафика. Не дождались — тихо уходим, на
+                    // неудачу это не записывается: сердцебиение зайдёт снова.
+                    permit = awaitWindow() ?: return@Thread
                     // Состояние могло измениться за время паузы: например,
                     // личность пришла обычным путём при переподключении.
                     if (!clientData.shouldAttemptWarpIdentityBackfill(ignoreCooldown = ignoreCooldown)) return@Thread
@@ -166,6 +172,9 @@ object WarpIdentityBackfill {
                         return@Thread
                     }
                     clientData.saveMasqueConfigJson(masqueJson)
+                    // Ключ MASQUE, раз выпущенный, автоматика больше не трогает: повторная
+                    // регистрация отобрала бы ключ у живой сессии (сервер хранит последний).
+                    runCatching { ProfileIssueLedger(context).noteIssued(ProfileIssuePolicy.Kind.MASQUE) }
                     // Ключ есть — сообщаем службе. Если туннель поднимался только ради
                     // регистрации, ждать «следующего подключения» пользователю не надо.
                     onIdentityReady()
@@ -179,6 +188,7 @@ object WarpIdentityBackfill {
                     ClientData(context).markWarpIdentityBackfillFailure()
                     logger("Фоновая регистрация через туннель прервалась: ${e.message}")
                 } finally {
+                    runCatching { permit?.close() }
                     running.set(false)
                 }
             },

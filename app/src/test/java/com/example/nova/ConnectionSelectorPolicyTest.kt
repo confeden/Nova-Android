@@ -22,13 +22,23 @@ class ConnectionSelectorPolicyTest {
         // Порядок кода, а не разметки: masque третий. Разъедется — сломается и
         // главный экран, и настройки, каждый по-своему.
         assertEquals(
-            listOf("auto", "ru", "masque", "opera", "proton", "nova", "tor", "dns"),
+            listOf("auto", "nova", "ru", "masque", "opera", "proton", "tor", "dns"),
             ConnectionSelectorPolicy.ORDER,
         )
         assertEquals(
-            listOf("AUTO", "WARP", "MASQUE", "OPERA", "PROTON", "NOVA", "TOR", "DNS"),
+            listOf("AUTO", "NOVA", "WARP", "MASQUE", "OPERA", "PROTON", "TOR", "WHITE"),
             ConnectionSelectorPolicy.LABELS,
         )
+    }
+
+    /** Владелец 2026-11-14: NOVA > WARP (cf awg) > MASQUE > OPERA > PROTON > TOR > DNS, по две минуты на режим. */
+    @Test
+    fun `auto mode order follows the owner priority and each mode gets two minutes`() {
+        assertEquals(
+            listOf("nova", "ru", "masque", "opera", "proton", "tor", "dns"),
+            ConnectionSelectorPolicy.AUTO_MODE_ORDER,
+        )
+        assertEquals(120L, ConnectionSelectorPolicy.AUTO_MODE_BUDGET_SEC)
     }
 
     /**

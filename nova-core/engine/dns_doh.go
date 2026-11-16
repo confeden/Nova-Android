@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -40,9 +42,17 @@ type dohUpstream struct {
 	host      string
 	port      string
 	bootstrap []string
+	// get — слать запрос методом GET (`?dns=<base64url>`, RFC 8484 §4.1.1). Нужен личным
+	// ссылкам DNS-AI: CDN за ними на POST отвечает 413.
+	get bool
+	// attempt — стратегия и закреплённый адрес для прямого пути с обфускацией (nil у остальных путей).
+	attempt *dnsAttempt
 }
 
 const dohBootstrapSeparator = "|"
+
+// dohRootCAs — корни для проверки сертификата DoH-сервера; nil = системные. Меняется только в тестах.
+var dohRootCAs *x509.CertPool
 
 // Клиенты кэшируются по строке апстрима: keep-alive соединение экономит TLS-
 // рукопожатие на каждом запросе, а без него DoH проигрывал бы UDP по задержке
@@ -120,7 +130,16 @@ func protectRawConn(rawConn syscall.RawConn) error {
 // `via=auto` один и тот же URL опрашивается и мимо туннеля, и через него, и
 // общий keep-alive означал бы, что второй путь измеряет соединение первого.
 func dohClientFor(upstream *dohUpstream, route dnsUpstreamRoute, timeout time.Duration) *http.Client {
+	// Клиент кэшируется, а его таймауты зашиваются при создании: поздний кандидат гонки получает
+	// остаток бюджета в 200 мс, и с ним же клиент остался бы жить. Срок отдельного запроса держит
+	// контекст в resolveDNSViaDoh, здесь — потолок.
+	if route == dnsRouteDirectObfs && timeout < obfsDirectMaxBudget {
+		timeout = obfsDirectMaxBudget
+	}
 	key := routeKey(upstream.raw, route)
+	if upstream.attempt != nil {
+		key += "#" + upstream.attempt.key()
+	}
 	dohClientsMu.Lock()
 	defer dohClientsMu.Unlock()
 	if client, ok := dohClients[key]; ok {
@@ -141,6 +160,27 @@ func dohClientFor(upstream *dohUpstream, route dnsUpstreamRoute, timeout time.Du
 		},
 	}
 	bootstrap := append([]string(nil), upstream.bootstrap...)
+	var strat *obfsStrategy
+	if upstream.attempt != nil {
+		strat = upstream.attempt.strat
+		if upstream.attempt.pin != "" {
+			bootstrap = []string{upstream.attempt.pin}
+		}
+	}
+	// HTTP/1.1 вместо h2: попытка прямого пути просит его сама, а прямой путь без попытки (via=direct,
+	// auto) берёт его у хостов, которым он нужен (obfsPrefersHTTP1). Туннельный путь остаётся на h2.
+	useH1 := false
+	if upstream.attempt != nil {
+		useH1 = upstream.attempt.h1
+	} else if route != dnsRouteTunnel {
+		useH1 = obfsPrefersHTTP1(upstream.host)
+	}
+	nextProtos := []string{"h2", "http/1.1"}
+	idlePerHost := 2
+	if useH1 {
+		nextProtos = []string{"http/1.1"}
+		idlePerHost = 4
+	}
 	transport := &http.Transport{
 		Proxy: nil,
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -153,13 +193,13 @@ func dohClientFor(upstream *dohUpstream, route dnsUpstreamRoute, timeout time.Du
 				if dialErr != nil {
 					return nil, dialErr
 				}
-				return obfuscateDNSConn(conn, route), nil
+				return obfuscateDNSConn(conn, route, strat), nil
 			}
 			var lastErr error
 			for _, ip := range bootstrap {
 				conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
 				if dialErr == nil {
-					return obfuscateDNSConn(conn, route), nil
+					return obfuscateDNSConn(conn, route, strat), nil
 				}
 				lastErr = dialErr
 			}
@@ -174,13 +214,20 @@ func dohClientFor(upstream *dohUpstream, route dnsUpstreamRoute, timeout time.Du
 		TLSClientConfig: &tls.Config{
 			ServerName: upstream.host,
 			MinVersion: tls.VersionTLS12,
-			NextProtos: []string{"h2", "http/1.1"},
+			NextProtos: nextProtos,
+			RootCAs:    dohRootCAs,
 		},
 		TLSHandshakeTimeout:   timeout,
 		ResponseHeaderTimeout: timeout,
 		MaxIdleConns:          4,
-		MaxIdleConnsPerHost:   2,
+		MaxIdleConnsPerHost:   idlePerHost,
 		IdleConnTimeout:       90 * time.Second,
+	}
+	if useH1 {
+		// Пустая, но не nil карта выключает автоподключение h2 у http.Transport.
+		transport.ForceAttemptHTTP2 = false
+		transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+		transport.MaxConnsPerHost = 8
 	}
 	client := &http.Client{Transport: transport}
 	dohClients[key] = client
@@ -206,6 +253,36 @@ func resetDohClients() {
 	}
 }
 
+// newDohRequest собирает запрос DoH: GET с `?dns=` для личных ссылок (у них POST режется кодом
+// 413), POST с телом для остальных. Метод выбирается только здесь.
+func newDohRequest(ctx context.Context, upstream *dohUpstream, body []byte) (*http.Request, error) {
+	if upstream.get {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, dohGetURL(upstream.url, body), nil)
+		if err != nil {
+			return nil, err
+		}
+		request.Header.Set("Accept", "application/dns-message")
+		return request, nil
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, upstream.url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/dns-message")
+	request.Header.Set("Accept", "application/dns-message")
+	request.ContentLength = int64(len(body))
+	return request, nil
+}
+
+// dohGetURL дописывает к адресу DoH запрос в параметре `dns` — base64url без заполнения.
+func dohGetURL(base string, query []byte) string {
+	separator := "?"
+	if strings.Contains(base, "?") {
+		separator = "&"
+	}
+	return base + separator + "dns=" + base64.RawURLEncoding.EncodeToString(query)
+}
+
 // resolveDNSViaDoh отправляет перехваченный запрос по RFC 8484.
 //
 // Идентификатор транзакции обнуляется на время запроса (так требует §4.1: он
@@ -222,13 +299,10 @@ func resolveDNSViaDoh(query []byte, upstream *dohUpstream, route dnsUpstreamRout
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, upstream.url, bytes.NewReader(body))
+	request, err := newDohRequest(ctx, upstream, body)
 	if err != nil {
 		return nil, err
 	}
-	request.Header.Set("Content-Type", "application/dns-message")
-	request.Header.Set("Accept", "application/dns-message")
-	request.ContentLength = int64(len(body))
 
 	response, err := dohClientFor(upstream, route, timeout).Do(request)
 	if err != nil {

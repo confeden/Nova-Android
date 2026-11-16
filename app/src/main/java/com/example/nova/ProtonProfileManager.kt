@@ -54,7 +54,13 @@ object ProtonProfileManager {
     }
 
     /** Итог прогона: доведён ли набор до цели и к чему подключаться. */
-    data class Outcome(val profiles: List<ProtonProfile>, val message: String, val ready: Boolean)
+    data class Outcome(
+        val profiles: List<ProtonProfile>,
+        val message: String,
+        val ready: Boolean,
+        /** Набор выпущен в этом прогоне (а не отдан из кэша и не оставлен прежним). */
+        val issued: Boolean = false,
+    )
 
     private val running = AtomicBoolean(false)
     private val lastStatus = AtomicReference("")
@@ -214,6 +220,15 @@ object ProtonProfileManager {
         leaseStore = store
         lastLoggedStep.set("")
         worker.execute {
+            // Фоновый прогон — в низком приоритете: он идёт под живым туннелем и не должен
+            // отнимать процессор у самого туннеля (D45). Нить общая, поэтому приоритет
+            // выставляется заново на каждый прогон, в обе стороны.
+            runCatching {
+                android.os.Process.setThreadPriority(
+                    if (background) android.os.Process.THREAD_PRIORITY_BACKGROUND
+                    else android.os.Process.THREAD_PRIORITY_DEFAULT
+                )
+            }
             // Заход мимо собственного туннеля живёт ровно столько, сколько прогон.
             //
             // Владелец попросил, чтобы профили получались и без VPN, и при
@@ -239,6 +254,10 @@ object ProtonProfileManager {
                 // TLS-рукопожатие.
                 runCatching { ProtonRelay.shutdown() }
                 running.set(false)
+            }
+            // Метка версии — только за настоящий выпуск; кэш и «оставили прежний» её не ставят.
+            if (outcome.issued && outcome.ready) {
+                runCatching { ProfileIssueLedger(appContext).noteIssued(ProfileIssuePolicy.Kind.PROTON) }
             }
             publish(outcome.message)
             onFinished?.let { runCatching { it(outcome) } }
@@ -346,40 +365,21 @@ object ProtonProfileManager {
         val certAlive = account != null &&
             account.certExpiresAt > System.currentTimeMillis() + CERT_RENEW_MARGIN_MS
 
-        // Сохранённый список принимается измеренным — **или недавно померенным**.
+        // Раз набор уже выпускали, автоматика и явный выбор региона в сеть не идут.
         //
-        // «Только измеренный» было бы верно, если бы неудачный замер значил «ещё
-        // не мерили». Он значит другое: на сети, где узлы Proton не отвечают на
-        // пробу (открытый P11, а на части сетей молчит и запасной TCP по 443),
-        // измеренным набор не станет никогда — и каждый вызов с экрана заводил
-        // полный сорокасекундный прогон, который заканчивался тем же списком в
-        // том же порядке нагрузки. Фоновая подготовка от этого защищена давно:
-        // `isPreparationComplete` замер намеренно не проверяет. Здесь та же
-        // защита, но с повтором по времени, чтобы прежнее опасение осталось
-        // закрытым — неудачный замер не закрепляется навсегда, сеть меняется, и
-        // через час замер идёт снова (`PROBE_REFRESH_MS`).
-        val measured = existing.any { it.pingMs > 0 }
-        val probeRetryDue =
-            System.currentTimeMillis() - store.readProbeCheckedAt() > ProtonProfileStore.PROBE_REFRESH_MS
-        // Устаревший **живой** список явный выбор не задерживает.
+        // Набор не обновляется ни по возрасту списка узлов, ни по сроку сертификата, ни
+        // по замеру: повторная регистрация и новая генерация — только `force` (кнопка
+        // «обновить» в настройках). Свежесть списка узлов обеспечивает лента
+        // ([ProtonNodeFeed]), она не регистрирует ничего. Тот же предикат у фоновой
+        // подготовки ([hasIssuedSet]), поэтому цикла «подготовка работу заводит, прогон
+        // отдаёт кэш» нет.
         //
-        // Живой список теперь устаревает за сутки (`LIVE_NODES_REFRESH_MS`), и без этой
-        // оговорки нажатие PROTON раз в сутки снова уходило бы в сеть — сессия, список,
-        // замер до двух минут под «РЕГИСТРАЦИЯ PROTON» — там, где набор полон и
-        // подключаться можно сразу. Обновление достаётся фоновой подготовке: она
-        // спрашивает тот же `needsLiveNodes` (`preparationGap`), идёт через 30 с после
-        // подключения и заходит сюда с `background = true`, где быстрого пути для
-        // устаревшего списка нет, — поэтому и цикла «подготовка считает работу
-        // незаконченной, прогон отдаёт кэш» не возникает. Встроенный список по-прежнему
-        // обновляется и по явному выбору: с него человек и уходит на живой.
-        val liveListMerelyStale = !background &&
-            store.readNodesSource() == ProtonProfileStore.NODES_LIVE
-        if (!force &&
-            (!needsLiveNodes(store) || liveListMerelyStale) &&
-            certAlive &&
-            existing.size >= TARGET_COUNT &&
-            (measured || !probeRetryDue)
-        ) {
+        // D45: набор, выпущенный более старой версией приложения, обновляет **фоновый**
+        // прогон — один раз на версию, под воротами и с паузами (см. [ProfileIssuePolicy]).
+        // Выбор Proton с экрана такой набор не трогает и не заставляет человека ждать:
+        // прежний набор рабочий.
+        val staleForBackground = background && backgroundIssueDecision(context).go
+        if (!force && existing.isNotEmpty() && account != null && !staleForBackground) {
             // Их могло накопиться больше цели — оставляем лучшие и не ходим в сеть.
             val trimmed = existing.sortedBy { effectivePing(it) }.take(PROFILE_LIMIT)
             if (trimmed.size != existing.size) store.writeProfiles(trimmed)
@@ -395,6 +395,13 @@ object ProtonProfileManager {
                 },
                 ready = true,
             )
+        }
+
+        // Попытка записывается до первого запроса в сеть: упавший прогон иначе не оставил бы
+        // следа, и пауза между попытками не росла бы. Успех обнуляет счётчик. Ручной
+        // `force` пауз не знает и попыток не копит.
+        if (!force) {
+            runCatching { ProfileIssueLedger(context).noteAttempt(ProfileIssuePolicy.Kind.PROTON) }
         }
 
         val device = account?.device ?: ProtonProfileStore.buildDeviceProfile()
@@ -647,7 +654,7 @@ object ProtonProfileManager {
                     0,
                 )
             )
-            return Outcome(fallback, "Proton: ${fallback.size} шт., замер не прошёл", true)
+            return Outcome(fallback, "Proton: ${fallback.size} шт., замер не прошёл", true, issued = true)
         }
 
         val alive = store.readProbeState()?.alive ?: 0
@@ -659,79 +666,72 @@ object ProtonProfileManager {
                 selected,
                 "Proton: ${selected.size} шт., замер не прошёл",
                 true,
+                issued = true,
             )
             selected.size < TARGET_COUNT -> Outcome(
                 selected,
                 "Proton: только ${selected.size} из $TARGET_COUNT",
                 true,
+                issued = true,
             )
             else -> Outcome(
                 selected,
                 "Proton: готово, ${selected.size} шт., лучший ${selected.first().pingMs} мс",
                 true,
+                issued = true,
             )
         }
     }
 
     /**
-     * Есть ли всё, без чего выбор Proton не поднимется: личность, живой сертификат,
-     * полный набор профилей и не устаревший список узлов.
+     * Есть ли у установки набор профилей Proton.
      *
-     * Замер сюда **намеренно не входит**, хотя [run] без него в сеть всё-таки идёт.
-     * Разница по назначению: у прогона замер — это ранжирование, и переделать его при
-     * явном выборе полезно. А для фоновой подготовки «замер не прошёл» — это
-     * состояние сети, а не незаконченная работа: на сети, где узлы Proton не отвечают
-     * на пробу (открытый P11), список никогда не станет измеренным, и подготовка
-     * заводила бы полный сорокасекундный прогон каждые пятнадцать минут до конца
-     * сеанса, ничего этим не меняя.
+     * Профили выпускаются автоматически **один раз** на установку (владелец,
+     * 2026-11-11): раньше фоновая подготовка шла за свежим списком раз в сутки, а при
+     * сертификате, истекающем в течение месяца, регистрировалась заново. Теперь, раз
+     * набор есть, повторная регистрация и новая генерация — только ручной кнопкой
+     * («обновить» в настройках, `force = true`).
+     *
+     * Предикат один на [run] и на фоновую подготовку намеренно: разойдись они — и
+     * подготовка считала бы работу незаконченной, а прогон отдавал бы набор из кэша,
+     * и так на каждом сердцебиении службы.
      */
     fun isPreparationComplete(context: Context): Boolean = preparationGap(context) == null
 
     /** Чего не хватает подготовке, см. [preparationGap]. */
     enum class PreparationGap {
-        /** Нет личности, сертификат истекает или профилей меньше цели. */
+        /** Профилей ещё не выпускали: нет личности или набор пуст. */
         NO_PROFILES,
-
-        /** Набор полон, но список узлов пора обновить. */
-        NODE_LIST_STALE,
     }
 
+    /** Чего не хватает подготовке; null — набор уже выпускали, автоматика его не трогает. */
+    fun preparationGap(context: Context): PreparationGap? =
+        if (hasIssuedSet(ProtonProfileStore(context))) null else PreparationGap.NO_PROFILES
+
     /**
-     * Чего не хватает подготовке; null — хватает всего.
-     *
-     * Причина отдаётся тем же предикатом, что решает [isPreparationComplete], а не
-     * угадывается у вызывающего. С устареванием живого списка фоновый прогон стал
-     * заводиться и при полном наборе профилей, и строка «готовых профилей нет»
-     * говорила бы тогда неправду (I4).
+     * Решение для **фонового** выпуска: нужен ли он сейчас и можно ли (версия, паузы,
+     * потолок попыток). Не путать с [preparationGap]: тот отвечает «есть ли хоть какой-то
+     * набор» и от версии не зависит.
      */
-    fun preparationGap(context: Context): PreparationGap? {
+    fun backgroundIssueDecision(context: Context): ProfileIssuePolicy.Decision {
         val store = ProtonProfileStore(context)
-        val account = store.readAccount() ?: return PreparationGap.NO_PROFILES
-        if (account.certExpiresAt <= System.currentTimeMillis() + CERT_RENEW_MARGIN_MS) {
-            return PreparationGap.NO_PROFILES
+        val hasSet = hasIssuedSet(store)
+        val ledger = ProfileIssueLedger(context)
+        val byVersion = ledger.decide(ProfileIssuePolicy.Kind.PROTON, hasSet)
+        if (byVersion.verdict != ProfileIssuePolicy.Verdict.NOT_NEEDED) return byVersion
+        // Сертификат Proton живёт около года и сам не обновляется (зазор D40). Набор текущей
+        // версии с истекающим сертификатом обновляется тем же фоновым прогоном, но только с
+        // паузами: «как будто набора нет» для счётчика попыток, без потолка обновлений.
+        val account = store.readAccount()
+        if (account != null && account.certExpiresAt <= System.currentTimeMillis() + CERT_RENEW_MARGIN_MS) {
+            return ledger.decide(ProfileIssuePolicy.Kind.PROTON, hasSet = false)
+                .copy(reason = "сертификат Proton истекает", upgrade = true)
         }
-        if (store.readProfiles().size < TARGET_COUNT) return PreparationGap.NO_PROFILES
-        if (needsLiveNodes(store)) return PreparationGap.NODE_LIST_STALE
-        return null
+        return byVersion
     }
 
-    /**
-     * Пора ли снова пытаться получить **живой** список узлов.
-     *
-     * Тот же предикат стоит и в [run], и в [isPreparationComplete], и это не
-     * дублирование, а условие их согласия. Разойдись они — и получается вечный
-     * цикл: подготовка считает работу незаконченной и заводит прогон, прогон
-     * считает набор готовым и возвращается из кэша, не сходив в сеть и ничего не
-     * изменив, — и так на каждом сердцебиении службы, то есть раз в 45-120 с весь
-     * сеанс. Именно поэтому отметка времени пишется на **каждую** попытку, а не на
-     * удачную: без этого предикат никогда не перестал бы быть истинным.
-     */
-    private fun needsLiveNodes(store: ProtonProfileStore): Boolean =
-        ProtonProfileStore.nodesListStale(
-            source = store.readNodesSource(),
-            checkedAtMs = store.readNodesCheckedAt(),
-            nowMs = System.currentTimeMillis(),
-        )
+    private fun hasIssuedSet(store: ProtonProfileStore): Boolean =
+        store.readAccount() != null && store.readProfiles().isNotEmpty()
 
     /** Итог прогона, у которого аренду забрал явный выбор пользователя. */
     private fun preempted(): Outcome {

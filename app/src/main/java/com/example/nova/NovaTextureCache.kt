@@ -96,7 +96,7 @@ internal object NovaTextureCache {
      * `onReady` — **из фонового потока**, так что трогать виды в нём нельзя.
      */
     fun request(key: Key, onReady: (Bitmap?) -> Unit): Bitmap? {
-        if (key.texture == NovaAppearance.Texture.NONE) return null
+        if (!key.texture.hasPattern) return null
         synchronized(cache) {
             cache[key]?.let { return it }
             if (failed.contains(key)) return null

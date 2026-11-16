@@ -140,6 +140,12 @@ class SettingsActivity : AppCompatActivity() {
 
     private var suppressAutostartSwitchCallback = false
 
+    // MIUI применяет выбранный режим «Контроля активности» и автозапуск не в момент
+    // нажатия, а когда системный экран закрывается (проверено на MIUI 12.5: до выхода
+    // с экрана список исключений из экономии не меняется, после — меняется за
+    // секунды). Один чтение в onResume попадает раньше записи, и переключатель врёт.
+    private val backgroundStateHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
     private var suppressQuickTileSwitchCallback = false
 
     private val uiRefreshHandler = Handler(Looper.getMainLooper())
@@ -147,6 +153,8 @@ class SettingsActivity : AppCompatActivity() {
     private val reapplyHandler = Handler(Looper.getMainLooper())
 
     private var lastTelegramOpenAtMs: Long = 0L
+
+    private var lastDonateOpenAtMs: Long = 0L
 
     private var latestMaskHostFromBroadcast: String = ""
 
@@ -479,8 +487,6 @@ class SettingsActivity : AppCompatActivity() {
 
         val tvWarpConfigsNote = findViewById<TextView>(R.id.tv_warp_configs_note)
 
-        val rowMainBackground = findViewById<LinearLayout>(R.id.row_main_background)
-
         val rowDnsSettings = findViewById<LinearLayout>(R.id.row_dns_settings)
 
         val rowNotificationSettings = findViewById<LinearLayout>(R.id.row_notification_settings)
@@ -537,9 +543,13 @@ class SettingsActivity : AppCompatActivity() {
 
         setupFooterLink(tvFooter)
 
+        sinkFooterToGestureBar(tvFooter)
+
+        // «Скачать последнюю версию» — выбор источника; «Проверить обновления» ниже
+        // только проверяет и ничего не качает.
         rowShareRelease.setOnClickListener {
 
-            openDownloadPage()
+            showDownloadSourceDialog()
 
         }
 
@@ -598,6 +608,10 @@ class SettingsActivity : AppCompatActivity() {
 
             updateVendorBackgroundRow(rowBackgroundVendor)
 
+            // Реальное значение меняется на системном экране, а не от нажатия: возвращаем
+            // тумблер к нему сразу, а не оставляем «включённым» до следующего onResume.
+            swBackground.post { checkBatteryOptimization(swBackground) }
+
         }
 
         rowAutostart.setOnClickListener {
@@ -613,6 +627,31 @@ class SettingsActivity : AppCompatActivity() {
         swAutostart.setOnCheckedChangeListener { _, isChecked ->
 
             if (suppressAutostartSwitchCallback) return@setOnCheckedChangeListener
+
+            if (VendorBackgroundSettingsHelper.isAutoStartEnabled(this) != null) {
+
+                // Состояние читается из системы, а менять его можно только на системном
+                // экране: нажатие лишь открывает его, а сам тумблер возвращается к
+                // реальному значению и обновится после возврата.
+                if (!VendorBackgroundSettingsHelper.openAutoStart(this)) {
+
+                    Toast.makeText(
+
+                        this,
+
+                        NovaLanguage.tr(this, "Не удалось открыть экран автозапуска на этом устройстве."),
+
+                        Toast.LENGTH_SHORT
+
+                    ).show()
+
+                }
+
+                swAutostart.post { updateAutoStartRow(rowAutostart, swAutostart) }
+
+                return@setOnCheckedChangeListener
+
+            }
 
             if (isChecked && !VendorBackgroundSettingsHelper.openAutoStart(this)) {
 
@@ -774,7 +813,7 @@ class SettingsActivity : AppCompatActivity() {
 
             } else {
 
-                showDownloadSourceDialog()
+                runManualUpdateCheck(download = false)
 
             }
 
@@ -846,12 +885,6 @@ class SettingsActivity : AppCompatActivity() {
         rowWarpConfigs.setOnClickListener {
 
             startActivity(Intent(this, WarpConfigsActivity::class.java))
-
-        }
-
-        rowMainBackground.setOnClickListener {
-
-            startActivity(Intent(this, BackgroundSettingsActivity::class.java))
 
         }
 
@@ -1643,6 +1676,8 @@ class SettingsActivity : AppCompatActivity() {
 
         updateVendorBackgroundRow(rowBackgroundVendor)
 
+        scheduleBackgroundStateRecheck(swBackground, rowAutostart, swAutostart, rowBackgroundVendor)
+
         findViewById<TextView>(R.id.tv_warp_configs_note)?.let(::updateWarpConfigsSummary)
 
         findViewById<TextView>(R.id.tv_local_proxy_note)?.let(::updateLocalProxySummary)
@@ -1714,6 +1749,8 @@ class SettingsActivity : AppCompatActivity() {
 
 
     override fun onDestroy() {
+
+        backgroundStateHandler.removeCallbacksAndMessages(null)
 
         super.onDestroy()
 
@@ -2404,6 +2441,42 @@ class SettingsActivity : AppCompatActivity() {
 
     
 
+    /**
+     * Перечитывает фон и автозапуск несколько раз после возврата на экран: оболочка
+     * применяет выбор с задержкой. Только для оболочек со своим управлением фоном —
+     * на чистом Android состояние меняется сразу.
+     */
+    private fun scheduleBackgroundStateRecheck(
+        swBackground: Switch,
+        rowAutostart: LinearLayout,
+        swAutostart: Switch,
+        rowBackgroundVendor: TextView,
+    ) {
+
+        backgroundStateHandler.removeCallbacksAndMessages(null)
+
+        if (!VendorBackgroundSettingsHelper.isVendorManagedBattery()) return
+
+        for (delayMs in longArrayOf(400, 1000, 2000, 4000, 8000)) {
+
+            backgroundStateHandler.postDelayed({
+
+                if (isFinishing || isDestroyed) return@postDelayed
+
+                checkBatteryOptimization(swBackground)
+
+                updateAutoStartRow(rowAutostart, swAutostart)
+
+                updateVendorBackgroundRow(rowBackgroundVendor)
+
+            }, delayMs)
+
+        }
+
+    }
+
+
+
     private fun checkBatteryOptimization(switch: Switch) {
 
         val green = android.content.res.ColorStateList.valueOf(NovaTheme.color(this, R.attr.novaAccent))
@@ -2452,7 +2525,8 @@ class SettingsActivity : AppCompatActivity() {
 
         suppressAutostartSwitchCallback = true
 
-        switch.isChecked = clientData.getAutostartEnabledHint()
+        switch.isChecked = VendorBackgroundSettingsHelper.isAutoStartEnabled(this)
+            ?: clientData.getAutostartEnabledHint()
 
         setupSwitchColor(switch, switch.isChecked)
 
@@ -2535,109 +2609,183 @@ class SettingsActivity : AppCompatActivity() {
 
     
 
-    private fun setupFooterLink(textView: TextView) {
+    /**
+     * Подвал — сплошная серая полоса во всю ширину и до самого низа экрана, а подпись
+     * на ней стоит на белой полоске жестовой навигации, как на линии.
+     *
+     * `NovaTheme.applyEdgeToEdge` отдаёт содержимому весь нижний отступ системной
+     * полосы, и подвал оказывался над всей этой зоной, а под ним торчал фон с
+     * фактурой. Здесь нижний отступ содержимого обнуляется, а подвал сам занимает
+     * эту зону нижним внутренним отступом: подпись по-прежнему над полоской, но
+     * серая заливка идёт под неё до края экрана. Полоска жеста нарисована в нижней
+     * части зоны: её верх ~21dp от низа экрана, подпись ставится на 18dp.
+     * При кнопочной навигации (зона высокая, полоски нет) подпись остаётся над
+     * кнопками.
+     *
+     * Слушатель отступов у содержимого заменяется целиком, поэтому повторяет
+     * логику темы: сверху отступ полосы, по бокам собственные.
+     */
+    private fun sinkFooterToGestureBar(footer: TextView) {
 
-        val versionName = try {
+        val content = findViewById<android.view.View>(android.R.id.content) ?: return
 
-            packageManager.getPackageInfo(packageName, 0).versionName ?: "1.12"
+        val density = resources.displayMetrics.density
 
-        } catch (_: Exception) {
+        val textBottomGesturePx = (18 * density).toInt()
 
-            "1.12"
+        val gestureBarMaxPx = (32 * density).toInt()
 
-        }
+        val buttonsGapPx = (8 * density).toInt()
 
-        // Подпись со ссылкой — оформленный текст, а такой перевод на экране не трогает:
-        // спаны пришлось бы переносить. Поэтому обе строки переводятся до разметки,
-        // и ссылка ищется уже в переведённой подписи.
-        val fullText = NovaLanguage.tr(this, "Nova v$versionName - создана с ❤️ Telegram чат")
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(content) { view, insets ->
 
-        val linkText = NovaLanguage.tr(this, "Telegram чат")
+            val bars = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars())
 
-        val spannableString = android.text.SpannableString(fullText)
+            view.setPadding(view.paddingLeft, bars.top, view.paddingRight, 0)
 
-        
+            val gesture = bars.bottom in 1..gestureBarMaxPx
 
-        val clickableSpan = object : android.text.style.ClickableSpan() {
+            val footerBottom = if (gesture) minOf(textBottomGesturePx, bars.bottom) else bars.bottom + buttonsGapPx
 
-            override fun onClick(widget: android.view.View) {
+            if (footer.paddingBottom != footerBottom) {
 
-                openTelegramChat()
+                footer.setPadding(footer.paddingLeft, footer.paddingTop, footer.paddingRight, footerBottom)
 
             }
 
-            
-
-            override fun updateDrawState(ds: android.text.TextPaint) {
-
-                super.updateDrawState(ds)
-
-                ds.isUnderlineText = true
-
-                ds.color = NovaTheme.color(this@SettingsActivity, R.attr.novaAccent)
-
-                ds.clearShadowLayer() // Remove any shadow
-
-            }
+            insets
 
         }
 
-        
-
-        // Левая часть подписи до сердечка приглушена ролью C, чтобы шапка
-        // не спорила яркостью со ссылкой. Литералов цвета здесь нет (I21).
-
-        val heartIndex = fullText.indexOf('❤')
-
-        if (heartIndex > 0) {
-
-            spannableString.setSpan(
-
-                android.text.style.ForegroundColorSpan(
-
-                    NovaTheme.color(this@SettingsActivity, R.attr.novaTextValue)
-
-                ),
-
-                0,
-
-                heartIndex,
-
-                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-
-            )
-
-        }
-
-        val startIndex = fullText.indexOf(linkText)
-
-        if (startIndex >= 0) {
-
-            spannableString.setSpan(
-
-                clickableSpan,
-
-                startIndex,
-
-                startIndex + linkText.length,
-
-                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-
-            )
-
-        }
-
-        
-
-        textView.text = spannableString
-
-        textView.movementMethod = android.text.method.LinkMovementMethod.getInstance()
-
-        textView.setShadowLayer(0f, 0f, 0f, 0) // Explicitly remove shadow from TextView
+        androidx.core.view.ViewCompat.requestApplyInsets(content)
 
     }
 
+    private fun setupFooterLink(textView: TextView) {
 
+        // «Telegram чат    Благодарности ❤️» — порядок как в Nova на ПК. Обе подписи переводятся до разметки, а
+        // ссылки ищутся уже в переведённом тексте (спаны при переводе не переносятся).
+        // Сердце — с селектором ️: без него шрифт рисует его текстовым глифом
+        // цвета подписи, то есть серым, а не красным эмодзи.
+        val thanksText = NovaLanguage.tr(this, "Благодарности")
+
+        val chatText = NovaLanguage.tr(this, "Telegram чат")
+
+        val fullText = "$chatText  |  $thanksText ❤️"
+
+        val spannableString = android.text.SpannableString(fullText)
+
+        fun link(text: String, onClick: () -> Unit) {
+
+            val start = fullText.indexOf(text)
+
+            if (start < 0) return
+
+            val span = object : android.text.style.ClickableSpan() {
+
+                override fun onClick(widget: android.view.View) = onClick()
+
+                override fun updateDrawState(ds: android.text.TextPaint) {
+
+                    super.updateDrawState(ds)
+
+                    ds.isUnderlineText = true
+
+                    ds.color = NovaTheme.color(this@SettingsActivity, R.attr.novaAccent)
+
+                    ds.clearShadowLayer()
+
+                }
+
+            }
+
+            spannableString.setSpan(span, start, start + text.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+
+        }
+
+        link(thanksText) { openDonatePage() }
+
+        link(chatText) { openTelegramChat() }
+
+        textView.text = spannableString
+
+        // Нажатия разбираем сами, а не через LinkMovementMethod: он реагирует только на узкую полоску
+        // самих букв и подсвечивает нажатую ссылку. Здесь подпись делится на две зоны по разделителю «|»,
+        // и каждая занимает всю высоту подвала; фон нажатия не рисуется.
+        textView.movementMethod = null
+        textView.highlightColor = android.graphics.Color.TRANSPARENT
+        val separatorIndex = fullText.indexOf('|')
+        val actions = listOf({ openTelegramChat() }, { openDonatePage() })
+        var pressedZone = -1
+        fun zoneAt(tv: TextView, x: Float, y: Float): Int {
+            val layout = tv.layout ?: return -1
+            if (y < 0f || y > tv.height) return -1
+            val slop = 32f * tv.resources.displayMetrics.density
+            val left = tv.totalPaddingLeft + layout.getLineLeft(0)
+            val right = tv.totalPaddingLeft + layout.getLineRight(0)
+            if (x < left - slop || x > right + slop) return -1
+            val boundary = if (separatorIndex >= 0) {
+                tv.totalPaddingLeft + layout.getPrimaryHorizontal(separatorIndex)
+            } else {
+                (left + right) / 2f
+            }
+            return if (x < boundary) 0 else 1
+        }
+        textView.setOnTouchListener { view, event ->
+            val tv = view as TextView
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    pressedZone = zoneAt(tv, event.x, event.y)
+                    pressedZone >= 0
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    val zone = zoneAt(tv, event.x, event.y)
+                    val fire = pressedZone >= 0 && zone == pressedZone
+                    pressedZone = -1
+                    if (fire) actions[zone]()
+                    fire
+                }
+                android.view.MotionEvent.ACTION_CANCEL -> {
+                    pressedZone = -1
+                    false
+                }
+                else -> pressedZone >= 0
+            }
+        }
+
+        textView.setShadowLayer(0f, 0f, 0f, 0)
+
+    }
+
+    private fun openDonatePage() {
+
+        // Тот же 1,5-секундный щит от повторного касания, что у Telegram, и без NEW_TASK: из экрана
+        // браузер открывается обычным путём, в нашей задаче, и «Назад» возвращает в настройки.
+        val now = android.os.SystemClock.elapsedRealtime()
+
+        if (now - lastDonateOpenAtMs < 1500L) {
+
+            return
+
+        }
+
+        lastDonateOpenAtMs = now
+
+        try {
+
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://nova.gratis/donate")).apply {
+
+                addCategory(Intent.CATEGORY_BROWSABLE)
+
+            })
+
+        } catch (e: Exception) {
+
+            LogManager.log("Настройки: страницу благодарностей открыть не удалось — ${e.message}")
+
+        }
+
+    }
 
     private fun openTelegramChat() {
 
@@ -3098,7 +3246,7 @@ class SettingsActivity : AppCompatActivity() {
 
         render = {
             container.removeAllViews()
-            container.addView(hint("Вставьте ссылку профиля (slipnet://, stormdns://, cottendns://) или список адресов DNS", top = 0))
+            container.addView(hint("Вставьте ссылку профиля (slipnet://, stormdns://, cottendns://, masterdns://, whitedns://) или список адресов", top = 0))
             container.addView(linkField)
             container.addView(status)
             container.addView(title("Профили"))
@@ -3130,7 +3278,7 @@ class SettingsActivity : AppCompatActivity() {
         render()
 
         val dialog = android.app.AlertDialog.Builder(this)
-            .setTitle("Профили для DNS")
+            .setTitle("Профили для White")
             .setView(scroll)
             .setPositiveButton("Готово", null)
             .showNova()
@@ -3236,13 +3384,19 @@ class SettingsActivity : AppCompatActivity() {
     /** Подпись под строкой настройки: сколько профилей и какой сейчас работает. */
     private fun refreshDnsProfilesNote() {
         val note = findViewById<TextView>(R.id.tv_dns_endpoint_note) ?: return
+        // Список того, что умеет White, — за «i» у заголовка; делается один раз, значок остаётся.
+        if (note.getTag(R.id.tv_white_support_hint) == null) {
+            note.setTag(R.id.tv_white_support_hint, true)
+            val title = findViewById<TextView>(R.id.tv_white_profiles_title)
+            findViewById<TextView>(R.id.tv_white_support_hint)?.let { hint -> title?.let { hint.collapseToInfoIcon(it) } }
+        }
         val state = DnsProfileStore.read(this)
         val own = state.profiles.count { !it.builtIn }
         val active = state.active()
         note.text = when {
             active != null -> "Работает: ${active.name}" + if (own > 0) ", всего профилей ${own + 1}" else ""
             own > 0 -> "Профилей $own, ни один пока не подключается"
-            else -> "Импорт профилей по ссылке и списки адресов DNS"
+            else -> "Принимает slipnet, stormdns, cottendns, masterdns, whitedns и списки адресов"
         }
     }
 
@@ -3358,16 +3512,13 @@ class SettingsActivity : AppCompatActivity() {
 
     /** Подпись строки MTU. Зовётся и из `onResume`: значение меняют на соседнем экране. */
     /**
-     * Снимок оформления: тема, фактура и температура одной строкой.
+     * Снимок оформления, под которое собрано окно: оттенок и фон.
      *
-     * Сравнивать по нему, а не по одной теме: фактуру и температуру выдаёт тот же
-     * экран, и после их правки окно тоже надо пересобрать — фон окна собирается
-     * в `NovaTheme.apply`.
+     * Сравнивать по нему, а не по одному оттенку: фон окна собирается в
+     * `NovaTheme.apply`, и после правки фактуры, яркости или насыщенности на
+     * соседнем экране его тоже надо пересобрать.
      */
-    private fun appearanceSignature(): String =
-        NovaTheme.current(this) + "|" +
-            NovaAppearance.storedTexture(this).key + "|" +
-            NovaAppearance.storedTemperature(this)
+    private fun appearanceSignature(): String = NovaAppearance.state(this).toString()
 
     private var appliedAppearanceSignature: String = ""
 
@@ -3419,26 +3570,10 @@ class SettingsActivity : AppCompatActivity() {
 
         fun render() {
 
-            val option = NovaTheme.optionFor(NovaTheme.current(this))
+            val state = NovaAppearance.state(this)
 
-            val texture = NovaAppearance.storedTexture(this)
-
-            val temperature = NovaAppearance.storedTemperature(this)
-
-            // Строка называет всё, что экран умеет менять: иначе выбранная фактура
-            // видна только внутри него, и снаружи непонятно, включена ли она.
-            val extras = buildList {
-                if (texture != NovaAppearance.Texture.NONE) add(texture.title)
-                if (temperature != NovaAppearance.TEMPERATURE_NEUTRAL) {
-                    add(if (temperature < 0) "теплее" else "холоднее")
-                }
-            }
-
-            note.text = if (extras.isEmpty()) {
-                "${option.title} — ${option.note}"
-            } else {
-                "${option.title} · ${extras.joinToString(" · ")}"
-            }
+            // Строка называет то, что видно снаружи: оттенок и фон.
+            note.text = "${NovaAppearanceUi.hueName(state.hue)} · ${state.texture.title}"
 
         }
 
@@ -3660,7 +3795,9 @@ class SettingsActivity : AppCompatActivity() {
         val androidFlagSet = Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
             getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
 
-        view.text = if (!androidFlagSet && VendorBackgroundSettingsHelper.isVendorManagedBattery()) {
+        view.text = if (!androidFlagSet && VendorBackgroundSettingsHelper.isVendorManagedBattery() &&
+            !VendorBackgroundSettingsHelper.isBatteryFlagFollowsVendorMode()
+        ) {
             "Открыть: $label\n" +
                 "«Нет ограничений» в оболочке не включает переключатель выше — " +
                 "это отдельное разрешение Android, и нужны оба."
@@ -5089,7 +5226,7 @@ class SettingsActivity : AppCompatActivity() {
      */
     private fun openDownloadPage() {
 
-        val link = "https://nova-app.eu/dl/nova-android"
+        val link = "https://nova.gratis/dl/nova-android"
 
         try {
 
@@ -5121,13 +5258,13 @@ class SettingsActivity : AppCompatActivity() {
                     NovaLanguage.tr(this, "С GitHub"),
                 )
             ) { _, which ->
-                if (which == 0) openDownloadPage() else runManualUpdateCheck()
+                if (which == 0) openDownloadPage() else runManualUpdateCheck(download = true)
             }
             .setNegativeButton(NovaLanguage.tr(this, "Отмена"), null)
             .show()
     }
 
-    private fun runManualUpdateCheck() {
+    private fun runManualUpdateCheck(download: Boolean) {
 
         updateManualUpdateUi(forceChecking = true)
 
@@ -5135,7 +5272,7 @@ class SettingsActivity : AppCompatActivity() {
 
             val result = withContext(Dispatchers.IO) {
 
-                AppUpdateManager.performManualUpdateCheck(this@SettingsActivity)
+                AppUpdateManager.performManualUpdateCheck(this@SettingsActivity, download)
 
             }
 
@@ -5146,6 +5283,8 @@ class SettingsActivity : AppCompatActivity() {
                 ManualUpdateCheckResult.Kind.CHECKING -> "Проверка уже выполняется"
 
                 ManualUpdateCheckResult.Kind.NO_UPDATE -> result.message.ifBlank { "Установлена последняя версия" }
+
+                ManualUpdateCheckResult.Kind.UPDATE_AVAILABLE -> "Доступна версия ${result.version}"
 
                 ManualUpdateCheckResult.Kind.DOWNLOAD_STARTED -> "Начали загрузку ${result.version}"
 
@@ -5158,6 +5297,14 @@ class SettingsActivity : AppCompatActivity() {
             }
 
             Toast.makeText(this@SettingsActivity, NovaLanguage.tr(this@SettingsActivity, message), Toast.LENGTH_SHORT).show()
+
+            if (result.kind == ManualUpdateCheckResult.Kind.UPDATE_AVAILABLE) {
+
+                tvManualUpdateStatus.visibility = android.view.View.VISIBLE
+
+                tvManualUpdateStatus.text = NovaLanguage.tr(this@SettingsActivity, "Доступна версия ${result.version}. Скачать — кнопка ниже или плашка на главном экране.")
+
+            }
 
         }
 

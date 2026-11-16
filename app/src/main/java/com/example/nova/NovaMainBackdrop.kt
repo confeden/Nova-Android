@@ -7,7 +7,6 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffColorFilter
-import android.view.ContextThemeWrapper
 
 /**
  * Фон главного экрана в режиме «изображение».
@@ -61,13 +60,14 @@ internal object NovaMainBackdrop {
      */
     fun liveDrawable(context: Context): android.graphics.drawable.Drawable? {
         if (NovaAppearance.texture(context) != NovaAppearance.Texture.MATRIX) return null
+        val alpha = scaledAlpha(context)
         return NovaAppearanceDrawable(
             NovaAppearance.Texture.MATRIX,
-            NovaAppearance.TEMPERATURE_NEUTRAL,
             accent(context),
             NovaAppearance.variant(context),
+            textureAlpha = alpha,
             blackBase = true,
-            rainAlpha = TEXTURE_ALPHA,
+            rainAlpha = alpha,
             // Главный экран — единственный, где дождь живёт: остальные экраны рисуют кадр.
             animated = true,
         )
@@ -82,12 +82,13 @@ internal object NovaMainBackdrop {
         val texture = NovaAppearance.texture(context)
         // «Без фактуры» — это чёрный экран, а не прежняя картинка: так попросил
         // владелец, и так же ведёт себя пункт «Без фона» в самих настройках.
-        if (texture == NovaAppearance.Texture.NONE) return black()
+        if (!texture.hasPattern) return black()
         val accent = accent(context)
+        val alpha = scaledAlpha(context)
         val size = displaySize(context)
         val key = NovaTextureCache.keyFor(texture, size[0], size[1], NovaAppearance.variant(context))
-        val ready = NovaTextureCache.request(key) { mask -> onReady(compose(mask, accent)) }
-        return if (ready != null) compose(ready, accent) else null
+        val ready = NovaTextureCache.request(key) { mask -> onReady(compose(mask, accent, alpha)) }
+        return if (ready != null) compose(ready, accent, alpha) else null
     }
 
     /**
@@ -115,17 +116,18 @@ internal object NovaMainBackdrop {
     fun requestDiveLayer(context: Context, cycle: Int, onReady: (Bitmap) -> Unit) {
         val app = context.applicationContext
         val texture = NovaAppearance.texture(app)
-        if (texture == NovaAppearance.Texture.NONE) return
+        if (!texture.hasPattern) return
         val variant = NovaAppearance.variant(app) + 1 + Math.floorMod(cycle, DIVE_VARIANTS)
         val cacheKey = "${signature(app)}|$variant"
         synchronized(diveLayers) { diveLayers[cacheKey] }?.let { onReady(it); return }
         val accent = accent(context)
+        val alpha = scaledAlpha(context)
         val size = displaySize(app)
         val key = NovaTextureCache.keyFor(texture, size[0] / 2, size[1] / 2, variant)
         val main = android.os.Handler(android.os.Looper.getMainLooper())
         fun deliver(mask: Bitmap?) {
             if (mask == null) return
-            val composed = compose(mask, accent)
+            val composed = compose(mask, accent, alpha)
             synchronized(diveLayers) {
                 // Слои прошлого оформления больше не нужны: держим только свои.
                 diveLayers.keys.retainAll { it.startsWith(signature(app) + "|") }
@@ -138,7 +140,8 @@ internal object NovaMainBackdrop {
 
     fun signature(context: Context): String =
         "${NovaAppearance.texture(context).key}|${NovaAppearance.variant(context)}|" +
-            "${NovaTheme.current(context)}|${NovaAppearance.temperature(context)}"
+            "${NovaAppearance.hue(context)}|${NovaAppearance.saturation(context)}|" +
+            NovaAppearance.brightness(context)
 
     /**
      * Размер экрана целиком, вместе с системными полосами.
@@ -173,7 +176,7 @@ internal object NovaMainBackdrop {
     private fun black(): Bitmap =
         Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLACK) }
 
-    private fun compose(mask: Bitmap?, accent: Int): Bitmap {
+    private fun compose(mask: Bitmap?, accent: Int, alpha: Int): Bitmap {
         if (mask == null || mask.isRecycled) return black()
         val out = Bitmap.createBitmap(mask.width, mask.height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
@@ -181,23 +184,15 @@ internal object NovaMainBackdrop {
         val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
         // Растр хранит только прозрачность: цвет ему даёт акцент темы.
         paint.colorFilter = PorterDuffColorFilter(accent, PorterDuff.Mode.SRC_IN)
-        paint.alpha = TEXTURE_ALPHA
+        paint.alpha = alpha
         canvas.drawBitmap(mask, 0f, 0f, paint)
         return out
     }
 
-    /**
-     * Акцент темы настроек.
-     *
-     * Через `ContextThemeWrapper`: сам главный экран объявлен не темой
-     * `Theme.Nova.Settings`, и `?attr/novaAccent` у его контекста не разрешается.
-     * Тот же приём уже стоит в `MainActivity.applySelectionGlowAccent`.
-     */
-    private fun accent(context: Context): Int {
-        val themed = ContextThemeWrapper(
-            context,
-            NovaTheme.optionFor(NovaTheme.current(context)).styleRes,
-        )
-        return NovaTheme.color(themed, R.attr.novaAccent)
-    }
+    /** Прозрачность узора с учётом ползунка яркости; 60 — прежний вид. */
+    private fun scaledAlpha(context: Context): Int =
+        (TEXTURE_ALPHA * NovaAppearance.alphaFactor(context)).toInt().coerceIn(0, 255)
+
+    /** Цвет фактуры: оттенок и насыщенность из оформления. */
+    private fun accent(context: Context): Int = NovaAppearance.surfaceColor(context)
 }

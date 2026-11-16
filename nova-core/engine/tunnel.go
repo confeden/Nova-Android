@@ -140,8 +140,8 @@ func SetDNSInterceptPolicy(enabled bool, mediaUpstreams []string, defaultUpstrea
 	if enabled && len(normalized) > 0 {
 		log.Printf(
 			"DNS intercept enabled: media=%s fallback=%s domains=%s",
-			strings.Join(normalized, ","),
-			strings.Join(normalizedDefaults, ","),
+			redactUpstreamList(normalized),
+			redactUpstreamList(normalizedDefaults),
 			strings.Join(normalizedDomains, ","),
 		)
 	} else {
@@ -1336,6 +1336,9 @@ func resolveDNSViaSpec(query []byte, spec *dnsUpstreamSpec, timeout time.Duratio
 	if spec.route == dnsRouteObfsFirst {
 		return resolveDNSObfsFirst(query, spec, timeout)
 	}
+	if spec.route == dnsRouteObfsOnly {
+		return resolveDNSObfsOnly(query, spec, timeout)
+	}
 	if spec.route != dnsRouteAuto {
 		return resolveDNSOnRoute(query, spec, spec.route, timeout)
 	}
@@ -1387,6 +1390,18 @@ func raceDNSRoutes(query []byte, spec *dnsUpstreamSpec, timeout time.Duration) (
 }
 
 func resolveDNSOnRoute(query []byte, spec *dnsUpstreamSpec, route dnsUpstreamRoute, timeout time.Duration) ([]byte, string, error) {
+	return resolveDNSAttempt(query, spec, route, nil, timeout)
+}
+
+// resolveDNSAttempt — один запрос по пути; attempt задаёт стратегию и адрес прямого пути с
+// обфускацией (nil — первая стратегия лестницы хоста, адреса как пришли).
+func resolveDNSAttempt(query []byte, spec *dnsUpstreamSpec, route dnsUpstreamRoute, attempt *dnsAttempt, timeout time.Duration) ([]byte, string, error) {
+	if route == dnsRouteDirectObfs && attempt == nil {
+		attempt = &dnsAttempt{strat: obfsLadder(spec.host)[0]}
+	}
+	if route != dnsRouteDirectObfs {
+		attempt = nil
+	}
 	switch spec.kind {
 	case dnsUpstreamDoH:
 		upstream := &dohUpstream{
@@ -1395,14 +1410,20 @@ func resolveDNSOnRoute(query []byte, spec *dnsUpstreamSpec, route dnsUpstreamRou
 			host:      spec.host,
 			port:      spec.port,
 			bootstrap: spec.bootstrap,
+			get:       spec.get,
+			attempt:   attempt,
 		}
 		payload, err := resolveDNSViaDoh(query, upstream, route, timeout)
 		if err != nil {
+			if spec.display != spec.target {
+				// Ошибка http-клиента несёт адрес целиком, а у личной ссылки в нём токен.
+				return nil, "", fmt.Errorf("doh %s: %s", spec.display, strings.ReplaceAll(err.Error(), spec.target, spec.display))
+			}
 			return nil, "", fmt.Errorf("doh %s: %w", spec.target, err)
 		}
-		return payload, spec.target, nil
+		return payload, spec.display, nil
 	case dnsUpstreamDoT:
-		payload, err := resolveDNSViaDoT(query, spec, route, timeout)
+		payload, err := resolveDNSViaDoT(query, spec, route, attempt, timeout)
 		if err != nil {
 			return nil, "", fmt.Errorf("dot %s: %w", spec.target, err)
 		}

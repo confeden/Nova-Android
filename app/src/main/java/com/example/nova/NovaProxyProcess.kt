@@ -1,6 +1,10 @@
 package com.example.nova
 
 import android.content.Context
+import android.net.LocalServerSocket
+import android.net.LocalSocket
+import android.net.Network
+import android.system.Os
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -162,13 +166,25 @@ object NovaProxyProcess {
         if (nodes.isEmpty()) return true
         val binary = binary(context) ?: return false
         val workDir = File(context.cacheDir, "novaproxy-probe").apply { mkdirs() }
+        // Замер идёт по соединению с провайдером, а не по чужому активному VPN: узел,
+        // достижимый через другой туннель, ответил бы его временем или не ответил бы вовсе.
+        val protector = ProtectServer.openOrNull(ImportedProfilePingStore.underlyingNetwork(context))
+        if (protector == null) {
+            // Без привязки замер ушёл бы туда, куда ведёт маршрут по умолчанию, — в том числе в чужой
+            // VPN. Пинг только с канала провайдера: нет канала — нет замера, и это сказано (I4).
+            LogManager.log("Nova: замер пропущен — нет сети провайдера вне VPN, мерить некуда.")
+            return false
+        }
         val started = try {
-            builder(context, binary, listOf(
-                "probe-list",
-                "-workers", workers.coerceIn(1, 64).toString(),
-                "-timeout", timeoutSeconds.coerceIn(1, 60).toString(),
-            ), workDir).redirectErrorStream(false).start()
+            val args = ArrayList<String>().apply {
+                add("probe-list")
+                add("-workers"); add(workers.coerceIn(1, 64).toString())
+                add("-timeout"); add(timeoutSeconds.coerceIn(1, 60).toString())
+                if (protector != null) { add("-protect"); add(protector.name) }
+            }
+            builder(context, binary, args, workDir).redirectErrorStream(false).start()
         } catch (error: Exception) {
+            protector?.close()
             LogManager.log("Nova: проверка профилей не запустилась: ${error.message}")
             return false
         }
@@ -195,6 +211,75 @@ object NovaProxyProcess {
             return false
         } finally {
             if (started.isAlive) started.destroyForcibly()
+            protector?.close()
+        }
+    }
+
+    /**
+     * Принимает от помощника дескрипторы сокетов (SCM_RIGHTS) и привязывает каждый к сети
+     * провайдера через `Network.bindSocket`: у дочернего процесса такой привязки нет,
+     * а у приложения она есть, и общий у них только дескриптор.
+     *
+     * Абстрактный сокет живёт, пока идёт замер; ответ помощнику — один байт, 1 = привязан.
+     */
+    private class ProtectServer private constructor(
+        val name: String,
+        private val server: LocalServerSocket,
+        private val network: Network,
+    ) : AutoCloseable {
+        @Volatile private var closed = false
+
+        init {
+            Thread({
+                while (!closed) {
+                    val client = try { server.accept() } catch (_: Exception) { break }
+                    Thread({ serve(client) }, "NovaProtect").apply { isDaemon = true; start() }
+                }
+            }, "NovaProtectAccept").apply { isDaemon = true; start() }
+        }
+
+        private fun serve(client: LocalSocket) {
+            try {
+                client.soTimeout = 3_000
+                if (client.inputStream.read() < 0) return
+                val fds = client.ancillaryFileDescriptors.orEmpty()
+                var bound = false
+                for (fd in fds) {
+                    try {
+                        if (!bound) {
+                            network.bindSocket(fd)
+                            bound = true
+                        }
+                    } catch (error: Exception) {
+                        LogManager.d("Nova: сокет замера не привязался к сети: ${error.message}")
+                    } finally {
+                        runCatching { Os.close(fd) }
+                    }
+                }
+                client.outputStream.write(if (bound) 1 else 0)
+                client.outputStream.flush()
+            } catch (_: Exception) {
+            } finally {
+                runCatching { client.close() }
+            }
+        }
+
+        override fun close() {
+            closed = true
+            runCatching { server.close() }
+        }
+
+        companion object {
+            fun openOrNull(network: Network?): ProtectServer? {
+                if (network == null) return null
+                return try {
+                    val name = "novaprobe-${android.os.Process.myPid()}-${System.nanoTime()}"
+                    ProtectServer(name, LocalServerSocket(name), network)
+                } catch (error: Exception) {
+                    LogManager.d("Nova: привязка замера к сети провайдера недоступна: ${error.message}")
+                    null
+                }
+            }
         }
     }
 

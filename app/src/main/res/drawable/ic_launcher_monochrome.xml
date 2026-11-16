@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Одноцветный слой для «тематического» значка Android 13+: система красит его под обои.
+     Только форма (альфа): лучи, кольцо и ядро с отверстием. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:pathData="M54,54m-21.45,0a21.45,21.45 0 1,1 42.9,0a21.45,21.45 0 1,1 -42.9,0"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M56.97,54 L54,23.64 L51.03,54Z M55.03,54.59 L60.93,42 L52.97,53.41Z M54.59,55.03 L71.15,44.1 L53.41,52.97Z M54,56.97 L84.36,54 L54,51.03Z M53.41,55.03 L71.15,63.9 L54.59,52.97Z M52.97,54.59 L60.93,66 L55.03,53.41Z M51.03,54 L54,84.36 L56.97,54Z M52.97,53.41 L47.07,66 L55.03,54.59Z M53.41,52.97 L36.85,63.9 L54.59,55.03Z M54,51.03 L23.64,54 L54,56.97Z M54.59,52.97 L36.85,44.1 L53.41,55.03Z M55.03,53.41 L47.07,42 L52.97,54.59Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M54,54m-7.59,0a7.59,7.59 0 1,1 15.18,0a7.59,7.59 0 1,1 -15.18,0 M54,54m-3.17,0a3.17,3.17 0 1,1 6.34,0a3.17,3.17 0 1,1 -6.34,0" />
+</vector>

@@ -35,7 +35,6 @@
         android:id="@+id/tv_nova_proto"
         android:layout_width="62dp"
         android:layout_height="wrap_content"
-        android:ellipsize="end"
         android:maxLines="1"
         android:textColor="#B9C4D6"
         android:textSize="11sp" />

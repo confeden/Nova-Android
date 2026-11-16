@@ -36,14 +36,15 @@ object ConnectionSelectorPolicy {
      *
      * `masque` стоит третьим намеренно — так он и лежит в `protocolButtons`.
      * `opera` заменил пару `eu`/`us`: это одна кнопка на один транспорт.
-     * `nova` стоит сразу после `proton`. Позиционных разборов кнопок больше нет:
+     * `nova` стоит сразу после `auto` (владелец 2026-11-12): «Авто» пробует её первой
+     * (`AUTO_MODE_ORDER`). Позиционных разборов кнопок больше нет:
      * `SettingsActivity.configureRegionSelector` ищет кнопку по значению через
      * [indexOf], так что вставка в середину ничего не переименовывает.
      */
-    val ORDER: List<String> = listOf("auto", "ru", "masque", "opera", "proton", "nova", "tor", "dns")
+    val ORDER: List<String> = listOf("auto", "nova", "ru", "masque", "opera", "proton", "tor", "dns")
 
     /** Подписи в том же порядке. `ru` — это WARP, и это не опечатка. */
-    val LABELS: List<String> = listOf("AUTO", "WARP", "MASQUE", "OPERA", "PROTON", "NOVA", "TOR", "DNS")
+    val LABELS: List<String> = listOf("AUTO", "NOVA", "WARP", "MASQUE", "OPERA", "PROTON", "TOR", WHITE_NAME)
 
     /**
      * Разбиение на строки: сколько кнопок в каждой.
@@ -52,9 +53,8 @@ object ConnectionSelectorPolicy {
      * владельца, и оно же читается лучше: скрытая за краем кнопка выглядит как
      * отсутствующая.
      *
-     * * строка 1 — всё, что работает через Cloudflare (`AUTO` начинает именно с
-     *   них, поэтому стоит здесь);
-     * * строка 2 — зарубежные VPN и списки узлов (Opera, Proton, Nova);
+     * * строка 1 — «Авто», список Nova и то, что работает через Cloudflare (WARP);
+     * * строка 2 — MASQUE и зарубежные VPN (Opera, Proton);
      * * строка 3 — то, что везут чужие сети и чужие резолверы: Tor и DNS.
      *
      * Сумма обязана равняться [SIZE]; за этим следит тест.
@@ -63,6 +63,20 @@ object ConnectionSelectorPolicy {
 
     /** Сколько кнопок обязано быть в группе. Меньше — селектор не настраивается. */
     val SIZE: Int get() = ORDER.size
+
+    /**
+     * Порядок режимов «Авто» = порядок кнопок без самой «Авто» (владелец 2026-11-14):
+     * NOVA > WARP (`ru`, «Cloudflare AWG») > MASQUE > OPERA > PROTON > TOR > DNS. Так же называется
+     * и так же устроено `AUTO_MODE_ORDER` у Nova PC.
+     */
+    val AUTO_MODE_ORDER: List<String> get() = ORDER.drop(1)
+
+    /**
+     * Сколько секунд режим перебирает свои профили, прежде чем сдаться, — и в цепочке «Авто»
+     * (потом берётся следующий режим), и при явно выбранной кнопке (потом остановка вслух, без
+     * подмены другим режимом, I1). Раньше — если профили не кончились. Имя и число те же, что у Nova PC.
+     */
+    const val AUTO_MODE_BUDGET_SEC: Long = 120L
 
     /** Значение кнопки «встроенная Opera». */
     const val CHIP_OPERA: String = "opera"
@@ -85,6 +99,12 @@ object ConnectionSelectorPolicy {
     const val CHIP_DNS: String = "dns"
 
     /**
+     * Как кнопка [CHIP_DNS] называется на экране (владелец, 2026-11-15). Только подпись: значение
+     * `dns`, метка бэкенда `DNS` и всё, что с ними сверяется или лежит в файлах состояния, прежнее.
+     */
+    const val WHITE_NAME: String = "WHITE"
+
+    /**
      * Что написать под состоянием, когда выбран DNS.
      *
      * Формулировка владельца. Смысл — предупредить заранее: измеренный потолок
@@ -103,7 +123,7 @@ object ConnectionSelectorPolicy {
      * причина и единственный совет, который здесь действительно помогает.
      */
     const val DNS_PING_NOTICE: String =
-        "Ping в режиме DNS отключён ради экономии трафика и стабильности. " +
+        "Ping в режиме White отключён ради экономии трафика и стабильности. " +
             "Рекомендуется пускать через VPN только необходимые приложения."
 
     /**
@@ -485,11 +505,11 @@ object ConnectionSelectorPolicy {
      */
     val BUTTON_IDS: List<Int> = listOf(
         R.id.rb_exit_auto,
+        R.id.rb_exit_nova,
         R.id.rb_exit_ru,
         R.id.rb_exit_masque,
         R.id.rb_exit_opera,
         R.id.rb_exit_proton,
-        R.id.rb_exit_nova,
         R.id.rb_exit_tor,
         R.id.rb_exit_dns,
     )

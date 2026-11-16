@@ -78,6 +78,20 @@ class AnimationPhaseTest {
     }
 
     @Test
+    fun diveClockFollowsSpeedWithoutJumping() {
+        // Первый кадр только запоминает часы; дальше время копится со скоростью.
+        assertEquals(0.0, DiveClock.time(100.0, 1f), 1e-9)
+        assertEquals(3.0 / 60.0, DiveClock.time(103.0, 1f), 1e-9)
+        // Смена скорости не сдвигает накопленное: добавляется только новый отрезок.
+        assertEquals(3.0 / 60.0 + 3.0 / 60.0 * 2.0, DiveClock.time(106.0, 2f), 1e-9)
+        // Ноль — стоит.
+        val frozen = DiveClock.time(107.0, 0f)
+        assertEquals(frozen, DiveClock.time(110.0, 0f), 1e-9)
+        // Разрыв больше пяти секунд — пауза часов, а не время погружения.
+        assertEquals(frozen, DiveClock.time(900.0, 1f), 1e-9)
+    }
+
+    @Test
     fun keyedSeedsReuseOnlyWhenAsked() {
         val seeds = KeyedSeeds()
         var made = 0

@@ -104,6 +104,7 @@ class DirectFlowActivity : AppCompatActivity() {
         LogManager.setAppContext(this)
         setContentView(R.layout.activity_direct_flow)
         NovaFontHelper.apply(findViewById(android.R.id.content))
+        findViewById<TextView>(R.id.tv_direct_intro).collapseToInfoIcon()
 
         clientData = ClientData(this)
         customDirect.addAll(clientData.getDirectApps())

@@ -1,6 +1,7 @@
 package com.example.nova
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.text.Editable
@@ -35,7 +36,7 @@ class DnsSettingsActivity : AppCompatActivity() {
     private lateinit var swGlobalDns: Switch
     private lateinit var rvDnsRules: RecyclerView
     private lateinit var btnAddDnsRule: TextView
-    private lateinit var btnDnsReorder: TextView
+    private lateinit var btnGetPersonalDns: TextView
     private lateinit var btnResetDnsRules: TextView
     private lateinit var dnsRuleAdapter: DnsRuleAdapter
     private lateinit var dnsRuleTouchHelper: ItemTouchHelper
@@ -51,16 +52,6 @@ class DnsSettingsActivity : AppCompatActivity() {
     private lateinit var tvSummary: TextView
     private lateinit var tvPrivateDnsWarning: TextView
     private lateinit var dnsAppPickerAdapter: DnsAppPickerAdapter
-
-    /**
-     * Включён ли режим «Изменить порядок».
-     *
-     * Перетаскивание живёт только в нём. Вне режима у строки нет ручки, а
-     * [ItemTouchHelper.Callback.getMovementFlags] отдаёт нули — то есть и прямой
-     * `startDrag` ничего не начнёт, и жест, застигнутый выключением режима, не
-     * доедет до записи порядка.
-     */
-    private var reorderMode = false
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -128,9 +119,6 @@ class DnsSettingsActivity : AppCompatActivity() {
      */
     override fun onPause() {
         super.onPause()
-        // Режим не переживает уход с экрана: вернувшись, человек снова видит
-        // список, который нельзя задеть пальцем случайно.
-        setReorderMode(false)
         if (!dnsChangePending) return
         dnsChangePending = false
         if (!SessionReapply.isSessionLikelyActive(this, clientData)) {
@@ -162,7 +150,7 @@ class DnsSettingsActivity : AppCompatActivity() {
         swGlobalDns = findViewById(R.id.sw_global_dns)
         rvDnsRules = findViewById(R.id.rv_dns_rules)
         btnAddDnsRule = findViewById(R.id.btn_add_dns_rule)
-        btnDnsReorder = findViewById(R.id.btn_dns_reorder)
+        btnGetPersonalDns = findViewById(R.id.btn_dns_get_personal)
         btnResetDnsRules = findViewById(R.id.btn_reset_dns_rules)
         rgRouteMode = findViewById(R.id.rg_dns_route_mode)
         swAppOverride = findViewById(R.id.sw_app_override_dns)
@@ -198,15 +186,12 @@ class DnsSettingsActivity : AppCompatActivity() {
         TvFocusHelper.install(
             this,
             swGlobalDns,
-            btnDnsReorder,
+            btnGetPersonalDns,
             btnAddDnsRule,
             btnResetDnsRules,
             btnPickApp,
             swAppOverride,
         )
-        // Экран открывается в покое: список только читают. Заодно это ставит
-        // подпись кнопки и прячет «Добавить резолвер».
-        setReorderMode(false)
     }
 
     /**
@@ -215,6 +200,9 @@ class DnsSettingsActivity : AppCompatActivity() {
      * Смахивание намеренно выключено (второй аргумент `SimpleCallback` — 0): у
      * строки есть кнопка удаления, а горизонтальный жест внутри прокручиваемого
      * экрана спорит с самой прокруткой.
+     *
+     * Перетаскивание доступно всегда, отдельного режима нет: тянут за ручку
+     * строки, а случайный сдвиг при прокрутке отсекает порог движения в адаптере.
      */
     private fun bindDnsRulesList() {
         dnsRuleAdapter = DnsRuleAdapter(
@@ -222,6 +210,7 @@ class DnsSettingsActivity : AppCompatActivity() {
             onToggle = { position, isChecked -> onDnsRuleToggled(position, isChecked) },
             onDelete = { position -> onDnsRuleDeleted(position) },
             onStartDrag = { holder -> dnsRuleTouchHelper.startDrag(holder) },
+            onPersonalSlot = { showPersonalDnsDialog() },
         )
         rvDnsRules.layoutManager = LinearLayoutManager(this)
         rvDnsRules.adapter = dnsRuleAdapter
@@ -244,15 +233,12 @@ class DnsSettingsActivity : AppCompatActivity() {
             ItemTouchHelper.UP or ItemTouchHelper.DOWN,
             0,
         ) {
-            // Флаги спрашиваем на каждый жест, а не берём из конструктора: вне
-            // режима изменения порядка их нет вовсе, так что и прямой
-            // `startDrag` по ручке ничего не начнёт, и жест, застигнутый
-            // выключением режима, оборвётся сам.
             override fun getMovementFlags(
                 recyclerView: RecyclerView,
                 viewHolder: RecyclerView.ViewHolder,
-            ): Int = if (!reorderMode) {
-                ItemTouchHelper.Callback.makeMovementFlags(0, 0)
+            ): Int = if (dnsRuleAdapter.isSlot(viewHolder.adapterPosition)) {
+                // Незаполненную строку «Персональный DNS-AI» не двигают: это не правило.
+                0
             } else {
                 ItemTouchHelper.Callback.makeMovementFlags(
                     ItemTouchHelper.UP or ItemTouchHelper.DOWN,
@@ -298,31 +284,6 @@ class DnsSettingsActivity : AppCompatActivity() {
         dnsRuleTouchHelper.attachToRecyclerView(rvDnsRules)
     }
 
-    /**
-     * Перетаскивание — отдельный режим, а не постоянное свойство списка.
-     *
-     * Ручка стояла у каждой строки всегда, и палец, опустившийся на левый край
-     * ради прокрутки, менял порядок опроса резолверов молча: список ростом в
-     * семь строк живёт в окне на 240dp, то есть прокручивается всегда. Теперь
-     * тянуть можно только тогда, когда об этом попросили.
-     */
-    private fun setReorderMode(enabled: Boolean) {
-        val changed = reorderMode != enabled
-        reorderMode = enabled
-        dnsRuleAdapter.reorderEnabled = enabled
-        btnDnsReorder.text = if (enabled) "Готово" else "Изменить порядок"
-        // «Добавить резолвер» живёт в том же режиме: экран в покое — только список.
-        btnAddDnsRule.visibility = if (enabled) View.VISIBLE else View.GONE
-        // Журналим только настоящее переключение: этот же метод ставит начальное
-        // состояние при открытии экрана и снимает режим в [onPause], и без
-        // проверки в журнал уходила бы строка на каждое открытие настроек.
-        if (!changed) return
-        LogManager.log(
-            if (enabled) "DNS-правила: включён режим изменения порядка."
-            else "DNS-правила: режим изменения порядка выключен."
-        )
-    }
-
     private fun bindListeners() {
         swGlobalDns.setOnCheckedChangeListener { _, checked ->
             if (suppressUiCallbacks) return@setOnCheckedChangeListener
@@ -335,12 +296,7 @@ class DnsSettingsActivity : AppCompatActivity() {
             persistDnsRules(if (checked) "свой DNS включён" else "свой DNS выключен")
         }
         btnAddDnsRule.setOnClickListener { showDnsRuleDialog(null) }
-        btnDnsReorder.setOnClickListener {
-            // Тот же заслон, что у остальных правок списка: до конца чтения
-            // файла порядок менять не на чем, и нажатие пропало бы молча.
-            if (!dnsRulesReady("режим изменения порядка")) return@setOnClickListener
-            setReorderMode(!reorderMode)
-        }
+        btnGetPersonalDns.setOnClickListener { openVitrinaMessage() }
         btnResetDnsRules.setOnClickListener { showDnsRulesResetDialog() }
         swAppOverride.setOnCheckedChangeListener { _, _ ->
             if (suppressUiCallbacks) return@setOnCheckedChangeListener
@@ -633,7 +589,7 @@ class DnsSettingsActivity : AppCompatActivity() {
         if (rule.enabled == isChecked) return
         dnsRuleAdapter.replaceAt(position, rule.copy(enabled = isChecked))
         persistDnsRules(
-            "${if (isChecked) "включено" else "выключено"} ${DnsRuleAdapter.transportLabel(rule)} ${rule.value}"
+            "${if (isChecked) "включено" else "выключено"} ${DnsRuleAdapter.transportLabel(rule)} ${DnsAiEntrances.logValue(rule.value)}"
         )
         // Выключить можно и все сразу: список от этого не пустеет, но резолвинг
         // уходит на встроенную цепочку, и об этом честнее сказать сразу.
@@ -649,7 +605,7 @@ class DnsSettingsActivity : AppCompatActivity() {
     private fun onDnsRuleDeleted(position: Int) {
         // Пустой список — это не «без своего DNS», а без резолвинга вообще:
         // хранилище такой файл всё равно не примет и вернёт умолчания.
-        if (dnsRuleAdapter.itemCount <= 1) {
+        if (dnsRuleAdapter.ruleCount <= 1) {
             Toast.makeText(
                 this,
                 "Нужен хотя бы один резолвер: пустой список некому опрашивать.",
@@ -658,7 +614,7 @@ class DnsSettingsActivity : AppCompatActivity() {
             return
         }
         val removed = dnsRuleAdapter.removeAt(position) ?: return
-        persistDnsRules("удалено ${DnsRuleAdapter.transportLabel(removed)} ${removed.value}")
+        persistDnsRules("удалено ${DnsRuleAdapter.transportLabel(removed)} ${DnsAiEntrances.logValue(removed.value)}")
     }
 
     /**
@@ -681,6 +637,9 @@ class DnsSettingsActivity : AppCompatActivity() {
         val kindGroup = view.findViewById<RadioGroup>(R.id.rg_dns_rule_kind)
         val valueField = view.findViewById<EditText>(R.id.et_dns_rule_value)
         val valueError = view.findViewById<TextView>(R.id.tv_dns_rule_value_error)
+        // Пояснения диалога — за значком «i» у короткой подписи; сами тексты остаются в дереве.
+        view.findViewById<TextView>(R.id.tv_dns_rule_transport_hint).collapseToInfoIcon()
+        view.findViewById<TextView>(R.id.tv_dns_rule_value_hint).collapseToInfoIcon()
         // Поля bootstrap на экране больше нет. Адреса, по которым дозваниваются до
         // имени резолвера, приложение подставляет само: для нашего сервера они
         // зашиты (`PriorityDns.KNOWN_ADDRESSES`), для чужого имени берутся свежим
@@ -722,7 +681,8 @@ class DnsSettingsActivity : AppCompatActivity() {
         fun renderTransport() {
             valueField.hint = when (selectedTransport()) {
                 DnsRule.Transport.DOT -> "tls://dns.example.com"
-                DnsRule.Transport.ANY -> "https://dns.example.com/dns-query или tls://dns.example.com"
+                DnsRule.Transport.ANY ->
+                    "https://dns.example.com/dns-query, tls://dns.example.com или личная ссылка DNS-AI"
                 else -> "https://dns.example.com/dns-query"
             }
         }
@@ -744,7 +704,7 @@ class DnsSettingsActivity : AppCompatActivity() {
         }
 
         val dialog = builder
-            .setTitle(if (existing == null) "Новый резолвер" else "Изменить резолвер")
+            .setTitle(if (existing == null) "Новый сторонний резолвер" else "Изменить резолвер")
             .setView(view)
             // Обработчик вешаем после показа: штатный закрывает диалог до того,
             // как мы успеем сказать, что адрес не годится.
@@ -757,15 +717,29 @@ class DnsSettingsActivity : AppCompatActivity() {
             // обработчик показа нужен ему самому. Кнопки красим здесь же.
             NovaDialogs.style(dialog)
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val transport = selectedTransport()
+                val pickedTransport = selectedTransport()
                 val raw = valueField.text?.toString()
+                // Ссылка DNS-AI неверной формы: говорим, что не так, и не цитируем её — токен
+                // это секрет.
+                DnsAiEntrances.linkError(raw)?.let { problem ->
+                    valueError.text = problem
+                    valueError.visibility = View.VISIBLE
+                    return@setOnClickListener
+                }
                 val kind = selectedKind(raw)
                 val value = DnsRule.normalizeValue(kind, raw)
+                // У `cf.` и личных ссылок DoT нет: выбор кнопки для них не действует.
+                val transport = if (value != null && DnsAiEntrances.isDohOnly(value)) {
+                    DnsRule.Transport.DOH
+                } else {
+                    pickedTransport
+                }
                 if (value == null) {
                     // Текст один на все три кнопки: вид больше не следует за
                     // кнопкой, и «Для DoT нужен адрес вида tls://…» требовал бы
                     // того, чего код уже не требует.
-                    valueError.text = "Нужен адрес вида https://host/dns-query или tls://host"
+                    valueError.text =
+                        "Нужен адрес вида https://host/dns-query или tls://host, либо личная ссылка DNS-AI"
                     valueError.visibility = View.VISIBLE
                     return@setOnClickListener
                 }
@@ -798,9 +772,10 @@ class DnsSettingsActivity : AppCompatActivity() {
                         valueError.visibility = View.VISIBLE
                         return@setOnClickListener
                     }
-                    dnsRuleAdapter.addItem(created)
-                    rvDnsRules.post { rvDnsRules.scrollToPosition(dnsRuleAdapter.itemCount - 1) }
-                    persistDnsRules("добавлено ${DnsRuleAdapter.transportLabel(created)} $value")
+                    val addedAt = dnsRuleAdapter.addItem(created)
+                    DnsAiEntrances.personalLinkOf(value)?.let(::checkPersonalLink)
+                    rvDnsRules.post { rvDnsRules.scrollToPosition(addedAt) }
+                    persistDnsRules("добавлено ${DnsRuleAdapter.transportLabel(created)} ${DnsAiEntrances.logValue(value)}")
                 } else {
                     val updated = existing.copy(
                         kind = kind,
@@ -809,7 +784,8 @@ class DnsSettingsActivity : AppCompatActivity() {
                         transport = transport,
                     )
                     dnsRuleAdapter.replaceAt(position, updated)
-                    persistDnsRules("изменено ${DnsRuleAdapter.transportLabel(updated)} $value")
+                    if (existing.value != value) DnsAiEntrances.personalLinkOf(value)?.let(::checkPersonalLink)
+                    persistDnsRules("изменено ${DnsRuleAdapter.transportLabel(updated)} ${DnsAiEntrances.logValue(value)}")
                 }
                 dialog.dismiss()
             }
@@ -817,14 +793,159 @@ class DnsSettingsActivity : AppCompatActivity() {
         dialog.show()
     }
 
+    /**
+     * Окно строки «Персональный DNS-AI»: вставить ссылку DoH из Витрины и проверить её.
+     *
+     * Ссылка попадает в список, только если сервер ответил на настоящий пробный запрос по GET.
+     * Не ответил — правило не создаётся, а причина (сеть, TLS, код сервера) выводится в окне.
+     * Токен — секрет: ни в окне, ни в журнале его нет.
+     */
+    private fun showPersonalDnsDialog() {
+        if (!dnsRulesReady("персональный DNS-AI")) return
+        val builder = AlertDialog.Builder(this)
+        val view = LayoutInflater.from(builder.context).inflate(R.layout.dialog_dns_personal, null, false)
+        NovaFontHelper.apply(view)
+        val field = view.findViewById<EditText>(R.id.et_dns_personal_link)
+        val status = view.findViewById<TextView>(R.id.tv_dns_personal_status)
+        val neutralColor = status.currentTextColor
+        var checking: Job? = null
+
+        fun showStatus(text: String, error: Boolean) {
+            status.text = NovaLanguage.tr(this, text)
+            status.setTextColor(if (error) 0xFFE05252.toInt() else neutralColor)
+            status.visibility = View.VISIBLE
+        }
+
+        val dialog = builder
+            .setTitle("Персональный DNS-AI")
+            .setView(view)
+            // Обработчики вешаем после показа: штатный закрывает окно до проверки.
+            .setPositiveButton("Добавить", null)
+            .setNeutralButton("В Витрину", null)
+            .setNegativeButton("Отмена", null)
+            .create()
+
+        dialog.setOnShowListener {
+            NovaDialogs.style(dialog)
+            val positive = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener { openVitrinaMessage() }
+            positive.setOnClickListener {
+                if (checking?.isActive == true) return@setOnClickListener
+                val raw = field.text?.toString()
+                if (raw.isNullOrBlank()) {
+                    showStatus("Вставьте ссылку из Витрины.", true)
+                    return@setOnClickListener
+                }
+                val link = DnsAiEntrances.parsePersonalLink(raw)
+                if (link == null) {
+                    showStatus(
+                        DnsAiEntrances.linkError(raw)
+                            ?: "Это не личная ссылка DNS-AI. Ожидается https://ru.dns-ai.ru/<токен> (можно с {?dns} на конце).",
+                        true,
+                    )
+                    return@setOnClickListener
+                }
+                if (dnsRuleAdapter.snapshot().any { it.value.equals(link.url, ignoreCase = true) }) {
+                    showStatus("Такая ссылка в списке уже есть.", true)
+                    return@setOnClickListener
+                }
+                positive.isEnabled = false
+                field.isEnabled = false
+                showStatus("Проверяю: пробный запрос к серверу по GET…", false)
+                checking = scope.launch {
+                    val result = withContext(Dispatchers.IO) { DnsAiEntrances.checkLinkDetailed(link, 10) }
+                    LogManager.log(
+                        "DNS-AI: личная ссылка ${link.host}/… — проверка: ${result.state.name.lowercase()}, ${result.describe()}."
+                    )
+                    if (result.state != DnsAiEntrances.LinkState.ACCEPTED) {
+                        positive.isEnabled = true
+                        field.isEnabled = true
+                        val act = this@DnsSettingsActivity
+                        showStatus(
+                            NovaLanguage.tr(act, "Не добавлено:") + " " + result.describe { NovaLanguage.tr(act, it) },
+                            true,
+                        )
+                        return@launch
+                    }
+                    val created = DnsRule.create(DnsRule.Kind.DOH, link.url, emptyList(), DnsRule.Transport.DOH)
+                    if (created == null) {
+                        positive.isEnabled = true
+                        field.isEnabled = true
+                        showStatus("Сервер ответил, но ссылку не удалось сохранить.", true)
+                        return@launch
+                    }
+                    val addedAt = dnsRuleAdapter.addItem(created)
+                    rvDnsRules.post { rvDnsRules.scrollToPosition(addedAt) }
+                    persistDnsRules("добавлено DoH ${DnsAiEntrances.logValue(created.value)}")
+                    Toast.makeText(
+                        this@DnsSettingsActivity,
+                        NovaLanguage.tr(this@DnsSettingsActivity, "Персональный DNS-AI добавлен: сервер ответил."),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                    dialog.dismiss()
+                }
+            }
+        }
+        dialog.setOnDismissListener { checking?.cancel() }
+        dialog.show()
+    }
+
+    /**
+     * Живая проверка личной ссылки DNS-AI после сохранения: один настоящий DoH-запрос по GET.
+     *
+     * Правило сохраняется в любом случае — «не удалось проверить» не значит «не принята», и
+     * человек может быть без сети. Живёт дольше экрана, как и запись правил. Токен в журнал
+     * не попадает.
+     */
+    private fun checkPersonalLink(link: DnsAiEntrances.PersonalLink) {
+        val appContext = applicationContext
+        storeWriterScope.launch {
+            val state = DnsAiEntrances.checkLink(link)
+            LogManager.log("DNS-AI: личная ссылка ${link.host}/… — проверка: ${state.name.lowercase()}.")
+            val text = when (state) {
+                DnsAiEntrances.LinkState.ACCEPTED -> "Личная ссылка DNS-AI принята сервером."
+                DnsAiEntrances.LinkState.REJECTED ->
+                    "Сервер не принял личную ссылку (404): проверьте её. Правило сохранено."
+                DnsAiEntrances.LinkState.UNVERIFIED ->
+                    "Личную ссылку не удалось проверить: сервер не ответил. Правило сохранено."
+            }
+            withContext(Dispatchers.Main) {
+                Toast.makeText(appContext, NovaLanguage.tr(appContext, text), Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    /**
+     * Открывает в Telegram сообщение группы, где Витрина выдаёт личную ссылку DNS-AI.
+     *
+     * Сначала приложение Telegram по `tg://` (тема и сообщение), иначе обычная ссылка
+     * `t.me` — её откроет браузер. Отказ не молчаливый (I4): человеку говорят, что открыть
+     * нечем, и пишут в журнал.
+     */
+    private fun openVitrinaMessage() {
+        val app = Intent(Intent.ACTION_VIEW, Uri.parse(DnsAiEntrances.VITRINA_APP_LINK))
+        val web = Intent(Intent.ACTION_VIEW, Uri.parse(DnsAiEntrances.VITRINA_WEB_LINK))
+        val opened = runCatching {
+            if (app.resolveActivity(packageManager) != null) startActivity(app) else startActivity(web)
+        }.recoverCatching { startActivity(web) }
+        if (opened.isFailure) {
+            LogManager.log("DNS-AI: сообщение Витрины не открылось — ${opened.exceptionOrNull()?.message}")
+            Toast.makeText(
+                this,
+                NovaLanguage.tr(this, "Не удалось открыть Telegram. Ссылка: t.me/nova_txt/322474/375424"),
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+
     private fun showDnsRulesResetDialog() {
         if (!dnsRulesReady("сброс к умолчаниям")) return
         AlertDialog.Builder(this)
             .setTitle("Вернуть резолверы по умолчанию?")
             .setMessage(
-                "Список заменится штатным: наш резолвер, затем Comss, GeoHide, " +
-                    "Cloudflare и Google — все шифрованные, — и последней ступенью " +
-                    "открытый резолвер провайдера. Ваши правила и их порядок пропадут."
+                "Список заменится штатным: наш резолвер и cf.dns-ai.ru — оба шифрованные — " +
+                    "и последней ступенью открытый резолвер провайдера. " +
+                    "Ваши правила, личные ссылки DNS-AI и их порядок пропадут."
             )
             .setPositiveButton("Сбросить") { _, _ ->
                 dnsRuleAdapter.submit(DnsRulesStore.defaults())

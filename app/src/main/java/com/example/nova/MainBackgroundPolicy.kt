@@ -44,4 +44,18 @@ object MainBackgroundPolicy {
             normalized
         }
     }
+
+    /**
+     * Режим фона главного экрана из выбранной фактуры. Отдельной настройки больше
+     * нет: «Созвездия» — анимация, «Без фона» — пустое поле, остальное — узор
+     * ([NovaAppearance]). Анимация на слабом устройстве становится пустым фоном.
+     */
+    fun modeFor(context: Context): String {
+        val requested = when (NovaAppearance.texture(context)) {
+            NovaAppearance.Texture.CONSTELLATION -> MODE_ANIMATION
+            NovaAppearance.Texture.NONE -> MODE_NONE
+            else -> MODE_IMAGE
+        }
+        return effectiveMode(context, requested)
+    }
 }

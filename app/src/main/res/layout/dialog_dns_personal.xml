@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Окно «Персональный DNS-AI»: одно поле для ссылки DoH из Витрины.
+
+    Цвета из темы окна диалога, как и в соседнем `dialog_dns_rule_edit`.
+    Строка состояния показывает ход проверки и причину отказа; токен в неё не попадает.
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingLeft="24dp"
+        android:paddingTop="8dp"
+        android:paddingRight="24dp"
+        android:paddingBottom="0dp">
+
+        <TextView
+            android:id="@+id/tv_dns_personal_hint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="sans-serif"
+            android:text="Вставьте ссылку DoH, которую выдала Витрина, например https://ru.dns-ai.ru/…{?dns}. Запросы к ней идут только методом GET. Пока поле пустое, строка не используется; добавляется она, только если сервер ответил на пробный запрос."
+            android:textColor="?android:attr/textColorSecondary"
+            android:textSize="12sp" />
+
+        <EditText
+            android:id="@+id/et_dns_personal_link"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:fontFamily="sans-serif"
+            android:hint="https://ru.dns-ai.ru/…{?dns}"
+            android:importantForAutofill="no"
+            android:inputType="textUri"
+            android:maxLines="3" />
+
+        <TextView
+            android:id="@+id/tv_dns_personal_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:fontFamily="sans-serif"
+            android:textColor="?android:attr/textColorSecondary"
+            android:textSize="12sp"
+            android:visibility="gone" />
+    </LinearLayout>
+</ScrollView>

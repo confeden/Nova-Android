@@ -83,13 +83,13 @@ internal object NovaTexturePatterns {
         height: Int,
         variant: Int,
     ): Bitmap? {
-        if (texture == NovaAppearance.Texture.NONE) return null
+        if (!texture.hasPattern) return null
         if (width < 8 || height < 8) return null
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val seed = 0x4E4F5641L + texture.ordinal * 7919L + variant * 6700417L
         val sheet = Sheet(bitmap, Random(seed))
         when (texture) {
-            NovaAppearance.Texture.NONE -> Unit
+            NovaAppearance.Texture.NONE, NovaAppearance.Texture.CONSTELLATION -> Unit
             NovaAppearance.Texture.BASALT -> basalt(sheet)
             NovaAppearance.Texture.MARBLE -> marble(sheet)
             NovaAppearance.Texture.WOOD -> wood(sheet)

@@ -433,6 +433,11 @@
                 android:text="AUTO" />
 
             <RadioButton
+                android:id="@+id/rb_exit_nova"
+                style="@style/NovaMainRegionChip"
+                android:text="NOVA" />
+
+            <RadioButton
                 android:id="@+id/rb_exit_ru"
                 style="@style/NovaMainRegionChip"
                 android:text="WARP" />
@@ -453,11 +458,6 @@
                 android:text="PROTON" />
 
             <RadioButton
-                android:id="@+id/rb_exit_nova"
-                style="@style/NovaMainRegionChip"
-                android:text="NOVA" />
-
-            <RadioButton
                 android:id="@+id/rb_exit_tor"
                 style="@style/NovaMainRegionChip"
                 android:text="TOR" />
@@ -465,7 +465,7 @@
             <RadioButton
                 android:id="@+id/rb_exit_dns"
                 style="@style/NovaMainRegionChip"
-                android:text="DNS" />
+                android:text="WHITE" />
         </com.example.nova.FlowRadioGroup>
         </HorizontalScrollView>
 

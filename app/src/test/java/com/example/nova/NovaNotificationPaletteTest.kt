@@ -67,9 +67,9 @@ class NovaNotificationPaletteTest {
 
     @Test
     fun everyThemeIsRead() {
-        // Двенадцать тем — столько в `NovaTheme.ORDER`; меньше значит, что шаблон
+        // 64 оттенка — столько в `NovaTheme.ORDER`; меньше значит, что шаблон
         // имени цвета разошёлся с генератором тем и тест проверяет не всё.
-        assertEquals(12, themeAccents().size)
+        assertEquals(NovaAppearance.HUE_COUNT, themeAccents().size)
     }
 
     @Test

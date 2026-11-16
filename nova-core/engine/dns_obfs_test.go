@@ -60,14 +60,18 @@ func TestObfuscateDNSConnSplitsClientHello(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	defer server.Close()
-	wrapped := obfuscateDNSConn(client, dnsRouteDirectObfs)
-	if _, ok := wrapped.(*fragmentedConn); !ok {
-		t.Fatal("direct-obfs conn is not fragmented")
+	wrapped := obfuscateDNSConn(client, dnsRouteDirectObfs, obfsRegistry[obfsTCP1])
+	if _, ok := wrapped.(*strategyConn); !ok {
+		t.Fatal("direct-obfs conn is not wrapped")
 	}
-	if obfuscateDNSConn(client, dnsRouteDirect) != client {
+	if obfuscateDNSConn(client, dnsRouteDirect, obfsRegistry[obfsTCP1]) != client {
 		t.Fatal("plain direct conn must stay untouched")
 	}
+	if obfuscateDNSConn(client, dnsRouteDirectObfs, obfsRegistry[obfsPlain]) != client {
+		t.Fatal("the plain strategy must not wrap the conn")
+	}
 	hello := make([]byte, 600)
+	hello[0] = 0x16
 	sizes := make(chan []int, 1)
 	go func() {
 		var got []int
@@ -87,7 +91,7 @@ func TestObfuscateDNSConnSplitsClientHello(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := <-sizes
-	if len(got) < 3 || got[0] != 1 || got[1] != 255 {
-		t.Fatalf("segments = %v, want 1,255,256,...", got)
+	if len(got) != 2 || got[0] != 1 {
+		t.Fatalf("segments = %v, want 1,599", got)
 	}
 }

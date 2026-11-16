@@ -14,7 +14,6 @@ import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
@@ -89,7 +88,6 @@ class NovaProfileListController(
     @Volatile private var refreshFailed = false
     @Volatile private var lastReloadAt = 0L
     @Volatile private var lastProbeAt = 0L
-    private val pending = ConcurrentHashMap<String, NovaList.Ping>()
 
     /** Показан ли список (читается и главным потоком при расчёте высоты). */
     @Volatile var shown: Boolean = false
@@ -158,6 +156,14 @@ class NovaProfileListController(
         }
     }
 
+    /**
+     * Оттенок сменили, пока главный экран лежал в стопке. Строки красятся акцентом
+     * при привязке, поэтому перекрасить их можно только перепривязав.
+     */
+    fun accentChanged() {
+        ui.post { if (!destroyed.get()) adapter.notifyDataSetChanged() }
+    }
+
     private fun refreshFeed() {
         if (!feedTried.compareAndSet(false, true)) return
         refreshFailed = false
@@ -221,52 +227,46 @@ class NovaProfileListController(
     private fun maybeProbe(force: Boolean) {
         if (destroyed.get() || !shown || dnsSession) return
         val now = System.currentTimeMillis()
-        if (!force && now - lastProbeAt < REPROBE_MIN_MS) return
-        val all = nodes
-        if (all.isEmpty() || !NovaProxyProcess.isAvailable(appContext)) return
-        val known = pings
-        // Меряем только голову списка в текущем порядке (свои замеры, затем замер
-        // сборщика): список в тысячи узлов не должен стоить телефону минут проб и
-        // мегабайтов трафика. Долгое нажатие перемеряет ту же голову.
-        val head = NovaList.order(all, known).take(PROBE_WINDOW)
-        val targets = if (force) {
-            head
-        } else {
-            head.filter { n -> known[n.id].let { it == null || now - it.at > NovaList.PING_STALE_MS } }
+        // Нажатие на чип NOVA просит свежие замеры, даже если чип уже выбран.
+        val forced = force || forceOnNextProbe.getAndSet(false)
+        if (!forced && now - lastProbeAt < REPROBE_MIN_MS) return
+        if (nodes.isEmpty() || !NovaProxyProcess.isAvailable(appContext)) return
+        if (!probing.compareAndSet(false, true)) {
+            if (forced) forceOnNextProbe.set(true)
+            return
         }
-        if (targets.isEmpty()) return
-        if (!probing.compareAndSet(false, true)) return
         lastProbeAt = now
         thread(start = true, isDaemon = true, name = "nova-list-probe") {
-            var lastFlush = System.currentTimeMillis()
             try {
                 publish()
-                NovaProxyProcess.probe(
-                    appContext, targets, workers = PROBE_WORKERS, timeoutSeconds = PROBE_TIMEOUT_S,
+                // Голова списка пачкой в PAGE_SIZE; не хватило живых — следующая страница ленты.
+                // Весь список не меряется никогда: он стоил бы телефону минут проб и трафика.
+                NovaList.scan(
+                    appContext, force = forced,
                     shouldAbort = { destroyed.get() || dnsSession },
-                    onResult = { node, ping ->
-                        pending[node.id] = ping
-                        val t = System.currentTimeMillis()
-                        if (t - lastFlush >= FLUSH_EVERY_MS) {
-                            lastFlush = t
-                            flushPings()
-                        }
+                    onProgress = {
+                        nodes = NovaList.nodes(appContext)
+                        pings = NovaList.pings(appContext)
+                        publish()
                     },
                 )
             } finally {
                 probing.set(false)
-                flushPings()
+                nodes = NovaList.nodes(appContext)
+                pings = NovaList.pings(appContext)
+                publish()
             }
         }
     }
 
-    private fun flushPings() {
-        if (destroyed.get()) return
-        val batch = HashMap<String, NovaList.Ping>()
-        for (key in pending.keys.toList()) pending.remove(key)?.let { batch[key] = it }
-        if (batch.isNotEmpty()) NovaList.recordPings(appContext, batch)
-        pings = NovaList.pings(appContext)
-        publish()
+    /**
+     * Нажатие на чип NOVA, в том числе уже выбранный: следующий замер идёт принудительно,
+     * и список пересортировывается по свежему пингу.
+     */
+    fun requestFreshPing() {
+        markFreshPingWanted()
+        if (!shown) return
+        runIo { maybeProbe(force = false) }
     }
 
     // ---- нажатия -------------------------------------------------------------------
@@ -352,6 +352,7 @@ class NovaProfileListController(
             holder.ping.visibility = columns
             holder.num.text = "#${row.number}"
             holder.proto.text = row.protocol
+            if (!single) fitProtocolColumn(holder.proto)
             holder.addr.text = row.addr
             holder.mark.text = if (row.active) "●" else ""
             holder.ping.text = when (row.pingKind) {
@@ -370,6 +371,34 @@ class NovaProfileListController(
             holder.itemView.background = if (row.chosen) highlight(accentColor, ctx) else null
         }
 
+        /** Ширина колонки протокола по самой длинной метке страницы; пересчёт только при смене списка. */
+        private var protoWidthList: List<Row>? = null
+        private var protoWidthPx = 0
+
+        /**
+         * Протокол показывается целиком («VLESS·R·GRPC» не режется), а не влезает — сокращается
+         * только адрес с портом: колонка адреса берёт остаток и ужимается многоточием.
+         */
+        private fun fitProtocolColumn(proto: TextView) {
+            val list = currentList
+            if (protoWidthList !== list || protoWidthPx == 0) {
+                val density = proto.resources.displayMetrics.density
+                val paint = proto.paint
+                var widest = 0f
+                for (r in list) if (r.kind == Row.NODE) widest = maxOf(widest, paint.measureText(r.protocol))
+                protoWidthPx = maxOf(
+                    (62f * density).toInt(),
+                    kotlin.math.ceil(widest + 8f * density).toInt(),
+                )
+                protoWidthList = list
+            }
+            val params = proto.layoutParams
+            if (params != null && params.width != protoWidthPx) {
+                params.width = protoWidthPx
+                proto.layoutParams = params
+            }
+        }
+
         private fun highlight(color: Int, ctx: Context): GradientDrawable =
             GradientDrawable().apply {
                 setColor((color and 0x00FFFFFF) or (0x33 shl 24))
@@ -378,15 +407,16 @@ class NovaProfileListController(
     }
 
     companion object {
+        /** Выставляется нажатием на чип NOVA; первый же замер списка сбрасывает его и идёт принудительно. */
+        private val forceOnNextProbe = AtomicBoolean(false)
+
+        fun markFreshPingWanted() = forceOnNextProbe.set(true)
+
         private const val ROW_HEIGHT_DP = 22f
         private const val MIN_ROWS = 2
         private const val MAX_ROWS = 10
         private const val RELOAD_EVERY_MS = 3_000L
         private const val REPROBE_MIN_MS = 60_000L
-        private const val FLUSH_EVERY_MS = 1_000L
-        private const val PROBE_WORKERS = 16
-        private const val PROBE_TIMEOUT_S = 6
-        private const val PROBE_WINDOW = 48
         private const val NORMAL_TEXT = 0xFFB9C4D6.toInt()
 
         private const val KEY_AUTO = "\u0000auto"

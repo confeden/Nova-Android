@@ -29,6 +29,25 @@
             остаётся ровно одна ступень — резолвер провайдера, и она в списке уже
             стоит последней.
         -->
+        <TextView
+            android:id="@+id/tv_dns_rule_transport_label"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="sans-serif"
+            android:text="Транспорт"
+            android:textColor="?android:attr/textColorPrimary"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tv_dns_rule_transport_hint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="sans-serif"
+            android:text="«Любой» — приложение спросит резолвер обоими путями, DoH и DoT, и первым пойдёт тот, что на этой сети отвечает быстрее: порты 443 и 853 блокируют порознь."
+            android:textColor="?android:attr/textColorSecondary"
+            android:textSize="11sp" />
+
         <RadioGroup
             android:id="@+id/rg_dns_rule_kind"
             android:layout_width="match_parent"
@@ -59,11 +78,38 @@
                 android:text="DoT" />
         </RadioGroup>
 
+        <TextView
+            android:id="@+id/tv_dns_rule_value_label"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:fontFamily="sans-serif"
+            android:text="Адрес резолвера"
+            android:textColor="?android:attr/textColorPrimary"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <!--
+            Поля bootstrap здесь больше нет. Адреса, по которым дозваниваются до
+            имени резолвера, подставляет само приложение: свежим резолвом мимо VPN
+            при подключении, а для нашего сервера — из зашитого списка. Спрашивать
+            их у человека значило требовать знания, которого у него нет.
+            Личную ссылку DNS-AI выдаёт Витрина: на неё ведёт кнопка на самом экране DNS.
+        -->
+        <TextView
+            android:id="@+id/tv_dns_rule_value_hint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="sans-serif"
+            android:text="Адреса, по которым приложение дозванивается до имени резолвера, подставляются автоматически. Личную ссылку DNS-AI выдаёт Витрина: кнопка «Получить персональный DNS» на экране настроек DNS."
+            android:textColor="?android:attr/textColorSecondary"
+            android:textSize="11sp" />
+
         <EditText
             android:id="@+id/et_dns_rule_value"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
+            android:layout_marginTop="2dp"
             android:fontFamily="sans-serif"
             android:hint="Адрес резолвера"
             android:importantForAutofill="no"
@@ -79,20 +125,5 @@
             android:textColor="#E05252"
             android:textSize="12sp"
             android:visibility="gone" />
-
-        <!--
-            Поля bootstrap здесь больше нет. Адреса, по которым дозваниваются до
-            имени резолвера, подставляет само приложение: свежим резолвом мимо VPN
-            при подключении, а для нашего сервера — из зашитого списка. Спрашивать
-            их у человека значило требовать знания, которого у него нет.
-        -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:fontFamily="sans-serif"
-            android:text="Адреса, по которым приложение дозванивается до имени резолвера, подставляются автоматически."
-            android:textColor="?android:attr/textColorSecondary"
-            android:textSize="11sp" />
     </LinearLayout>
 </ScrollView>

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,6 +29,12 @@ import (
 //	       | via=auto        — измерить оба и выбрать быстрый
 //	       | via=obfs        — сначала мимо туннеля с фрагментированным ClientHello,
 //	                           при отказе — через туннель (правило владельца для DNS-AI)
+//	       | via=obfsonly    — то же, но без запасного туннеля: отказ отдаётся следующему
+//	                           апстриму списка (цепочка входов DNS-AI)
+//	       | obf=<имя>       — стратегия обфускации прямого пути вместо лестницы по хосту:
+//	                           tcpmid, tcp1, recmid, plain, legacy (dns_obfs_strategy.go, kb D46)
+//	       | m=get           — DoH по GET (`?dns=…`), а не POST: личные ссылки DNS-AI за CDN
+//	                           на POST отвечают 413
 //
 // Нераспознанный токен пропускается молча — это намеренно: старое ядро уже
 // пропускало всё, что не IP, и новый флаг на нём просто не сработает вместо того
@@ -58,11 +65,18 @@ const (
 	// dnsRouteDirectObfs — путь одной попытки: protect() плюс фрагментированный
 	// ClientHello. В строке апстрима не пишется, его выбирает dnsRouteObfsFirst.
 	dnsRouteDirectObfs
+	// dnsRouteObfsOnly — режим апстрима: только прямой путь с обфускацией, без своего запасного
+	// туннеля. Нужен цепочке входов DNS-AI: все прямые входы идут один за другим, и только после
+	// них те же входы через туннель отдельными строками (`via=tunnel`). Пока прямой путь снят
+	// после неудачи, отказывает сразу, не тратя таймаут.
+	dnsRouteObfsOnly
 )
 
 const (
 	dnsUpstreamTokenSeparator = "|"
 	dnsRouteTokenPrefix       = "via="
+	dnsMethodGetToken         = "m=get"
+	dnsObfTokenPrefix         = "obf="
 	dotDefaultPort            = "853"
 )
 
@@ -74,6 +88,12 @@ type dnsUpstreamSpec struct {
 	port      string
 	bootstrap []string
 	route     dnsUpstreamRoute
+	// get — DoH-запрос уходит методом GET.
+	get bool
+	// obf — имя стратегии обфускации, заданное токеном `obf=`; пусто — лестница по хосту.
+	obf string
+	// display — цель для журнала и меток: у личной ссылки путь (токен-секрет) заменён на «…».
+	display string
 }
 
 // encrypted отвечает на единственный вопрос, ради которого различие вообще
@@ -108,8 +128,20 @@ func parseDNSUpstream(raw string) (*dnsUpstreamSpec, error) {
 					spec.route = dnsRouteAuto
 				case "obfs":
 					spec.route = dnsRouteObfsFirst
+				case "obfsonly":
+					spec.route = dnsRouteObfsOnly
 				default:
 					spec.route = dnsRouteDirect
+				}
+				continue
+			}
+			if strings.EqualFold(token, dnsMethodGetToken) {
+				spec.get = true
+				continue
+			}
+			if strings.HasPrefix(strings.ToLower(token), dnsObfTokenPrefix) {
+				if name := strings.TrimSpace(token[len(dnsObfTokenPrefix):]); obfsStrategyByName(name) != nil {
+					spec.obf = strings.ToLower(name)
 				}
 				continue
 			}
@@ -132,6 +164,7 @@ func parseDNSUpstream(raw string) (*dnsUpstreamSpec, error) {
 		}
 		spec.kind = dnsUpstreamDoH
 		spec.target = doh.url
+		spec.display = redactDohURL(doh.url)
 		spec.host = doh.host
 		spec.port = doh.port
 	case strings.HasPrefix(lowered, "tls://"):
@@ -160,10 +193,68 @@ func parseDNSUpstream(raw string) (*dnsUpstreamSpec, error) {
 
 	// Открытый UDP не участвует в гонке путей: подделанный ответ приходит
 	// быстрее настоящего, и «автоматически» выбрало бы подделку.
-	if (spec.route == dnsRouteAuto || spec.route == dnsRouteObfsFirst) && !spec.encrypted() {
+	if (spec.route == dnsRouteAuto || spec.route == dnsRouteObfsFirst || spec.route == dnsRouteObfsOnly) && !spec.encrypted() {
 		spec.route = dnsRouteDirect
 	}
+	if spec.display == "" {
+		spec.display = spec.target
+	}
+	// GET имеет смысл только у DoH.
+	if spec.kind != dnsUpstreamDoH {
+		spec.get = false
+	}
+	// Личная ссылка DNS-AI всегда по GET, даже если токен `m=get` не пришёл: CDN за ней на POST
+	// отвечает 413, так что POST для неё не вариант ни при каких настройках.
+	if spec.kind == dnsUpstreamDoH && isPersonalDNSAILink(spec.target) {
+		spec.get = true
+	}
 	return spec, nil
+}
+
+// isPersonalDNSAILink — адрес вида `https://<имя>.dns-ai.ru/<токен>`: поддомен dns-ai.ru с одним
+// сегментом пути, который не `dns-query`. Шаблон `{?dns}` до ядра не доходит, приложение его снимает.
+func isPersonalDNSAILink(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	if !strings.HasSuffix(host, ".dns-ai.ru") {
+		return false
+	}
+	path := strings.Trim(parsed.Path, "/")
+	return path != "" && path != "dns-query" && !strings.Contains(path, "/")
+}
+
+// redactUpstreamList готовит список апстримов для журнала: у каждого строки цель пропущена через
+// [redactDohURL], остальные токены (bootstrap, via=, m=) остаются.
+func redactUpstreamList(upstreams []string) string {
+	out := make([]string, 0, len(upstreams))
+	for _, entry := range upstreams {
+		target, rest, found := strings.Cut(entry, dnsUpstreamTokenSeparator)
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(target)), "https://") {
+			target = redactDohURL(strings.TrimSpace(target))
+		}
+		if found {
+			target += dnsUpstreamTokenSeparator + rest
+		}
+		out = append(out, target)
+	}
+	return strings.Join(out, ",")
+}
+
+// redactDohURL прячет путь DoH-ссылки: у личных ссылок DNS-AI (`https://ru.dns-ai.ru/<токен>`)
+// путь — это секрет устройства, и в журнал он не попадает. Обычный `/dns-query` остаётся.
+func redactDohURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return raw
+	}
+	path := strings.TrimRight(parsed.Path, "/")
+	if path == "" || path == "/dns-query" {
+		return raw
+	}
+	return parsed.Scheme + "://" + parsed.Host + "/…"
 }
 
 // -- выбор пути -----------------------------------------------------------
@@ -315,7 +406,7 @@ func resetDotConns() {
 	}
 }
 
-func dialDoT(spec *dnsUpstreamSpec, route dnsUpstreamRoute, timeout time.Duration) (*tls.Conn, error) {
+func dialDoT(spec *dnsUpstreamSpec, route dnsUpstreamRoute, attempt *dnsAttempt, timeout time.Duration) (*tls.Conn, error) {
 	dialer := &net.Dialer{
 		Timeout:   timeout,
 		KeepAlive: 30 * time.Second,
@@ -333,10 +424,14 @@ func dialDoT(spec *dnsUpstreamSpec, route dnsUpstreamRoute, timeout time.Duratio
 	if net.ParseIP(spec.host) != nil {
 		addresses = append(addresses, net.JoinHostPort(spec.host, spec.port))
 	} else {
-		for _, ip := range spec.bootstrap {
-			addresses = append(addresses, net.JoinHostPort(ip, spec.port))
+		if attempt != nil && attempt.pin != "" {
+			addresses = append(addresses, net.JoinHostPort(attempt.pin, spec.port))
+		} else {
+			for _, ip := range spec.bootstrap {
+				addresses = append(addresses, net.JoinHostPort(ip, spec.port))
+			}
+			addresses = append(addresses, net.JoinHostPort(spec.host, spec.port))
 		}
-		addresses = append(addresses, net.JoinHostPort(spec.host, spec.port))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -353,7 +448,11 @@ func dialDoT(spec *dnsUpstreamSpec, route dnsUpstreamRoute, timeout time.Duratio
 			lastErr = err
 			continue
 		}
-		raw = obfuscateDNSConn(raw, route)
+		var strat *obfsStrategy
+		if attempt != nil {
+			strat = attempt.strat
+		}
+		raw = obfuscateDNSConn(raw, route, strat)
 		tlsConn := tls.Client(raw, &tls.Config{
 			ServerName: serverName,
 			MinVersion: tls.VersionTLS12,
@@ -402,11 +501,11 @@ func dotExchange(conn *tls.Conn, query []byte, timeout time.Duration) ([]byte, e
 // простоявший канал молча, и первая же ошибка на нём — это «переподключись», а
 // не «сеть не работает». Второй отказ уже настоящий, и повторять его значило бы
 // платить таймаут дважды.
-func resolveDNSViaDoT(query []byte, spec *dnsUpstreamSpec, route dnsUpstreamRoute, timeout time.Duration) ([]byte, error) {
+func resolveDNSViaDoT(query []byte, spec *dnsUpstreamSpec, route dnsUpstreamRoute, attempt *dnsAttempt, timeout time.Duration) ([]byte, error) {
 	if len(query) < 12 {
 		return nil, errors.New("dns payload too short")
 	}
-	entry := dotConnFor(routeKey(spec.raw, route))
+	entry := dotConnFor(routeKey(spec.raw, route) + "#" + attempt.key())
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 
@@ -419,7 +518,7 @@ func resolveDNSViaDoT(query []byte, spec *dnsUpstreamSpec, route dnsUpstreamRout
 		entry.conn = nil
 	}
 
-	conn, err := dialDoT(spec, route, timeout)
+	conn, err := dialDoT(spec, route, attempt, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -440,7 +539,7 @@ func routeKey(raw string, route dnsUpstreamRoute) string {
 	switch route {
 	case dnsRouteTunnel:
 		return raw + "#tunnel"
-	case dnsRouteDirectObfs:
+	case dnsRouteDirectObfs, dnsRouteObfsOnly:
 		return raw + "#obfs"
 	default:
 		return raw + "#direct"

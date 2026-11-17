@@ -1519,175 +1519,107 @@ private fun slime(s: Sheet) {
     }
 }
 
-/**
- * Осколки: рекурсивное дробление многоугольника от точки удара.
- *
- * Многоугольник режется хордой от точки на одном ребре до точки на другом, и к
- * обеим половинам применяется то же правило: излом порождает изломы. Россыпь
- * независимых треугольников так не выглядит — у неё нет общих рёбер, и рисунок
- * читается как конфетти, а не как разбитое стекло.
- *
- * Новое здесь — точка удара. Порог, ниже которого грань дробить перестают,
- * зависит от расстояния до неё: у самого удара стекло в пыль, поодаль — крупные
- * пластины. Это настоящий закон разрушения, и он же делает картинку читаемой:
- * глаз сразу находит центр. Оттуда же расходятся радиальные разломы.
- */
+/** Broken glass: branching radial cracks, bowed rings and a crushed impact core. */
 private fun shards(s: Sheet) {
     val random = s.random
-    val tierAlpha = intArrayOf(12, 21, 32, 46)
-    val facets = Array(tierAlpha.size) { Path() }
-    val edges = Path()
-    val radials = Path()
-
+    val main = Path()
+    val fine = Path()
     val impactX = s.w * (0.25f + random.nextFloat() * 0.5f)
     val impactY = s.h * (0.2f + random.nextFloat() * 0.6f)
-
-    fun emit(poly: FloatArray) {
-        val n = poly.size / 2
-        var cx = 0f
-        var cy = 0f
-        for (i in 0 until n) {
-            cx += poly[i * 2]
-            cy += poly[i * 2 + 1]
-        }
-        cx /= n
-        cy /= n
-        // Ступень яркости своя у каждой грани: соседи, отличающиеся альфой,
-        // читаются как отдельные плоскости, повёрнутые к свету по-разному.
-        val face = facets[random.nextInt(tierAlpha.size)]
-        for (i in 0 until n) {
-            // Грань поджимается к своему центру: зазор между соседями и есть
-            // линия разлома — сквозь щель виден фон.
-            val px = cx + (poly[i * 2] - cx) * 0.93f
-            val py = cy + (poly[i * 2 + 1] - cy) * 0.93f
-            if (i == 0) {
-                face.moveTo(px, py)
-                edges.moveTo(px, py)
-            } else {
-                face.lineTo(px, py)
-                edges.lineTo(px, py)
+    val count = 9 + random.nextInt(6)
+    val rotation = random.nextFloat() * TAU
+    val lengths = FloatArray(count)
+    val rays = Array(count) { i ->
+        val angle = rotation + TAU * (i + (random.nextFloat() - 0.5f) * 0.6f) / count
+        val length = 0.7f + random.nextFloat() * 1.6f
+        lengths[i] = length
+        val points = FloatArray(22)
+        points[0] = impactX
+        points[1] = impactY
+        var heading = angle
+        main.moveTo(impactX, impactY)
+        for (step in 1..10) {
+            heading += (random.nextFloat() - 0.5f) * 0.32f
+            val x = points[(step - 1) * 2] + cos(heading) * length / 10f
+            val y = points[(step - 1) * 2 + 1] + sin(heading) * length / 10f
+            points[step * 2] = x
+            points[step * 2 + 1] = y
+            main.lineTo(x, y)
+            if (step == 3 || step == 5 || step == 7) {
+                var bx = x
+                var by = y
+                var turn = heading + (if (random.nextBoolean()) 1f else -1f) *
+                    (0.35f + random.nextFloat() * 0.45f)
+                val reach = length * (10 - step) / 10f * (0.2f + random.nextFloat() * 0.45f)
+                fine.moveTo(bx, by)
+                repeat(4) {
+                    turn += (random.nextFloat() - 0.5f) * 0.4f
+                    bx += cos(turn) * reach / 4f
+                    by += sin(turn) * reach / 4f
+                    fine.lineTo(bx, by)
+                }
             }
         }
-        face.close()
-        edges.close()
+        points
     }
 
-    fun split(poly: FloatArray, depth: Int) {
-        val n = poly.size / 2
-        var cross = 0f
-        var cx = 0f
-        var cy = 0f
-        for (i in 0 until n) {
-            val j = (i + 1) % n
-            cross += poly[i * 2] * poly[j * 2 + 1] - poly[j * 2] * poly[i * 2 + 1]
-            cx += poly[i * 2]
-            cy += poly[i * 2 + 1]
-        }
-        cx /= n
-        cy /= n
-        val area = abs(cross) * 0.5f
-        // Чем дальше от удара, тем крупнее осколок, которому позволено уцелеть.
-        val reach = hypot(cx - impactX, cy - impactY)
-        val floorArea = 0.00018f + reach * reach * 0.008f
-        if (depth == 0 || area < floorArea) {
-            emit(poly)
-            return
-        }
-        val a = random.nextInt(n)
-        // Сдвиг до второго ребра в диапазоне 1..n−2: обе половины остаются
-        // многоугольниками, вырожденных «половин» из двух точек не бывает.
-        val off = 1 + random.nextInt(n - 2)
-        val b = (a + off) % n
-        val ta = 0.22f + random.nextFloat() * 0.56f
-        val tb = 0.22f + random.nextFloat() * 0.56f
-        val an = (a + 1) % n
-        val bn = (b + 1) % n
-        val ax = poly[a * 2] + (poly[an * 2] - poly[a * 2]) * ta
-        val ay = poly[a * 2 + 1] + (poly[an * 2 + 1] - poly[a * 2 + 1]) * ta
-        val bx = poly[b * 2] + (poly[bn * 2] - poly[b * 2]) * tb
-        val by = poly[b * 2 + 1] + (poly[bn * 2 + 1] - poly[b * 2 + 1]) * tb
-
-        val left = FloatArray((2 + off) * 2)
-        left[0] = ax
-        left[1] = ay
-        for (k in 1..off) {
-            val vtx = (a + k) % n
-            left[k * 2] = poly[vtx * 2]
-            left[k * 2 + 1] = poly[vtx * 2 + 1]
-        }
-        left[(off + 1) * 2] = bx
-        left[(off + 1) * 2 + 1] = by
-
-        val rest = n - off
-        val right = FloatArray((2 + rest) * 2)
-        right[0] = bx
-        right[1] = by
-        for (k in 1..rest) {
-            val vtx = (b + k) % n
-            right[k * 2] = poly[vtx * 2]
-            right[k * 2 + 1] = poly[vtx * 2 + 1]
-        }
-        right[(rest + 1) * 2] = ax
-        right[(rest + 1) * 2 + 1] = ay
-
-        split(left, depth - 1)
-        split(right, depth - 1)
+    fun point(ray: Int, radius: Float): Pair<Float, Float>? {
+        val at = radius / lengths[ray] * 10f
+        if (at >= 10f) return null
+        val step = at.toInt()
+        val t = at - step
+        val points = rays[ray]
+        return Pair(
+            points[step * 2] * (1f - t) + points[(step + 1) * 2] * t,
+            points[step * 2 + 1] * (1f - t) + points[(step + 1) * 2 + 1] * t,
+        )
     }
 
-    // Пластины покрывают лист с запасом: рисунок идёт от края до края.
-    val plate = 0.62f
-    var py = -plate * 0.5f
-    while (py < s.h + plate * 0.5f) {
-        var px = -plate * 0.5f
-        while (px < s.w + plate * 0.5f) {
-            val quad = FloatArray(8)
-            val cx = px + plate * (0.3f + random.nextFloat() * 0.4f)
-            val cy = py + plate * (0.3f + random.nextFloat() * 0.4f)
-            for (i in 0 until 4) {
-                val ang = i * 1.5708f + (random.nextFloat() - 0.5f) * 0.8f
-                val rr = plate * (0.55f + random.nextFloat() * 0.4f)
-                quad[i * 2] = cx + cos(ang) * rr
-                quad[i * 2 + 1] = cy + sin(ang) * rr
-            }
-            split(quad, 7)
-            px += plate
+    // Bowed, irregular rings join the radial fractures, as in the PC glass pattern.
+    var radius = 0.065f
+    repeat(7) { ring ->
+        val radii = FloatArray(count) { radius * (0.8f + random.nextFloat() * 0.4f) }
+        for (i in 0 until count) {
+            if (random.nextFloat() < 0.12f + ring * 0.06f) continue
+            val next = (i + 1) % count
+            val p = point(i, radii[i]) ?: continue
+            val q = point(next, radii[next]) ?: continue
+            val bow = 0.04f + random.nextFloat() * 0.22f
+            val cx = impactX + ((p.first + q.first) * 0.5f - impactX) * (1f - bow)
+            val cy = impactY + ((p.second + q.second) * 0.5f - impactY) * (1f - bow)
+            val path = if (ring < 3) main else fine
+            path.moveTo(p.first, p.second)
+            path.quadTo(cx, cy, q.first, q.second)
         }
-        py += plate
+        radius *= 1.42f + random.nextFloat() * 0.3f
     }
-
-    // Радиальные разломы от удара: по ним стекло и разошлось.
-    repeat(13) {
+    repeat(24) {
         val angle = random.nextFloat() * TAU
-        val len = 0.35f + random.nextFloat() * 0.75f
-        var x = impactX
-        var y = impactY
-        var a = angle
-        radials.moveTo(x, y)
-        val steps = 7
-        for (i in 0 until steps) {
-            a += (random.nextFloat() - 0.5f) * 0.30f
-            x += cos(a) * len / steps
-            y += sin(a) * len / steps
-            radials.lineTo(x, y)
-        }
+        val r = sqrt(random.nextFloat()) * 0.06f
+        val x = impactX + cos(angle) * r
+        val y = impactY + sin(angle) * r
+        val heading = random.nextFloat() * TAU
+        val length = 0.008f + random.nextFloat() * 0.025f
+        fine.moveTo(x, y)
+        fine.lineTo(x + cos(heading) * length, y + sin(heading) * length)
     }
-
     s.drawing { canvas ->
         val paint = s.paint
-        paint.style = Paint.Style.FILL
-        for (tier in tierAlpha.indices) {
-            paint.alpha = tierAlpha[tier]
-            canvas.drawPath(facets[tier], paint)
-        }
-        // Рёбра поверх заливки и ярче неё — блик на сколе.
         paint.style = Paint.Style.STROKE
+        paint.strokeJoin = Paint.Join.ROUND
+        paint.strokeCap = Paint.Cap.ROUND
+        paint.strokeWidth = 0.008f
+        paint.alpha = 24
+        canvas.drawPath(main, paint)
         paint.strokeWidth = 0.0016f
-        paint.alpha = 96
-        canvas.drawPath(edges, paint)
-        paint.strokeWidth = 0.0035f
-        paint.alpha = 150
-        canvas.drawPath(radials, paint)
+        paint.alpha = 175
+        canvas.drawPath(fine, paint)
+        paint.strokeWidth = 0.0026f
+        paint.alpha = 235
+        canvas.drawPath(main, paint)
         paint.style = Paint.Style.FILL
+        paint.strokeJoin = Paint.Join.MITER
+        paint.strokeCap = Paint.Cap.BUTT
         paint.alpha = 255
     }
 }

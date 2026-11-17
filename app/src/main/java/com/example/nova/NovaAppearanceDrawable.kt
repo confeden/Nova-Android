@@ -80,6 +80,11 @@ class NovaAppearanceDrawable(
 
     private val texturePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val rainPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val frozenRainPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+        colorFilter = PorterDuffColorFilter(accent, PorterDuff.Mode.SRC_IN)
+        alpha = rainAlpha
+    }
+    private val frozenRainTimeMillis = (NovaAnimationClock.peek() * 1000.0).toLong()
 
     /** Следующий кадр живого дождя. */
     private val frameTick = Runnable { invalidateSelf() }
@@ -184,7 +189,15 @@ class NovaAppearanceDrawable(
         // Слой без границ: масштабированное содержимое выходит за прямоугольник вида.
         if (alpha < 255) canvas.saveLayerAlpha(null, alpha)
         if (blackBase) canvas.drawRect(bounds, blackPaint)
-        drawRain(canvas, bounds, time)
+        if (!animated || !NovaAnimationClock.isRunning()) {
+            val frameMillis = if (animated) (time * 1000.0).toLong() else frozenRainTimeMillis
+            requestPattern(bounds, frameMillis)
+            pattern?.let { bitmap ->
+                if (!bitmap.isRecycled) canvas.drawBitmap(bitmap, null, bounds, frozenRainPaint)
+            }
+        } else {
+            drawRain(canvas, bounds, time)
+        }
         canvas.restoreToCount(checkpoint)
     }
 
@@ -211,13 +224,13 @@ class NovaAppearanceDrawable(
         canvas.restore()
     }
 
-    private fun requestPattern(bounds: Rect) {
+    private fun requestPattern(bounds: Rect, frameTimeMillis: Long? = null) {
         if (!texture.hasPattern) return
-        if (texture == NovaAppearance.Texture.MATRIX) return
+        if (texture == NovaAppearance.Texture.MATRIX && frameTimeMillis == null) return
         val width = bounds.width()
         val height = bounds.height()
         if (width <= 0 || height <= 0) return
-        val key = NovaTextureCache.keyFor(texture, width, height, variant)
+        val key = NovaTextureCache.keyFor(texture, width, height, variant, frameTimeMillis)
         if (key == requested) return
         requested = key
         val ready = NovaTextureCache.request(key) { built ->

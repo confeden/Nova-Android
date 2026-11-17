@@ -207,8 +207,7 @@ class NovaTileService : TileService() {
             if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return false
             if (isNovaVpnOwner(caps)) return true
             val transportLabel = extractVpnTransportLabel(caps)
-            return transportLabel.contains("NovaVPN", ignoreCase = true) ||
-                transportLabel.contains("NovaOperaVPN", ignoreCase = true)
+            return NovaVpnSessionLabels.isNova(transportLabel)
         }
 
         val active = cm.activeNetwork

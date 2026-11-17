@@ -1,6 +1,9 @@
 package com.example.nova
 
 import android.content.Context
+import java.net.Proxy
+import java.net.URI
+import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -42,10 +45,11 @@ object WarpIdentityBackfill {
         ignoreCooldown: Boolean = false,
         onIdentityReady: () -> Unit = {},
         awaitWindow: () -> AutoCloseable? = { AutoCloseable { } },
-    ) {
+        tunnelProxyUrl: String = "",
+    ): Boolean {
         val clientData = ClientData(context)
-        if (!clientData.shouldAttemptWarpIdentityBackfill(ignoreCooldown = ignoreCooldown)) return
-        if (!running.compareAndSet(false, true)) return
+        if (!clientData.shouldAttemptWarpIdentityBackfill(ignoreCooldown = ignoreCooldown)) return false
+        if (!running.compareAndSet(false, true)) return false
 
         Thread(
             {
@@ -60,6 +64,14 @@ object WarpIdentityBackfill {
                     // Состояние могло измениться за время паузы: например,
                     // личность пришла обычным путём при переподключении.
                     if (!clientData.shouldAttemptWarpIdentityBackfill(ignoreCooldown = ignoreCooldown)) return@Thread
+                    if (!tunnelStillUp()) return@Thread
+                    val proxy = if (tunnelProxyUrl.isBlank()) Proxy.NO_PROXY else {
+                        val uri = URI(tunnelProxyUrl)
+                        Proxy(
+                            if (uri.scheme == "http") Proxy.Type.HTTP else Proxy.Type.SOCKS,
+                            InetSocketAddress(uri.host, uri.port),
+                        )
+                    }
 
                     logger(
                         "Готового MASQUE-профиля нет, а туннель уже поднят. Тихо готовим его через туннель: " +
@@ -75,7 +87,7 @@ object WarpIdentityBackfill {
                             logger = logger,
                             shouldAbort = { !tunnelStillUp() },
                         )
-                        val config = client.registerThroughActiveTunnel()
+                        val config = client.registerThroughActiveTunnel(proxy = proxy)
                         if (config == null || config.accessToken.isNullOrBlank() || config.deviceId.isNullOrBlank()) {
                             clientData.markWarpIdentityBackfillFailure()
                             logger(
@@ -105,10 +117,11 @@ object WarpIdentityBackfill {
                         !knownAccountType.equals("free", ignoreCase = true)
                     if (license.isNotBlank() && !alreadyLicensed) {
                         runCatching {
-                            nova.Nova.setWarpLicense(
+                            nova.Nova.setWarpLicenseViaProxy(
                                 reserve.accessToken.orEmpty(),
                                 reserve.deviceId.orEmpty(),
                                 license,
+                                tunnelProxyUrl,
                             )
                         }.onSuccess { accountType ->
                             clientData.setWarpAccountType(accountType)
@@ -146,19 +159,13 @@ object WarpIdentityBackfill {
                         return@Thread
                     }
                     val masqueJson = runCatching {
-                        nova.Nova.setPlainCloudflareApiPreferred(true)
-                        try {
-                            nova.Nova.ensureMasqueConfig(
-                                clientData.getMasqueConfigJson().orEmpty(),
-                                reserve.accessToken.orEmpty(),
-                                reserve.deviceId.orEmpty(),
-                                "Nova Android",
-                            ).orEmpty()
-                        } finally {
-                            // Предпочтение снимаем сразу: вне туннеля обычный запрос
-                            // упрётся в блокировку по SNI, и обфускация снова нужна.
-                            nova.Nova.setPlainCloudflareApiPreferred(false)
-                        }
+                        nova.Nova.ensureMasqueConfigViaProxy(
+                            clientData.getMasqueConfigJson().orEmpty(),
+                            reserve.accessToken.orEmpty(),
+                            reserve.deviceId.orEmpty(),
+                            "Nova Android",
+                            tunnelProxyUrl,
+                        ).orEmpty()
                     }.getOrElse { error ->
                         logger("Регистрация MASQUE через туннель не удалась: ${error.message}")
                         ""
@@ -198,5 +205,6 @@ object WarpIdentityBackfill {
             priority = Thread.MIN_PRIORITY
             start()
         }
+        return true
     }
 }

@@ -369,6 +369,13 @@ func EnsureMasqueConfig(existingConfigJSON string, accessToken string, deviceID 
 	return novaengine.EnsureMasqueConfig(existingConfigJSON, accessToken, deviceID, deviceName)
 }
 
+// EnsureMasqueConfigViaProxy enrolls only through the supplied live tunnel route.
+// An empty proxyURL uses the system VPN; otherwise use a loopback HTTP/SOCKS5 URL.
+// The route belongs to this call and is never changed globally.
+func EnsureMasqueConfigViaProxy(existingConfigJSON string, accessToken string, deviceID string, deviceName string, proxyURL string) (string, error) {
+	return novaengine.EnsureMasqueConfigViaProxy(existingConfigJSON, accessToken, deviceID, deviceName, proxyURL)
+}
+
 // LastMasqueEnrollResult returns the identity JSON of the most recent enrollment without
 // making any request, or an empty string when there is none.
 //
@@ -422,6 +429,11 @@ func RegisterWarp(publicKey string, locale string, deviceModel string) (string, 
 // account type as the server reports it.
 func SetWarpLicense(accessToken string, deviceID string, license string) (string, error) {
 	return novaengine.SetWarpLicense(accessToken, deviceID, license)
+}
+
+// SetWarpLicenseViaProxy binds a license through the supplied active tunnel route.
+func SetWarpLicenseViaProxy(accessToken string, deviceID string, license string, proxyURL string) (string, error) {
+	return novaengine.SetWarpLicenseViaProxy(accessToken, deviceID, license, proxyURL)
 }
 
 // CancelRegisterWarp cancels an in-flight direct WARP registration attempt.

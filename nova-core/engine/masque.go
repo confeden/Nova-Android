@@ -87,13 +87,13 @@ type MasqueIdentity struct {
 	// (`engage.cloudflareclient.com:2408`). Набирать по ней нельзя: MASQUE дозванивается
 	// по IP, а имя вне туннеля режется по SNI. Хранится и печатается ради сверки: если
 	// выданный нам IP разойдётся с тем, что стоит за этим именем, это будет видно.
-	EndpointHost         string   `json:"endpoint_host,omitempty"`
-	IPv4                 string   `json:"ipv4"`
-	IPv6                 string   `json:"ipv6"`
-	Ports                []int    `json:"ports,omitempty"`
-	AccessToken          string   `json:"access_token,omitempty"`
-	DeviceID             string   `json:"device_id,omitempty"`
-	License              string   `json:"license,omitempty"`
+	EndpointHost string `json:"endpoint_host,omitempty"`
+	IPv4         string `json:"ipv4"`
+	IPv6         string `json:"ipv6"`
+	Ports        []int  `json:"ports,omitempty"`
+	AccessToken  string `json:"access_token,omitempty"`
+	DeviceID     string `json:"device_id,omitempty"`
+	License      string `json:"license,omitempty"`
 	// IssuedAt — момент выпуска ключа, unix-секунды.
 	//
 	// Замер 2026-08-12 (ROADMAP §3g): ключ перестаёт обслуживаться примерно за двадцать
@@ -252,6 +252,21 @@ var (
 )
 
 func EnsureMasqueConfig(existingConfigJSON string, accessToken string, deviceID string, deviceName string) (string, error) {
+	return ensureMasqueConfigWithContext(context.Background(), existingConfigJSON, accessToken, deviceID, deviceName)
+}
+
+// EnsureMasqueConfigViaProxy enrolls only through the supplied live tunnel route.
+// An empty proxy URL uses the system VPN; proxy routes must be loopback HTTP/SOCKS5.
+// Failures never fall back to a direct or obfuscated request.
+func EnsureMasqueConfigViaProxy(existingConfigJSON string, accessToken string, deviceID string, deviceName string, proxyURL string) (string, error) {
+	ctx, err := cloudflareTunnelContext(proxyURL)
+	if err != nil {
+		return "", err
+	}
+	return ensureMasqueConfigWithContext(ctx, existingConfigJSON, accessToken, deviceID, deviceName)
+}
+
+func ensureMasqueConfigWithContext(ctx context.Context, existingConfigJSON string, accessToken string, deviceID string, deviceName string) (string, error) {
 	accessToken = strings.TrimSpace(accessToken)
 	deviceID = strings.TrimSpace(deviceID)
 
@@ -284,11 +299,11 @@ func EnsureMasqueConfig(existingConfigJSON string, accessToken string, deviceID 
 		deviceName = masqueDeviceNameDefault
 	}
 
-	return ensureMasqueConfigOnce(accessToken, deviceID, deviceName)
+	return ensureMasqueConfigOnce(ctx, accessToken, deviceID, deviceName)
 }
 
 // ensureMasqueConfigOnce пропускает к выпуску ключа ровно один вызов на устройство.
-func ensureMasqueConfigOnce(accessToken string, deviceID string, deviceName string) (string, error) {
+func ensureMasqueConfigOnce(ctx context.Context, accessToken string, deviceID string, deviceName string) (string, error) {
 	masqueEnrollMu.Lock()
 	if entry, ok := masqueEnrollMemo[deviceID]; ok && entry.json != "" {
 		if age := time.Since(entry.issuedAt); age < masqueEnrollMemoTTL {
@@ -318,7 +333,7 @@ func ensureMasqueConfigOnce(accessToken string, deviceID string, deviceName stri
 	masqueEnrollInflight[deviceID] = call
 	masqueEnrollMu.Unlock()
 
-	call.json, call.err = performMasqueEnroll(accessToken, deviceID, deviceName)
+	call.json, call.err = performMasqueEnroll(ctx, accessToken, deviceID, deviceName)
 
 	masqueEnrollMu.Lock()
 	delete(masqueEnrollInflight, deviceID)
@@ -366,7 +381,7 @@ func ForgetMasqueEnrollResult(deviceID string) {
 	delete(masqueEnrollMemo, deviceID)
 }
 
-func performMasqueEnroll(accessToken string, deviceID string, deviceName string) (string, error) {
+func performMasqueEnroll(ctx context.Context, accessToken string, deviceID string, deviceName string) (string, error) {
 	privKeyBytes, pubKeyBytes, err := generateMasqueKeyPair()
 	if err != nil {
 		return "", fmt.Errorf("failed to generate MASQUE key pair: %w", err)
@@ -377,7 +392,7 @@ func performMasqueEnroll(accessToken string, deviceID string, deviceName string)
 		ID:    deviceID,
 	}
 
-	updatedAccountData, apiErr, err := enrollMasqueKey(accountData, pubKeyBytes, deviceName)
+	updatedAccountData, apiErr, err := enrollMasqueKey(ctx, accountData, pubKeyBytes, deviceName)
 	if err != nil {
 		if apiErr != nil {
 			return "", fmt.Errorf("failed to enroll MASQUE key: %w (%s)", err, apiErr.ErrorsAsString("; "))
@@ -395,7 +410,7 @@ func performMasqueEnroll(accessToken string, deviceID string, deviceName string)
 	// отдельным запросом вместо того, чтобы сдаваться.
 	if len(updatedAccountData.Config.Peers) == 0 {
 		log.Printf("MASQUE enroll: ответ пришёл без peers. Ключ уже выпущен, дочитываем запись устройства.")
-		if fetched, ferr := fetchMasqueDeviceRecord(accountData); ferr != nil {
+		if fetched, ferr := fetchMasqueDeviceRecord(ctx, accountData); ferr != nil {
 			log.Printf("MASQUE enroll: дочитать запись устройства не удалось: %v", ferr)
 		} else if len(fetched.Config.Peers) > 0 {
 			log.Printf("MASQUE enroll: запись устройства дала peers=%d.", len(fetched.Config.Peers))
@@ -420,8 +435,8 @@ func performMasqueEnroll(accessToken string, deviceID string, deviceName string)
 //
 // Тот же путь, что и enroll, только GET и без тела: правки не вносим, поэтому ключ
 // повторно не ротируется.
-func fetchMasqueDeviceRecord(accountData usquemodels.AccountData) (usquemodels.AccountData, error) {
-	resp, err := doCloudflareAPIRequest(cloudflareAPIRequest{
+func fetchMasqueDeviceRecord(ctx context.Context, accountData usquemodels.AccountData) (usquemodels.AccountData, error) {
+	resp, err := doCloudflareAPIRequestWithContext(ctx, cloudflareAPIRequest{
 		label:     "masque-device",
 		method:    http.MethodGet,
 		path:      warpRegistrationPath + "/" + strings.TrimSpace(accountData.ID),
@@ -442,7 +457,7 @@ func fetchMasqueDeviceRecord(accountData usquemodels.AccountData) (usquemodels.A
 	return fetched, nil
 }
 
-func enrollMasqueKey(accountData usquemodels.AccountData, pubKey []byte, deviceName string) (usquemodels.AccountData, *usquemodels.APIError, error) {
+func enrollMasqueKey(ctx context.Context, accountData usquemodels.AccountData, pubKey []byte, deviceName string) (usquemodels.AccountData, *usquemodels.APIError, error) {
 	if strings.TrimSpace(accountData.Token) == "" || strings.TrimSpace(accountData.ID) == "" {
 		return usquemodels.AccountData{}, nil, errors.New("MASQUE enrollment requires access token and device id")
 	}
@@ -462,7 +477,7 @@ func enrollMasqueKey(accountData usquemodels.AccountData, pubKey []byte, deviceN
 	}
 	logMasqueEnrollExchange("запрос", jsonData)
 
-	resp, err := doCloudflareAPIRequest(cloudflareAPIRequest{
+	resp, err := doCloudflareAPIRequestWithContext(ctx, cloudflareAPIRequest{
 		label:     "masque-enroll",
 		method:    http.MethodPatch,
 		path:      warpRegistrationPath + "/" + strings.TrimSpace(accountData.ID),
@@ -516,7 +531,7 @@ func enrollMasqueKey(accountData usquemodels.AccountData, pubKey []byte, deviceN
 	// «HTTP 200 OK» и молча игнорирует — флаг в ответе остаётся false. Работает
 	// `{"warp_enabled": true}`. Поэтому смотрим на ответ, а не на код возврата.
 	if !updatedAccount.WarpEnabled {
-		activated, body, err := activateWarpOnDevice(accountData, "warp_enabled")
+		activated, body, err := activateWarpOnDevice(ctx, accountData, "warp_enabled")
 		if err != nil {
 			log.Printf("MASQUE enroll: включить WARP на устройстве не удалось: %v", err)
 		} else {
@@ -569,6 +584,7 @@ func logMasqueDeviceShape(stage string, body []byte) {
 // не обслуживается. Именно так выглядел отказ MASQUE — ключ принят по API, а служба
 // закрывает соединение алертом `access denied`.
 func activateWarpOnDevice(
+	ctx context.Context,
 	accountData usquemodels.AccountData,
 	field string,
 ) (usquemodels.AccountData, []byte, error) {
@@ -577,7 +593,7 @@ func activateWarpOnDevice(
 		return usquemodels.AccountData{}, nil, err
 	}
 
-	resp, err := doCloudflareAPIRequest(cloudflareAPIRequest{
+	resp, err := doCloudflareAPIRequestWithContext(ctx, cloudflareAPIRequest{
 		label:     "warp-activate",
 		method:    http.MethodPatch,
 		path:      warpRegistrationPath + "/" + strings.TrimSpace(accountData.ID),

@@ -11,29 +11,9 @@ import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
- * Живой «цифровой дождь» для фактуры «Matrix»: колонки, по которым медленно ползёт
- * голова, а шлейф гаснет кверху.
- *
- * ## Без состояния
- *
- * Положение каждой колонки, её длина, яркость и символы выводятся из общего времени
- * ([NovaAnimationClock]) и хеш-функций от номера колонки и цикла. Поэтому дождь
- * не нужно хранить и переносить: пауза и возврат продолжают его с того же места,
- * а пересоздание вида ничего не теряет.
- *
- * ## Как ползёт колонка
- *
- * Фаза колонки растёт линейно, скорость своя у каждой колонки (медленно: полтора-два
- * ряда в секунду). Голова идёт сверху вниз, за нижним краем уходит шлейф, затем
- * колонка пустеет и цикл начинается заново с новой длиной и яркостью. Период
- * выбран так, что голова никогда не исчезает разом: сначала гаснет хвост, потом
- * колонка на время пустеет. Новые символы появляются у головы, старые гаснут сверху.
- *
- * ## Стоимость
- *
- * Глифы один раз рисуются в атлас (`ALPHA_8`, цвет даёт кисть), в кадр уходит
- * по одному `drawBitmap` на видимую ячейку: около тысячи вызовов при ~15 кадрах в
- * секунду. Никаких аллокаций в кадре нет.
+ * Dense digital rain with independent streams, speeds and per-cell glyph changes.
+ * Short gaps depend on the tail length, so taller screens do not become emptier.
+ * Glyphs share an alpha atlas; drawing creates no per-frame objects.
  */
 internal class NovaMatrixRain private constructor(
     private val width: Int,
@@ -49,8 +29,7 @@ internal class NovaMatrixRain private constructor(
     private val rows: Int = (height / cellH).toInt() + 1
 
     /** Наибольший шлейф в рядах; он же задаёт период цикла колонки. */
-    private val tailMax: Int = max(4, (rows * 0.6f).toInt())
-    private val period: Float = (rows + 2 * tailMax + 2).toFloat()
+    private val tailMax: Int = max(8, min(36, (rows * 0.6f).toInt()))
 
     private val atlas: Array<Bitmap>
 
@@ -80,53 +59,65 @@ internal class NovaMatrixRain private constructor(
     fun draw(canvas: Canvas, paint: Paint, time: Double, alphaScale: Float) {
         val t = time.toFloat()
         val glyphCount = atlas.size
+        val ink = paint.color
+        val headInk = Color.rgb(
+            (Color.red(ink) + 255) / 2,
+            (Color.green(ink) + 255) / 2,
+            (Color.blue(ink) + 255) / 2,
+        )
         for (c in 0 until cols) {
             val columnSeed = mix(seed + c * 73856093)
-            val speed = 0.7f + 1.5f * unit(columnSeed, 1)
+            val speed = 1.2f + 6.8f * unit(columnSeed, 1)
+            val period = tailMax + 6f + 22f * unit(columnSeed, 4)
             val s = unit(columnSeed, 2) * period + speed * t
             val cycle = floor(s / period).toInt()
             val pos = s - cycle * period
-            val head = pos - (tailMax + 1)
-
-            val cycleSeed = mix(columnSeed + cycle * 0x27D4EB2D)
-            if (unit(cycleSeed, 0) < EMPTY_CHANCE) continue
-            val kind = unit(cycleSeed, 1)
-            val power = when {
-                kind < 0.18f -> 0.22f + 0.18f * unit(cycleSeed, 3)
-                kind < 0.78f -> 0.6f + 0.25f * unit(cycleSeed, 3)
-                else -> 0.9f + 0.1f * unit(cycleSeed, 3)
-            }
-            val tail = 4 + (unit(cycleSeed, 2) * (tailMax - 4)).toInt()
-
-            val headRow = floor(head).toInt()
-            val x = c * cellW
-            for (n in 0..tail) {
-                val row = headRow - n
-                if (row < 0) break
-                if (row >= rows) continue
-                val cellSeed = mix(columnSeed xor (row * 19349663))
-                // Символ меняется не разом: у каждой ячейки свой момент.
-                val tick = floor(t * GLYPH_CHANGE_RATE + unit(cellSeed, 9) * 7f).toInt()
-                val glyph = Math.floorMod(mix(cellSeed + tick * 83492791), glyphCount)
-                val alpha = if (n == 0) {
-                    255f * power
-                } else {
-                    val k = 1f - n.toFloat() / tail
-                    255f * power * k * sqrt(k) * (0.55f + 0.45f * unit(cellSeed, 5))
+            var stream = -1
+            while (pos + stream * period < rows + tailMax) {
+                val head = pos + stream * period
+                val cycleSeed = mix(columnSeed + (cycle - stream) * 0x27D4EB2D)
+                stream++
+                if (unit(cycleSeed, 0) < EMPTY_CHANCE) continue
+                val kind = unit(cycleSeed, 1)
+                val power = when {
+                    kind < 0.18f -> 0.45f + 0.2f * unit(cycleSeed, 3)
+                    kind < 0.78f -> 0.75f + 0.2f * unit(cycleSeed, 3)
+                    else -> 1f
                 }
-                if (n > 0 && alpha < 6f) continue
-                paint.alpha = min(255f, alpha * alphaScale).toInt()
-                canvas.drawBitmap(atlas[glyph], x, row * cellH, paint)
+                val tail = 4 + (unit(cycleSeed, 2) * (tailMax - 4)).toInt()
+
+                val headRow = floor(head).toInt()
+                val x = c * cellW
+                for (n in 0..tail) {
+                    val row = headRow - n
+                    if (row < 0) break
+                    if (row >= rows) continue
+                    val cellSeed = mix(columnSeed xor (row * 19349663))
+                    // Символ меняется не разом: у каждой ячейки свой момент.
+                    val rate = if (n == 0) 12f else 0.12f + 4.5f * unit(cellSeed, 7) * unit(cellSeed, 8)
+                    val tick = floor(t * rate + unit(cellSeed, 9) * 7f).toInt()
+                    val glyph = Math.floorMod(mix(cellSeed + tick * 83492791), glyphCount)
+                    val alpha = if (n == 0) {
+                        255f * power
+                    } else {
+                        val k = 1f - n.toFloat() / tail
+                        255f * power * sqrt(k) * (0.65f + 0.35f * unit(cellSeed, 5))
+                    }
+                    if (n > 0 && alpha < 6f) continue
+                    paint.color = if (n == 0) headInk else ink
+                    paint.alpha = min(255f, alpha * alphaScale * 1.35f).toInt()
+                    canvas.drawBitmap(atlas[glyph], x, row * cellH, paint)
+                }
             }
         }
+        paint.color = ink
         paint.alpha = 255
     }
 
     companion object {
 
         private const val CELL = 0.0185f
-        private const val EMPTY_CHANCE = 0.12f
-        private const val GLYPH_CHANGE_RATE = 0.6f
+        private const val EMPTY_CHANCE = 0.04f
 
         /**
          * Несколько последних экземпляров: два вида разного размера во время перехода

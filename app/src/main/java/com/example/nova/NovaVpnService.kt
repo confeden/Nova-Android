@@ -1484,14 +1484,6 @@ class NovaVpnService : OperaNativeVpnService() {
         /** «Авто» в Nova: сколько лучших по замеру узлов пробуем, прежде чем сдаться. */
         private const val NOVA_AUTO_MAX_ATTEMPTS = 40
 
-        /** Замер моложе этого службе годится при подключении по списку Nova. */
-        private const val NOVA_FRESH_PING_MS = 60_000L
-
-        /** Сколько службе разрешено мерить голову списка перед подключением. */
-        private const val NOVA_SCAN_BUDGET_MS = 40_000L
-
-        /** Свежий пинг перед «>» (следующий профиль по пингу): дольше человек ждать не станет. */
-        private const val NOVA_SWITCH_SCAN_BUDGET_MS = 15_000L
 
         /** Фоновый добор живых до NovaList.MIN_ALIVE после подключения. */
         private const val NOVA_TOPUP_BUDGET_MS = 120_000L
@@ -10174,21 +10166,7 @@ class NovaVpnService : OperaNativeVpnService() {
             else false to ordered.take(NOVA_AUTO_MAX_ATTEMPTS)
         }
 
-        // «Авто» по списку: пинг свежий перед каждым подключением. Голова списка — пачкой по
-        // NovaList.PAGE_SIZE, не хватило живых — следующая страница ленты (NovaList.scan).
-        if (!plan().first) {
-            publishTransportNotice(clientData, "Измеряем ping профилей Nova…")
-            // Для подключения хватает одного живого; добор до NovaList.MIN_ALIVE — в фоне после него.
-            val alive = NovaList.scan(
-                this, force = false, minAlive = NovaList.CONNECT_MIN_ALIVE, staleMs = NOVA_FRESH_PING_MS,
-                budgetMs = minOf(NOVA_SCAN_BUDGET_MS, (deadlineAtMs - System.currentTimeMillis()).coerceAtLeast(5_000L)),
-                shouldAbort = { isUserStopped || !isConnectGenerationCurrent(connectGenerationId) },
-            )
-            LogManager.log("Nova: перед подключением живых по свежему замеру — $alive.")
-            publishTransportNotice(clientData, "")
-            if (isUserStopped || !isConnectGenerationCurrent(connectGenerationId)) return true
-        }
-
+        // Dial cached candidates immediately; refresh measurements after the tunnel is up.
         var (explicit, rotation) = plan()
         val tried = HashSet<String>()
         var everConnected = false
@@ -10207,29 +10185,17 @@ class NovaVpnService : OperaNativeVpnService() {
                 val next = plan(); explicit = next.first; rotation = next.second; cursor = 0
                 return
             }
-            // Сначала свежий пинг, потом выбор: «>» берёт следующий по пингу, а не по месту в файле,
-            // пока замера нет. Замер идёт с канала провайдера (NovaProxyProcess.probe).
-            NovaList.scan(
-                this, force = false, minAlive = NovaList.CONNECT_MIN_ALIVE, staleMs = NOVA_FRESH_PING_MS,
-                budgetMs = NOVA_SWITCH_SCAN_BUDGET_MS,
-                shouldAbort = { isUserStopped || !isConnectGenerationCurrent(connectGenerationId) },
-            )
+            // Use the latest background measurements without extending the outage.
             val ordered = NovaList.ordered(this).take(NOVA_AUTO_MAX_ATTEMPTS)
             explicit = false
             rotation = NovaList.rotationAfter(ordered, current.id)
             cursor = 0
         }
-        // Все узлы головы перебраны, а подключения нет: берём следующую страницу ленты и
-        // меряем её пачкой — целиком список не качается и не меряется.
+        // Exhausted this page: dial the next page without a preliminary scan.
         fun extendRotation(): Boolean {
             if (explicit || !NovaList.hasMorePages(this)) return false
             if (!everConnected && System.currentTimeMillis() > deadlineAtMs) return false
             if (NovaList.loadNextPage(this, LogManager::log) < 0) return false
-            NovaList.scan(
-                this, force = false, minAlive = NovaList.CONNECT_MIN_ALIVE, staleMs = NOVA_FRESH_PING_MS,
-                budgetMs = minOf(NOVA_SCAN_BUDGET_MS, (deadlineAtMs - System.currentTimeMillis()).coerceAtLeast(5_000L)),
-                shouldAbort = { isUserStopped || !isConnectGenerationCurrent(connectGenerationId) },
-            )
             val next =NovaList.ordered(this).filter { it.id !in tried }.take(NOVA_AUTO_MAX_ATTEMPTS)
             if (next.isEmpty()) return NovaList.hasMorePages(this) && extendRotation()
             rotation = next
@@ -25571,10 +25537,7 @@ class NovaVpnService : OperaNativeVpnService() {
         }
         val transportInfo = extractVpnTransportLabel(caps)
         if (transportInfo.isBlank()) return VpnOwnership.UNKNOWN
-        return if (
-            transportInfo.contains("NovaVPN", ignoreCase = true) ||
-            transportInfo.contains("NovaOperaVPN", ignoreCase = true)
-        ) {
+        return if (NovaVpnSessionLabels.isNova(transportInfo)) {
             VpnOwnership.OURS
         } else {
             VpnOwnership.FOREIGN
@@ -28524,7 +28487,25 @@ class NovaVpnService : OperaNativeVpnService() {
      */
     /** @return правда, если ключ действительно надо добывать; ложь — если он уже есть. */
     private fun scheduleWarpIdentityBackfill(urgent: Boolean = true): Boolean {
-        if (isOperaBackendLabel(currentBackendLabel)) return false
+        if (isDnsBackendLabel(currentBackendLabel)) return false
+        val backend = currentBackendLabel
+        val generation = connectGeneration.get()
+        val proxyUrl = when {
+            isVlessBackendLabel(backend) -> "socks5://127.0.0.1:$vlessSocksPort"
+            isTorBackendLabel(backend) -> "socks5://127.0.0.1:${TorTransport.socksPort}"
+            isOperaBackendLabel(backend) -> OperaProxyManager.getLoopbackProxyUrl(this)
+            else -> ""
+        }
+        val tunnelStillUp = {
+            currentState == STATE_CONNECTED && !isUserStopped &&
+                connectGeneration.get() == generation && currentBackendLabel == backend &&
+                when {
+                    isVlessBackendLabel(backend) -> proxyUrl == "socks5://127.0.0.1:$vlessSocksPort" && vlessSocksPort in 1..65535
+                    isTorBackendLabel(backend) -> proxyUrl == "socks5://127.0.0.1:${TorTransport.socksPort}" && TorTransport.socksPort in 1..65535
+                    else -> true
+                }
+        }
+        if (!tunnelStillUp()) return false
         // Ключ MASQUE добываем при **любом** живом туннеле, а не только при выбранном
         // MASQUE.
         //
@@ -28545,22 +28526,11 @@ class NovaVpnService : OperaNativeVpnService() {
             .trim()
             .lowercase(Locale.US) == "masque" ||
             backfillClientData.isMasqueIdentityWanted()
-        // Есть ли работа — спрашиваем тем же правилом, по которому её и делают
-        // (`shouldAttemptWarpIdentityBackfill`), а не своей копией условия: копия
-        // разошлась бы с оригиналом и снова начала бы объявлять несделанное (G150).
-        val hasWork = runCatching {
-            backfillClientData.shouldAttemptWarpIdentityBackfill(
-                ignoreCooldown = urgent && masqueWanted,
-            )
-        }.getOrDefault(true)
-        WarpIdentityBackfill.scheduleAfterConnect(
+        return WarpIdentityBackfill.scheduleAfterConnect(
             context = applicationContext,
             logger = LogManager::log,
-            tunnelStillUp = {
-                currentState == STATE_CONNECTED &&
-                    !isUserStopped &&
-                    !isOperaBackendLabel(currentBackendLabel)
-            },
+            tunnelStillUp = tunnelStillUp,
+            tunnelProxyUrl = proxyUrl,
             ignoreCooldown = urgent && masqueWanted,
             onIdentityReady = ::returnToMasqueAfterRegistrationBootstrap,
             // Выбранный MASQUE ждёт ключа прямо сейчас — ворота ему не нужны.
@@ -28571,16 +28541,11 @@ class NovaVpnService : OperaNativeVpnService() {
                     ProfileIssueGate(applicationContext).awaitWindow(
                         label = "MASQUE",
                         firstSet = true,
-                        stillWanted = {
-                            currentState == STATE_CONNECTED &&
-                                !isUserStopped &&
-                                !isOperaBackendLabel(currentBackendLabel)
-                        },
+                        stillWanted = tunnelStillUp,
                     )
                 }
             },
         )
-        return hasWork
     }
 
     /**

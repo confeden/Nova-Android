@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     Единый экран «Оформление»: фактуры плитками-миниатюрами, ползунки оттенка,
-    яркости, насыщенности и скорости погружения, случайная фактура при запуске.
+    яркости, насыщенности и скорости погружения, случайная фактура при подключении.
 
     Раньше это были два экрана («Оформление» с темами и «Фон главного экрана»).
     Тем больше нет: палитру выводит ползунок оттенка. Плитки, яркость,
@@ -90,7 +90,7 @@
                 android:paddingRight="12dp"
                 android:paddingBottom="8dp" />
 
-            <!-- Случайная фактура при запуске -->
+            <!-- Случайная фактура при подключении -->
             <LinearLayout
                 android:id="@+id/row_random_texture"
                 android:layout_width="match_parent"
@@ -116,7 +116,7 @@
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="Случайная фактура при запуске"
+                        android:text="Случайная фактура при подключении"
                         android:textColor="?attr/novaTextTitle"
                         android:textSize="16sp"
                         android:textStyle="bold" />
@@ -125,7 +125,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="3dp"
-                        android:text="Каждый запуск приложения — новый фон, включая анимацию «Созвездия»"
+                        android:text="Каждое новое подключение — новый фон, включая анимацию «Созвездия»"
                         android:textColor="?attr/novaTextHint"
                         android:textSize="12sp" />
                 </LinearLayout>

@@ -1252,6 +1252,8 @@ class ClientData(context: Context) {
     fun getServiceStateUpdatedAt(): Long =
         readServiceStateFile().optLong("updated_at", -1L).takeIf { it > 0L }
             ?: prefs.getLong("service_state_updated_at", 0L)
+
+    fun getServiceConnectedAt(): Long = readServiceStateFile().optLong("connected_at", 0L)
     fun markSoftReapplyPending(durationMs: Long = 15000L) {
         val until = System.currentTimeMillis() + durationMs.coerceAtLeast(1000L)
         prefs.edit().putLong("soft_reapply_pending_until", until).commit()
@@ -4195,12 +4197,17 @@ class ClientData(context: Context) {
         notice: String,
         registering: Boolean,
     ) {
+        val previous = readServiceStateFile()
+        val connectedAt = if (state == NovaVpnService.STATE_CONNECTED &&
+            previous.optString("state") != NovaVpnService.STATE_CONNECTED
+        ) System.currentTimeMillis() else previous.optLong("connected_at", 0L)
         val payload = JSONObject().apply {
             put("state", state)
             put("backend", backend)
             put("transport", transport)
             put("notice", notice)
             put("registering", registering)
+            put("connected_at", connectedAt)
             put("attempt_ordinal", attemptOrdinal.coerceAtLeast(0))
             put("attempt_total", attemptTotal.coerceAtLeast(0))
             put("updated_at", System.currentTimeMillis())

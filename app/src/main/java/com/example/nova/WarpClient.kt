@@ -929,7 +929,7 @@ class WarpClient(
      * Сокет намеренно не защищается через `VpnService.protect`: защищённый
      * сокет ушёл бы мимо туннеля, прямо в заблокированный `api.cloudflareclient.com`.
      */
-    fun registerThroughActiveTunnel(timeoutSeconds: Long = 25L): WarpConfig? {
+    fun registerThroughActiveTunnel(timeoutSeconds: Long = 25L, proxy: Proxy = Proxy.NO_PROXY): WarpConfig? {
         if (shouldAbort()) return null
         val keyPair = generateWireGuardKeyPair()
         val privateKey = keyPair.first
@@ -943,7 +943,7 @@ class WarpClient(
             modelName,
         )
         val client = OkHttpClient.Builder()
-            .proxy(Proxy.NO_PROXY)
+            .proxy(proxy)
             .connectTimeout(timeoutSeconds / 3 + 1, TimeUnit.SECONDS)
             .readTimeout(timeoutSeconds, TimeUnit.SECONDS)
             .callTimeout(timeoutSeconds, TimeUnit.SECONDS)

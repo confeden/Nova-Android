@@ -767,9 +767,6 @@ class MainActivity : AppCompatActivity() {
         // до события «экран создан», иначе смена языка этот экран не увидит.
         NovaLanguage.install(this)
         super.onCreate(savedInstanceState)
-        // «Случайная фактура при запуске»: выбор делается до сборки фона, и только на
-        // свежем запуске — пересоздание (поворот, язык) фон не меняет.
-        if (savedInstanceState == null) NovaAppearance.pickAtLaunch(this)
         // Диагностическая сборка уводит на экран самодиагностики: на устройстве,
         // где главный экран не открывается, дальше идти незачем. В обычных
         // сборках DIAGNOSTICS равен false и ветка вырезается компилятором.
@@ -1647,6 +1644,32 @@ class MainActivity : AppCompatActivity() {
         if (mainBackgroundMode() != MainBackgroundPolicy.MODE_IMAGE) return
         if (NovaMainBackdrop.signature(this) == appliedBackdropSignature) return
         loadBackdropArtSafely()
+    }
+
+    private val connectionAppearancePending = AtomicBoolean(false)
+    private var appliedAppearanceConnection = 0L
+
+    private fun refreshConnectionAppearance() {
+        if (!connectionAppearancePending.compareAndSet(false, true)) return
+        Thread({
+            try {
+                val connectedAt = clientData.getServiceConnectedAt()
+                if (connectedAt > 0L && connectedAt != appliedAppearanceConnection) {
+                    val changed = NovaAppearance.pickAtConnection(this, connectedAt)
+                    appliedAppearanceConnection = connectedAt
+                    if (changed) runOnUiThread {
+                        if (!isDestroyed && !isFinishing) {
+                            reloadBackdropIfAppearanceChanged()
+                            reapplyBackdropIfModeChanged()
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                LogManager.log("Оформление: не удалось сменить фактуру при подключении: ${e.message}")
+            } finally {
+                connectionAppearancePending.set(false)
+            }
+        }, "NovaConnectionAppearance").apply { isDaemon = true; start() }
     }
 
     private fun mainBackgroundMode(): String {
@@ -3829,10 +3852,7 @@ class MainActivity : AppCompatActivity() {
         }
         val transportInfo = extractVpnTransportLabel(caps)
         if (transportInfo.isBlank()) return VpnOwnership.UNKNOWN
-        return if (
-            transportInfo.contains("NovaVPN", ignoreCase = true) ||
-            transportInfo.contains("NovaOperaVPN", ignoreCase = true)
-        ) {
+        return if (NovaVpnSessionLabels.isNova(transportInfo)) {
             VpnOwnership.OURS
         } else {
             VpnOwnership.FOREIGN
@@ -3871,20 +3891,24 @@ class MainActivity : AppCompatActivity() {
                 if (isOperaBackend(persistedBackend)) {
                     return persistedBackend
                 }
+                // Список Nova, Tor и DNS служба публикует своей меткой, и в «Авто» экран обязан её
+                // повторить: раньше всё, что не WARP и не Opera, схлопывалось ниже в «WARP» — бейдж
+                // писал «WARP: RU», IP был свой, а пинга не было, хотя сеанс шёл по Nova.
+                if (isVlessBackend(persistedBackend) || isTorBackend(persistedBackend) || isDnsBackend(persistedBackend)) {
+                    return persistedBackend.trim()
+                }
                 if (persistedBackend.trim().uppercase().startsWith(NovaVpnService.BACKEND_WARP)) {
                     return NovaVpnService.BACKEND_WARP
                 }
                 val transportInfo = extractVpnTransportLabel(caps)
-                if (transportInfo.contains("NovaOperaVPN", ignoreCase = true) || isOperaProxyLoopbackAlive()) {
+                val sessionBackend = NovaVpnSessionLabels.backendFor(transportInfo)
+                if (sessionBackend == NovaVpnService.BACKEND_OPERA) {
                     return "${NovaVpnService.BACKEND_OPERA}-${clientData.getPreferredOperaLabel()}"
                 }
-                return NovaVpnService.BACKEND_WARP
-            }
-            val transportInfo = extractVpnTransportLabel(caps)
-            if (transportInfo.contains("NovaOperaVPN", ignoreCase = true)) {
-                return "${NovaVpnService.BACKEND_OPERA}-${clientData.getPreferredOperaLabel()}"
-            }
-            if (transportInfo.contains("NovaVPN", ignoreCase = true)) {
+                if (sessionBackend != null) return sessionBackend
+                if (isOperaProxyLoopbackAlive()) {
+                    return "${NovaVpnService.BACKEND_OPERA}-${clientData.getPreferredOperaLabel()}"
+                }
                 return NovaVpnService.BACKEND_WARP
             }
         }
@@ -6562,6 +6586,7 @@ class MainActivity : AppCompatActivity() {
             discoveryRunning -> renderWarpDiscoveryState(discoverySnapshot!!)
             vpnState == NovaVpnService.STATE_CONNECTING -> renderConnectingState(buildConnectingStatusText())
             vpnState == NovaVpnService.STATE_CONNECTED -> {
+                refreshConnectionAppearance()
                 currentTunnelBackend = resolveConnectedUiBackend()
                 val preserveKnownIps =
                     previousState == NovaVpnService.STATE_CONNECTED &&

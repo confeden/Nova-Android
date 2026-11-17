@@ -393,11 +393,7 @@ object SessionReapply {
             if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return false
             if (isNovaVpnOwner(context, caps)) return true
             val transportInfo = extractVpnTransportLabel(caps)
-            // Метка сеанса Tor — «NovaTorVPN», и без неё живой Tor-туннель
-            // считался бы чужим: `hasActiveNovaSystemVpn` держится на трёх
-            // признаках, и молча терять один из них нельзя.
-            return transportInfo.contains("NovaVPN", ignoreCase = true) ||
-                TUN_PROXY_SESSION_LABELS.any { transportInfo.contains(it, ignoreCase = true) }
+            return NovaVpnSessionLabels.isNova(transportInfo)
         }
 
         fun networkId(network: Network): Int = network.toString().toIntOrNull() ?: -1

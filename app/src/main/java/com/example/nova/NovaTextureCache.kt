@@ -47,6 +47,8 @@ internal object NovaTextureCache {
         val height: Int,
         /** Счётчик пересевов: другой вариант — другой узор той же фактуры. */
         val variant: Int,
+        /** Paused Matrix frame; null keeps the procedural texture path. */
+        val frameTimeMillis: Long? = null,
     )
 
     /** Ключ под запрошенный размер, уже урезанный до [MAX_SIDE]. */
@@ -55,6 +57,7 @@ internal object NovaTextureCache {
         width: Int,
         height: Int,
         variant: Int,
+        frameTimeMillis: Long? = null,
     ): Key {
         val longest = if (width > height) width else height
         val scale = if (longest > MAX_SIDE) MAX_SIDE.toFloat() / longest else 1f
@@ -63,6 +66,7 @@ internal object NovaTextureCache {
             (width * scale).toInt().coerceAtLeast(8),
             (height * scale).toInt().coerceAtLeast(8),
             variant,
+            frameTimeMillis,
         )
     }
 
@@ -106,18 +110,37 @@ internal object NovaTextureCache {
         }
         Thread({
             val started = android.os.SystemClock.elapsedRealtime()
-            val built = runCatching {
-                NovaTexturePatterns.render(key.texture, key.width, key.height, key.variant)
-            }.getOrNull()
+            val built = try {
+                if (key.texture == NovaAppearance.Texture.MATRIX && key.frameTimeMillis != null) {
+                    val bitmap = Bitmap.createBitmap(key.width, key.height, Bitmap.Config.ARGB_8888)
+                    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                        color = android.graphics.Color.WHITE
+                    }
+                    NovaMatrixRain.shared(key.width, key.height, key.variant).draw(
+                        android.graphics.Canvas(bitmap), paint, key.frameTimeMillis / 1000.0, 1f,
+                    )
+                    bitmap
+                } else {
+                    NovaTexturePatterns.render(key.texture, key.width, key.height, key.variant)
+                }
+            } catch (error: Exception) {
+                LogManager.log("Оформление: не удалось построить ${key.texture.title}: ${error.message}")
+                null
+            } catch (error: OutOfMemoryError) {
+                LogManager.log("Оформление: недостаточно памяти для ${key.texture.title}: ${error.message}")
+                null
+            }
             val callbacks: List<(Bitmap?) -> Unit>
             synchronized(cache) {
                 if (built != null) cache[key] = built else failed.add(key)
                 callbacks = waiting.remove(key).orEmpty()
             }
-            LogManager.log(
-                "Оформление: узор ${key.texture.title} ${key.width}×${key.height} " +
-                    "построен за ${android.os.SystemClock.elapsedRealtime() - started} мс."
-            )
+            if (built != null) {
+                LogManager.log(
+                    "Оформление: узор ${key.texture.title} ${key.width}×${key.height} " +
+                        "построен за ${android.os.SystemClock.elapsedRealtime() - started} мс."
+                )
+            }
             for (callback in callbacks) callback(built)
         }, "NovaTexture").apply {
             isDaemon = true

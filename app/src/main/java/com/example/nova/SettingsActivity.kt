@@ -2240,9 +2240,7 @@ class SettingsActivity : AppCompatActivity() {
 
             val transportInfo = extractVpnTransportLabel(caps)
 
-            return transportInfo.contains("NovaVPN", ignoreCase = true) ||
-
-                transportInfo.contains("NovaOperaVPN", ignoreCase = true)
+            return NovaVpnSessionLabels.isNova(transportInfo)
 
         }
 

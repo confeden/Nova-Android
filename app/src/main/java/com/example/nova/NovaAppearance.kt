@@ -30,10 +30,9 @@ import android.graphics.Color
  * главного экрана выводится из выбранной фактуры ([MainBackgroundPolicy.modeFor]), а не
  * хранится второй раз: два источника правды на одно решение расходятся.
  *
- * ## Случайная фактура при запуске
+ * ## Случайная фактура при подключении
  *
- * Включена по умолчанию. Выбор делает [pickAtLaunch] — один раз на запуск главного
- * экрана — и записывает его как обычный выбор, поэтому дальше экраны ничем не
+ * Включена по умолчанию. Выбор делает [pickAtConnection] — один раз на новое подключение — и записывает его как обычный выбор, поэтому дальше экраны ничем не
  * отличают «выбрано случайно» от «выбрано пальцем».
  */
 object NovaAppearance {
@@ -45,7 +44,9 @@ object NovaAppearance {
     private const val KEY_BRIGHTNESS = "brightness"
     private const val KEY_SATURATION = "saturation"
     private const val KEY_SPEED = "dive_speed"
+    // Keep the stored toggle so an explicit opt-out survives the event change.
     private const val KEY_RANDOM = "random_texture_on_start"
+    private const val KEY_LAST_CONNECTION = "texture_connection_at"
 
     /**
      * Фактура поверхности.
@@ -106,7 +107,7 @@ object NovaAppearance {
         val brightness: Int,
         val saturation: Int,
         val speed: Int,
-        val randomOnStart: Boolean,
+        val randomOnConnect: Boolean,
     )
 
     fun state(context: Context): State = State(
@@ -116,7 +117,7 @@ object NovaAppearance {
         brightness = brightness(context),
         saturation = saturation(context),
         speed = speed(context),
-        randomOnStart = randomOnStart(context),
+        randomOnConnect = randomOnConnect(context),
     )
 
     fun hue(context: Context): Int =
@@ -124,7 +125,7 @@ object NovaAppearance {
 
     /**
      * Выбранная фактура. По умолчанию — анимация «Созвездия», а при включённом
-     * «случайно при запуске» её тут же заменяет [pickAtLaunch]. На устройстве, не
+     * «случайно при подключении» её тут же заменяет [pickAtConnection]. На устройстве, не
      * тянущем анимацию, умолчание — пустой фон: полноэкранный растр там дороже пустоты.
      */
     fun texture(context: Context): Texture =
@@ -142,7 +143,7 @@ object NovaAppearance {
     fun speed(context: Context): Int =
         prefs(context).getInt(KEY_SPEED, SPEED_DEFAULT).coerceIn(0, SPEED_MAX)
 
-    fun randomOnStart(context: Context): Boolean = prefs(context).getBoolean(KEY_RANDOM, true)
+    fun randomOnConnect(context: Context): Boolean = prefs(context).getBoolean(KEY_RANDOM, true)
 
     /** Ключ темы оттенка (`hue30`) — им пользуются зеркало уведомления и виджет. */
     fun storedThemeKey(context: Context): String = "hue${hue(context)}"
@@ -194,29 +195,32 @@ object NovaAppearance {
         prefs(context).edit().putInt(KEY_SPEED, value.coerceIn(0, SPEED_MAX)).apply()
     }
 
-    fun setRandomOnStart(context: Context, enabled: Boolean) {
+    fun setRandomOnConnect(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(KEY_RANDOM, enabled).apply()
     }
 
     // ------------------------------------------------------------------ случайный выбор
 
     /**
-     * Случайная фактура запуска. Зовётся из `onCreate` главного экрана, когда он
-     * создаётся с нуля (`savedInstanceState == null`): пересоздание из-за поворота
-     * или смены оттенка фон не меняет.
+     * Select once per connection on a worker thread. The persisted connection id
+     * prevents a second selection after activity recreation.
      *
      * Выбор записывается как обычный — так экраны настроек и главный экран видят
      * одно и то же без отдельного «временного» слоя.
      */
-    fun pickAtLaunch(context: Context) {
-        if (!randomOnStart(context)) return
+    @Synchronized
+    fun pickAtConnection(context: Context, connectedAt: Long): Boolean {
+        if (connectedAt <= 0L || prefs(context).getLong(KEY_LAST_CONNECTION, 0L) == connectedAt) return false
+        prefs(context).edit().putLong(KEY_LAST_CONNECTION, connectedAt).apply()
+        if (!randomOnConnect(context)) return false
         val pool = randomPool(context)
-        if (pool.isEmpty()) return
+        if (pool.isEmpty()) return false
         val current = texture(context)
         // Тот же вид подряд выглядел бы как «не сработало».
         val candidates = if (pool.size > 1) pool.filter { it != current } else pool
         val pick = candidates.random()
         setTexture(context, pick, variant = (0..9999).random())
+        return true
     }
 
     /** Из чего выбирает «случайно»: любая фактура, кроме «Без фона»; анимация — если тянет. */

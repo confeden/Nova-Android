@@ -20,7 +20,7 @@ import androidx.appcompat.app.AppCompatActivity
  * Раньше их было два: «Оформление» (двенадцать тем, фактуры чипами, температура) и
  * «Фон главного экрана» (три режима). Теперь всё в одном месте, по образцу окна
  * ПК-версии: плитки фактур, ползунки оттенка, яркости, насыщенности и скорости
- * погружения, переключатель случайной фактуры при запуске.
+ * погружения, переключатель случайной фактуры при подключении.
  *
  * ## Как это применяется
  *
@@ -77,10 +77,10 @@ class ThemeSettingsActivity : AppCompatActivity() {
         buildSliders()
 
         randomSwitch = findViewById(R.id.sw_random_texture)
-        randomSwitch.isChecked = NovaAppearance.randomOnStart(this)
+        randomSwitch.isChecked = NovaAppearance.randomOnConnect(this)
         randomSwitch.setOnCheckedChangeListener { _, checked ->
-            NovaAppearance.setRandomOnStart(this, checked)
-            LogManager.log("Оформление: случайная фактура при запуске ${if (checked) "включена" else "выключена"}.")
+            NovaAppearance.setRandomOnConnect(this, checked)
+            LogManager.log("Оформление: случайная фактура при подключении ${if (checked) "включена" else "выключена"}.")
         }
         findViewById<View>(R.id.row_random_texture).setOnClickListener { randomSwitch.toggle() }
 
@@ -329,7 +329,7 @@ class ThemeSettingsActivity : AppCompatActivity() {
         NovaAppearance.setBrightness(this, NovaAppearance.BRIGHTNESS_DEFAULT)
         NovaAppearance.setSaturation(this, NovaAppearance.SATURATION_DEFAULT)
         NovaAppearance.setSpeed(this, NovaAppearance.SPEED_DEFAULT)
-        NovaAppearance.setRandomOnStart(this, true)
+        NovaAppearance.setRandomOnConnect(this, true)
         LogManager.log("Оформление: ползунки возвращены к умолчаниям.")
         val hueChanges = NovaAppearance.hue(this) != NovaAppearance.DEFAULT_HUE
         liveHue = NovaAppearance.DEFAULT_HUE

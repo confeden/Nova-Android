@@ -194,12 +194,31 @@ func doCloudflareAPIRequest(req cloudflareAPIRequest) (*cloudflareAPIResponse, e
 }
 
 func doCloudflareAPIRequestWithContext(baseCtx context.Context, req cloudflareAPIRequest) (*cloudflareAPIResponse, error) {
-	targetIPs := resolveWarpRegistrationIPs()
-	profiles := defaultCloudflareProfiles()
+	if route, ok := baseCtx.Value(cloudflareTunnelRouteKey{}).(cloudflareTunnelRoute); ok {
+		return doCloudflareAPIRequestThroughTunnel(baseCtx, req, route)
+	}
 	var (
 		failures      []string
 		firstResponse *cloudflareAPIResponse
 	)
+	if plainCloudflareAPIPreferred.Load() {
+		log.Printf("Cloudflare API %s: trying plain request through the active tunnel", req.label)
+		if resp, err := doCloudflareAPIRequestPlain(baseCtx, req); err != nil {
+			failures = append(failures, "plain: "+err.Error())
+			log.Printf("Cloudflare API %s: plain request failed: %v", req.label, err)
+		} else {
+			log.Printf("Cloudflare API %s: HTTP %s via plain tunnel request", req.label, resp.Status)
+			if resp.StatusCode == http.StatusOK {
+				return resp, nil
+			}
+			if firstResponse == nil {
+				firstResponse = resp
+			}
+		}
+	}
+
+	targetIPs := resolveWarpRegistrationIPs()
+	profiles := defaultCloudflareProfiles()
 	proxyAvailable := hasLocalCloudflareProxy()
 	preferLocalProxy := proxyAvailable && shouldPreferLocalProxyForCloudflareRequest(req)
 
@@ -222,22 +241,6 @@ func doCloudflareAPIRequestWithContext(baseCtx context.Context, req cloudflareAP
 			firstResponse = resp
 		}
 		return nil, false
-	}
-
-	if plainCloudflareAPIPreferred.Load() {
-		log.Printf("Cloudflare API %s: trying plain request through the active tunnel", req.label)
-		if resp, err := doCloudflareAPIRequestPlain(baseCtx, req); err != nil {
-			failures = append(failures, "plain: "+err.Error())
-			log.Printf("Cloudflare API %s: plain request failed: %v", req.label, err)
-		} else {
-			log.Printf("Cloudflare API %s: HTTP %s via plain tunnel request", req.label, resp.Status)
-			if resp.StatusCode == http.StatusOK {
-				return resp, nil
-			}
-			if firstResponse == nil {
-				firstResponse = resp
-			}
-		}
 	}
 
 	if preferLocalProxy {
@@ -843,6 +846,18 @@ func (c *fragmentedConn) Write(p []byte) (int, error) {
 // ключ или нет. «HTTP 200 OK» тут недостаточно: на неизвестное поле Cloudflare отвечает
 // тем же кодом и молча ничего не меняет.
 func SetWarpLicense(accessToken string, deviceID string, license string) (string, error) {
+	return setWarpLicenseWithContext(context.Background(), accessToken, deviceID, license)
+}
+
+func SetWarpLicenseViaProxy(accessToken string, deviceID string, license string, proxyURL string) (string, error) {
+	ctx, err := cloudflareTunnelContext(proxyURL)
+	if err != nil {
+		return "", err
+	}
+	return setWarpLicenseWithContext(ctx, accessToken, deviceID, license)
+}
+
+func setWarpLicenseWithContext(ctx context.Context, accessToken string, deviceID string, license string) (string, error) {
 	accessToken = strings.TrimSpace(accessToken)
 	deviceID = strings.TrimSpace(deviceID)
 	license = strings.TrimSpace(license)
@@ -858,7 +873,7 @@ func SetWarpLicense(accessToken string, deviceID string, license string) (string
 		return "", err
 	}
 
-	resp, err := doCloudflareAPIRequest(cloudflareAPIRequest{
+	resp, err := doCloudflareAPIRequestWithContext(ctx, cloudflareAPIRequest{
 		label:     "warp-license",
 		method:    http.MethodPut,
 		path:      warpRegistrationPath + "/" + deviceID + "/account",

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:paddingStart="4dp"
+    android:paddingEnd="4dp">
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1.1"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/tv_proton_region"
+            style="@style/NovaProtonColumnHeading"
+            android:text="Регион" />
+
+        <com.example.nova.NovaMaxHeightRecyclerView
+            android:id="@+id/rv_proton_regions"
+            style="@style/NovaProtonColumnList" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="4dp"
+        android:layout_weight="2.7"
+        android:orientation="vertical">
+
+        <TextView
+            style="@style/NovaProtonColumnHeading"
+            android:text="Сервер" />
+
+        <com.example.nova.NovaMaxHeightRecyclerView
+            android:id="@+id/rv_proton_servers"
+            style="@style/NovaProtonColumnList" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="4dp"
+        android:layout_weight="1.2"
+        android:orientation="vertical">
+
+        <TextView
+            style="@style/NovaProtonColumnHeading"
+            android:text="Порт" />
+
+        <com.example.nova.NovaMaxHeightRecyclerView
+            android:id="@+id/rv_proton_ports"
+            style="@style/NovaProtonColumnList" />
+    </LinearLayout>
+</LinearLayout>

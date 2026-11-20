@@ -125,6 +125,26 @@
         упирается в буквы. Внешний отступ снизу нужен трём полосам — без него
         строки слипаются.
     -->
+    <style name="NovaProtonColumnHeading">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">22dp</item>
+        <item name="android:accessibilityHeading">true</item>
+        <item name="android:ellipsize">end</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:gravity">center_vertical</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:paddingStart">6dp</item>
+        <item name="android:textColor">#B9C4D6</item>
+        <item name="android:textSize">11sp</item>
+    </style>
+
+    <style name="NovaProtonColumnList">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:overScrollMode">never</item>
+        <item name="android:scrollbars">vertical</item>
+    </style>
+
     <style name="NovaMainRegionChip">
         <item name="android:layout_width">wrap_content</item>
         <!--

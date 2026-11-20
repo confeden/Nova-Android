@@ -187,6 +187,7 @@ class NovaVpnService : OperaNativeVpnService() {
     @Volatile
     private var cachedProtonConfigs: List<WarpVerifiedConfig>? = null
     @Volatile
+    private var cachedProtonSelection: ProtonSelection? = null
     private var cachedProtonConfigsAt = 0L
 
     /**
@@ -7534,7 +7535,8 @@ class NovaVpnService : OperaNativeVpnService() {
             // Режим импортированных профилей эта ветка не трогает: там встроенных
             // семян в очереди нет вовсе, и подставлять их было бы подменой уже
             // другого рода.
-            if (protonModeActive && primaryWarpAttempts.isEmpty()) {
+            val protonNodePinned = protonModeActive && clientData.getProtonSelection().host.isNotEmpty()
+            if (protonModeActive && !protonNodePinned && primaryWarpAttempts.isEmpty()) {
                 primaryWarpAttempts = buildBuiltInWarpAttemptSet(
                     primaryRankedAttempts,
                     clientData,
@@ -7571,9 +7573,9 @@ class NovaVpnService : OperaNativeVpnService() {
                 publishTransportNotice(
                     clientData,
                     when {
+                        protonNodePinned -> "Недоступный сервер Proton"
                         protonModeActive && !importedProtocolModeActive ->
-                            "Профилей Proton для подключения не осталось. Выберите регион " +
-                                "AWG Proton заново, чтобы выпустить их."
+                            "Профилей Proton для подключения не осталось. Обновите профили Proton."
                         forcedImportedProtocol != null ->
                             "Среди импортированных профилей нет протокола $selectedProtocol. " +
                                 "Выберите другой протокол или импортируйте профили."
@@ -19996,13 +19998,14 @@ class NovaVpnService : OperaNativeVpnService() {
         // (в бесплатном наборе Proton страна NO представлена одним узлом), и
         // пустая очередь была бы хуже чужой страны. Поэтому свои идут первыми, а
         // чужие остаются следом.
-        val protonWantedCountry = clientData.getProtonCountryPreference()
+        val protonSelection = if (protonModeActive) clientData.getProtonSelection() else ProtonSelection()
+        val protonWantedCountry = protonSelection.country
             .trim()
             .uppercase(Locale.US)
             .takeIf { protonModeActive && it.length == 2 }
         // Один снимок списка Proton на сборку: страна и порядок берутся из одного чтения.
         val protonProfilesSnapshot = if (protonModeActive) {
-            runCatching { ProtonProfileStore(this).readProfiles() }.getOrDefault(emptyList())
+            ProtonProfileStore.selectedProfiles(ProtonProfileStore(this).readProfiles(), protonSelection)
         } else {
             emptyList()
         }
@@ -20719,38 +20722,18 @@ class NovaVpnService : OperaNativeVpnService() {
         }
         val nowMs = SystemClock.elapsedRealtime()
         val cached = cachedProtonConfigs
-        if (cached != null && nowMs - cachedProtonConfigsAt < PROTON_CONFIG_CACHE_MS) return cached
+        val selection = clientData.getProtonSelection()
+        if (cached != null && selection == cachedProtonSelection &&
+            nowMs - cachedProtonConfigsAt < PROTON_CONFIG_CACHE_MS
+        ) return cached
         val store = ProtonProfileStore(this)
         val account = store.readAccount()
         val configs = if (account == null) {
             emptyList()
         } else {
-            // Выбранная пользователем страна поднимает свои узлы наверх очереди.
-            // Именно поднимает: отбор опустошил бы её там, где узлов этой страны
-            // не осталось, и «выбрал страну — перестал подключаться» было бы
-            // честным следствием, но не тем, что просили.
-            //
-            // Пара, которая уже молчала, повторяется в другой обфускации
-            // (`ProtonProfileStore.attemptShape`): тот же I1 против того же фильтра
-            // даёт тот же ответ.
-            val failureCounts = runCatching {
-                ProtonProfileStore.failureCounts(
-                    store.readAttemptOutcomes(protonOutcomeNetworkClass()),
-                    System.currentTimeMillis(),
-                )
-            }.getOrDefault(emptyMap())
-            val sniPool = runCatching { clientData.getSniMaskPools().white }.getOrDefault(emptyList())
-            ProtonProfileStore.toVerifiedConfigs(
-                ProtonProfileStore.orderByCountry(
-                    store.readProfiles(),
-                    clientData.getProtonCountryPreference(),
-                ),
-                account.wireGuardPrivateKey,
-                clientData.getProtonCountryPreference(),
-                failureCounts,
-                sniPool,
-            )
+            ProtonProfileStore.toVerifiedConfigs(store.readProfiles(), account.wireGuardPrivateKey, selection)
         }
+        cachedProtonSelection = selection
         cachedProtonConfigs = configs
         cachedProtonConfigsAt = nowMs
         return configs
@@ -27801,8 +27784,6 @@ class NovaVpnService : OperaNativeVpnService() {
             // грозит, — а рукопожатие уходит ниже, на один-единственный узел: тот,
             // что встанет в очереди первым.
             val tcpPool = java.util.concurrent.Executors.newFixedThreadPool(PROTON_PROBE_PARALLELISM)
-            val done = java.util.concurrent.atomic.AtomicInteger(0)
-            val alive = java.util.concurrent.atomic.AtomicInteger(0)
             val completion = java.util.concurrent.ExecutorCompletionService<ProtonProfile>(tcpPool)
             val measured = try {
                 candidates.forEachIndexed { index, candidate ->
@@ -27835,24 +27816,11 @@ class NovaVpnService : OperaNativeVpnService() {
                                 }
                             },
                         )
-                        val result = if (tcp > 0) {
+                        if (tcp > 0) {
                             candidate.copy(pingMs = tcp, pingSource = ProtonLatency.SOURCE_TCP)
                         } else {
                             candidate.copy(pingMs = -1, pingSource = ProtonLatency.SOURCE_NONE)
                         }
-                        if (result.pingMs > 0) alive.incrementAndGet()
-                        val finished = done.incrementAndGet()
-                        if (finished % 5 == 0 || finished == total) {
-                            store.writeProbeState(
-                                ProtonProfileStore.ProbeState(
-                                    ProtonProfileStore.STATE_RUNNING,
-                                    total,
-                                    finished,
-                                    alive.get(),
-                                )
-                            )
-                        }
-                        result
                     }
                 }
                 // Ответы собираются по мере прихода, а не по порядку списка: первый
@@ -27863,6 +27831,7 @@ class NovaVpnService : OperaNativeVpnService() {
                 // узел — сразу к нему). Недомеренные узлы встают за ответившими как
                 // молчащие и домеряются следующим замером.
                 val collected = ArrayList<ProtonProfile>(total)
+                var alive = 0
                 val hardDeadline = SystemClock.elapsedRealtime() + PROTON_PROBE_TCP_TIMEOUT_MS * 4L
                 var stopAt = hardDeadline
                 while (collected.size < total) {
@@ -27871,6 +27840,18 @@ class NovaVpnService : OperaNativeVpnService() {
                     val next = completion.poll(waitMs, TimeUnit.MILLISECONDS) ?: break
                     val item = runCatching { next.get() }.getOrNull() ?: continue
                     collected += item
+                    if (item.pingMs > 0) alive++
+                    // Publish progress from this thread so a late worker cannot replace DONE.
+                    if (collected.size % 5 == 0 || collected.size == total) {
+                        store.writeProbeState(
+                            ProtonProfileStore.ProbeState(
+                                ProtonProfileStore.STATE_RUNNING,
+                                total,
+                                collected.size,
+                                alive,
+                            )
+                        )
+                    }
                     if (item.pingMs > 0 && stopAt == hardDeadline) {
                         stopAt = minOf(hardDeadline, SystemClock.elapsedRealtime() + PROTON_PROBE_FIRST_LIVE_GRACE_MS)
                     }
@@ -27902,16 +27883,8 @@ class NovaVpnService : OperaNativeVpnService() {
             val byLatencyThenLoad = compareBy<ProtonProfile>({ it.pingMs }, { it.load })
             val tcpOnly = measured.filter { it.pingSource == ProtonLatency.SOURCE_TCP }
             val silent = measured.filter { it.pingMs <= 0 }
-            // Ближайшие узлы получают запасные порты: узел отвечает на пару (местный
-            // порт, порт узла), так что другой порт узла — это другой поток и
-            // честная вторая попытка (см. `ProtonProfileStore.expandPortFallbacks`).
-            var ranked = ProtonProfileStore.expandPortFallbacks(
-                tcpOnly.sortedWith(byLatencyThenLoad) + silent.sortedBy { it.load },
-                ProtonProfileManager.PROFILE_LIMIT,
-                runCatching {
-                    ProtonProfileStore.portHints(store.readAllOutcomes(), System.currentTimeMillis())
-                }.getOrDefault(emptyMap()),
-            )
+            var ranked = (tcpOnly.sortedWith(byLatencyThenLoad) + silent.sortedBy { it.load })
+                .take(ProtonProfileManager.PROFILE_LIMIT)
 
             // Одно рукопожатие — в голову очереди, то есть в тот узел, с которого
             // подключение и начнётся.
@@ -27931,17 +27904,21 @@ class NovaVpnService : OperaNativeVpnService() {
             // другом узле оно отбирает сессию у текущего — замер убил бы человеку
             // связь ради строчки в журнале. Молча пропускать тоже нельзя (I4).
             val protonTunnelLive = isRunning && currentTransportLabel == TRANSPORT_AWG_PROTON
+            val selection = ClientData(this).getProtonSelection()
+            val selectable = ProtonProfileStore.selectedProfiles(ranked, selection)
+            val preferred = selectable.filter { it.country.equals(selection.country, ignoreCase = true) }
+                .ifEmpty { selectable }
             val connectRanks = runCatching {
                 ProtonProfileStore.connectOrder(
-                    ranked,
+                    preferred,
                     store.readAttemptOutcomes(protonOutcomeNetworkClass()),
                     System.currentTimeMillis(),
                 ).ranks
             }.getOrNull()
             val head = if (connectRanks.isNullOrEmpty()) {
-                ranked.firstOrNull()
+                preferred.firstOrNull()
             } else {
-                ranked.minByOrNull {
+                preferred.minByOrNull {
                     connectRanks[ProtonProfileStore.endpointKey(it.entryIp, it.port)] ?: Int.MAX_VALUE
                 }
             }

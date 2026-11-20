@@ -368,7 +368,7 @@ class NovaProfileListController(
             holder.ping.setTextColor(textColor)
             holder.mark.setTextColor(accentColor)
             holder.itemView.isClickable = row.kind != Row.MESSAGE
-            holder.itemView.background = if (row.chosen) highlight(accentColor, ctx) else null
+            holder.itemView.background = if (row.chosen) selectionBackground(accentColor, ctx) else null
         }
 
         /** Ширина колонки протокола по самой длинной метке страницы; пересчёт только при смене списка. */
@@ -399,11 +399,6 @@ class NovaProfileListController(
             }
         }
 
-        private fun highlight(color: Int, ctx: Context): GradientDrawable =
-            GradientDrawable().apply {
-                setColor((color and 0x00FFFFFF) or (0x33 shl 24))
-                cornerRadius = 6f * ctx.resources.displayMetrics.density
-            }
     }
 
     companion object {
@@ -412,12 +407,18 @@ class NovaProfileListController(
 
         fun markFreshPingWanted() = forceOnNextProbe.set(true)
 
-        private const val ROW_HEIGHT_DP = 22f
-        private const val MIN_ROWS = 2
-        private const val MAX_ROWS = 10
+        internal const val ROW_HEIGHT_DP = 22f
+        internal const val MIN_ROWS = 2
+        internal const val MAX_ROWS = 10
         private const val RELOAD_EVERY_MS = 3_000L
         private const val REPROBE_MIN_MS = 60_000L
-        private const val NORMAL_TEXT = 0xFFB9C4D6.toInt()
+        internal const val NORMAL_TEXT = 0xFFB9C4D6.toInt()
+
+        internal fun selectionBackground(color: Int, ctx: Context): GradientDrawable =
+            GradientDrawable().apply {
+                setColor((color and 0x00FFFFFF) or (0x33 shl 24))
+                cornerRadius = 6f * ctx.resources.displayMetrics.density
+            }
 
         private const val KEY_AUTO = "\u0000auto"
         private const val KEY_MESSAGE = "\u0000message"

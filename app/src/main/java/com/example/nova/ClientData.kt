@@ -1522,30 +1522,31 @@ class ClientData(context: Context) {
      * записать сюда страну, которой в списке не окажется, значило бы отдать
      * службе пустую очередь.
      */
-    fun getProtonCountryPreference(): String =
-        readExitRegionState().optString(KEY_PROTON_COUNTRY).trim().uppercase(Locale.US)
-            .takeIf { it.length == 2 } ?: ""
+    fun getProtonCountryPreference(): String = getProtonSelection().country
 
-    fun setProtonCountryPreference(value: String) {
-        val normalized = value.trim().uppercase(Locale.US).takeIf { it.length == 2 }.orEmpty()
-        synchronized(exitRegionLock) {
-            writeAtomicRaw(
-                exitRegionFile,
-                readExitRegionState().put(KEY_PROTON_COUNTRY, normalized).toString(),
-            )
-        }
+    fun getProtonSelection(): ProtonSelection {
+        val state = readExitRegionState()
+        return ProtonSelection(
+            country = state.optString(KEY_PROTON_COUNTRY).trim().uppercase(Locale.US)
+                .takeIf { it.length == 2 }.orEmpty(),
+            host = state.optString("proton_host").trim().trim('[', ']').lowercase(Locale.US),
+            port = (if (state.has("proton_port_override")) {
+                state.optInt("proton_port_override")
+            } else {
+                // Older builds also saved 51820 when only the node or country changed.
+                state.optInt("proton_port").takeUnless { it == ProtonProfileStore.DEFAULT_PORT }
+            })?.takeIf { it in ProtonProfileStore.SELECTABLE_PORTS },
+        )
     }
 
-    /** Страны, которые реально есть в выпущенных профилях Proton. */
-    fun getProtonAvailableCountries(): List<String> {
-        val profiles = ProtonProfileStore(appContext).readProfiles()
-        // Страны — по задержке, которую намерил замер Proton на этой сети (медиана
-        // по узлам страны), чтобы ближние стояли первыми.
-        val pingByCountry = profiles
-            .filter { it.pingMs > 0 && it.country.isNotBlank() }
-            .groupBy { it.country.trim().uppercase() }
-            .mapValues { (_, items) -> items.map { it.pingMs }.sorted()[items.size / 2] }
-        return CountryDisplayOrder.orderByPing(profiles.map { it.country }, pingByCountry)
+    fun setProtonSelection(selection: ProtonSelection): Boolean = synchronized(exitRegionLock) {
+        val state = readExitRegionState()
+            .put(KEY_PROTON_COUNTRY, selection.country)
+            .put("proton_host", selection.host)
+            .put("proton_port_override", selection.port)
+        state.remove("proton_port")
+        writeAtomicRaw(exitRegionFile, state.toString())
+        getProtonSelection() == selection
     }
 
     private fun readExitRegionState(): JSONObject {
@@ -5435,13 +5436,13 @@ class ClientData(context: Context) {
      * один список (I2).
      */
     fun getProtonVerifiedConfigs(): List<WarpVerifiedConfig> {
-        if (!isProtonSourceActive()) return emptyList()
+        if (!isProtonSourceActive() || isImportedConfigSourceActive()) return emptyList()
         val store = ProtonProfileStore(appContext)
         val account = store.readAccount() ?: return emptyList()
         return ProtonProfileStore.toVerifiedConfigs(
-            ProtonProfileStore.orderByCountry(store.readProfiles(), getProtonCountryPreference()),
+            store.readProfiles(),
             account.wireGuardPrivateKey,
-            getProtonCountryPreference(),
+            getProtonSelection(),
         )
     }
 

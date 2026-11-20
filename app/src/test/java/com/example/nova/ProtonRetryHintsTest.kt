@@ -196,16 +196,31 @@ class ProtonRetryHintsTest {
     }
 
     @Test
-    fun configTextKeepsFixedAwgFieldsOnRetry() {
+    fun convertsLegacyProfilesToSiteDefaults() {
         val configs = ProtonProfileStore.toVerifiedConfigs(
-            listOf(profile()),
+            listOf(profile(), profile(port = 88)),
             "priv=",
-            failureCounts = mapOf("1.1.1.1:443" to 2),
+            ProtonSelection(),
         )
         val raw = configs.single().rawConfig
-        assertTrue(raw.contains("S1 = 0") && raw.contains("S2 = 0") && raw.contains("H1 = 1") && raw.contains("H4 = 4"))
-        assertTrue(raw.contains("Jc = 5"))
-        assertFalse(raw.contains("I1 ="))
-        assertEquals("proton|1.1.1.1|443", configs.single().id)
+        val i1 = raw.lineSequence().single { it.startsWith("I1 = ") }.substringAfter(" = ")
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(i1.toByteArray())
+            .joinToString("") { "%02x".format(it) }
+        assertEquals("2d4bd7a5a5b2e307f56b9178feb2c1d507c430192cb15ecab216d03b058e6683", digest)
+        assertTrue(raw.contains("Jc = 3\nJmin = 1\nJmax = 3"))
+        assertTrue(raw.contains("DNS = 10.2.0.1, 2a07:b944::2:1"))
+        assertFalse(raw.contains("PersistentKeepalive"))
+        assertEquals("proton|1.1.1.1|51820", configs.single().id)
+    }
+
+    @Test
+    fun pinnedHostUsesOnlyItsSelectedPort() {
+        val configs = ProtonProfileStore.toVerifiedConfigs(
+            listOf(profile(), profile(ip = "2.2.2.2")),
+            "priv=",
+            ProtonSelection(country = "NL", host = "2.2.2.2", port = 500),
+        )
+        assertEquals("proton|2.2.2.2|500", configs.single().id)
+        assertTrue(configs.single().rawConfig.contains("Endpoint = 2.2.2.2:500"))
     }
 }

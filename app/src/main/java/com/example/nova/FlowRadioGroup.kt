@@ -256,7 +256,7 @@ class FlowRadioGroup @JvmOverloads constructor(
         var visibleIndex = 0
 
         forEachVisibleChild { child, params ->
-            if (uniformWidth > 0) {
+            if (uniformWidth > 0 && params.width == LayoutParams.WRAP_CONTENT) {
                 child.measure(
                     MeasureSpec.makeMeasureSpec(uniformWidth, MeasureSpec.EXACTLY),
                     getChildMeasureSpec(
@@ -304,7 +304,8 @@ class FlowRadioGroup @JvmOverloads constructor(
      */
     private fun widestChildWidth(widthMeasureSpec: Int, heightMeasureSpec: Int, available: Int): Int {
         var widest = 0
-        forEachVisibleChild { child, _ ->
+        forEachVisibleChild { child, params ->
+            if (params.width != LayoutParams.WRAP_CONTENT) return@forEachVisibleChild
             measureChildWithMargins(child, widthMeasureSpec, 0, heightMeasureSpec, 0)
             widest = maxOf(widest, child.measuredWidth)
         }

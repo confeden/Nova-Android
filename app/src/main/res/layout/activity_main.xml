@@ -457,6 +457,17 @@
                 style="@style/NovaMainRegionChip"
                 android:text="PROTON" />
 
+            <ImageButton
+                android:id="@+id/btn_main_proton_refresh"
+                style="@style/NovaMainRegionChip"
+                android:layout_width="36dp"
+                android:contentDescription="Обновить профили Proton"
+                android:minWidth="0dp"
+                android:padding="0dp"
+                android:src="@drawable/ic_proton_refresh"
+                android:tint="#FFFFFF"
+                android:visibility="gone" />
+
             <RadioButton
                 android:id="@+id/rb_exit_tor"
                 style="@style/NovaMainRegionChip"
@@ -470,9 +481,8 @@
         </HorizontalScrollView>
 
         <!--
-            Четвёртая строка: подрегион уже выбранного транспорта. Для OPERA это
-            «Регион: EU US», для PROTON — список стран, которые реально есть в
-            выпущенных профилях. Кнопки создаёт код: их число переменное.
+            Четвёртая строка для подрегионов Opera и способов входа Tor.
+            Кнопки создаёт код: их число переменное.
         -->
         <LinearLayout
             android:id="@+id/ll_exit_sub_region"
@@ -562,6 +572,14 @@
             android:layout_marginBottom="36dp"
             android:overScrollMode="never"
             android:scrollbars="vertical"
+            android:visibility="gone" />
+
+        <include
+            android:id="@+id/panel_proton_selector"
+            layout="@layout/panel_proton_selector"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
             android:visibility="gone" />
 
         <!--

@@ -871,7 +871,7 @@ class MainActivity : AppCompatActivity() {
             // очередь Proton строит другая ветка — и переподнимала тот же профиль.
             // Снаружи это ровно «нажал следующий, а IP в браузере тот же».
             val protonConfigs = clientData.getProtonVerifiedConfigs()
-            val configs = if (protonConfigs.isNotEmpty()) {
+            val configs = if (!importedOnly && clientData.isProtonSourceActive()) {
                 protonConfigs
             } else {
                 clientData.getWarpVerifiedMergedConfigs()
@@ -1360,7 +1360,7 @@ class MainActivity : AppCompatActivity() {
             if (!isLandscapeLayout) {
                 distributePortraitSpace()
                 applyRegionChipHeights()
-                fitNovaListHeight()
+                fitProfileListHeight()
             }
         }
     }
@@ -1492,7 +1492,7 @@ class MainActivity : AppCompatActivity() {
         mainRoot.post {
             distributePortraitSpace()
             applyRegionChipHeights()
-            fitNovaListHeight()
+            fitProfileListHeight()
         }
         // Кольца расходятся от кнопки, а она переехала.
         syncPulseOriginToConnectButton()
@@ -1780,7 +1780,7 @@ class MainActivity : AppCompatActivity() {
         reloadBackdropIfAppearanceChanged()
         reapplyBackdropIfModeChanged()
         refreshMainRegionSelector()
-        refreshProtonAvailableCountries()
+        refreshProtonPicker()
         refreshWarpDiscoverySnapshotFromStorage()
         statusHandler.post(statusRunnable)
         // Человек вернулся на экран — значит, системный установщик закрыт, и
@@ -1884,6 +1884,7 @@ class MainActivity : AppCompatActivity() {
         ipExecutor.shutdown()
         latencyExecutor.shutdown()
         novaProfileList?.destroy()
+        protonSelectionWriter.shutdown()
         // Пул ленивый: трогаем его только если он вообще создавался, иначе закрытие
         // экрана само же его и поднимет.
         if (lazyTraceExecutor.isInitialized()) traceExecutor.shutdown()
@@ -2349,15 +2350,16 @@ class MainActivity : AppCompatActivity() {
     /** Кнопка, под которой сейчас строка подрегиона: объяснение про DoT говорит о ней. */
     private var mainDotHintChip: String = ""
 
-    /**
-     * Страны, которые есть в выпущенных профилях Proton.
-     *
-     * Кэш, а не чтение по месту: список живёт в `proton_profiles.json`, а
-     * перерисовка селектора приходит на каждом кадре состояния — чтение файла
-     * оттуда было бы блокирующим вводом-выводом в главном потоке (I13).
-     * Обновляется с диска в [refreshProtonAvailableCountries].
-     */
-    private var protonAvailableCountries: List<String> = emptyList()
+    private var protonPicker: ProtonPicker? = null
+    private var mainProtonRefresh: View? = null
+    private var protonSelection = ProtonSelection()
+    private var protonNodes: List<ProtonPicker.Node> = emptyList()
+    private var protonRefreshPending = false
+    private val protonSelectionWriter = Executors.newSingleThreadExecutor { worker ->
+        Thread(worker, "NovaProtonSelection").apply { isDaemon = true }
+    }
+    @Volatile private var protonSelectionRevision = 0
+    private var protonSelectionSavedRevision = 0
 
     // -- выпуск личных профилей Cloudflare: строка под зелёным статусом --------
 
@@ -2413,19 +2415,89 @@ class MainActivity : AppCompatActivity() {
         }, "NovaProfileIssueProgress").apply { isDaemon = true; start() }
     }
 
-    /** Перечитывает страны Proton с диска и перерисовывает четвёртую строку. */
-    private fun refreshProtonAvailableCountries() {
+    private fun refreshProtonPicker() {
+        val revision = protonSelectionRevision
+        val canRestoreSelection = protonSelectionSavedRevision == revision
         Thread({
-            val countries = runCatching { clientData.getProtonAvailableCountries() }.getOrDefault(emptyList())
+            val selection = clientData.getProtonSelection()
+            val nodes = ProtonPicker.nodesFrom(ProtonProfileStore(this).readProfiles())
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
-                if (countries == protonAvailableCountries) return@runOnUiThread
-                protonAvailableCountries = countries
-                // Состав изменился — подпись строки устарела, пересобираем.
-                mainSubRegionSignature = ""
+                if (canRestoreSelection && revision == protonSelectionRevision) protonSelection = selection
+                protonNodes = nodes
                 refreshMainRegionSelector()
             }
-        }, "NovaProtonCountries").apply { isDaemon = true; start() }
+        }, "NovaProtonPicker").apply { isDaemon = true; start() }
+    }
+
+    private fun applyProtonSelection(selection: ProtonSelection) {
+        if (selection == protonSelection) return
+        protonSelection = selection
+        val revision = ++protonSelectionRevision
+        val reapply = hasLiveSessionToReapply()
+        val appContext = applicationContext
+        protonPicker?.show(protonNodes, selection)
+        protonSelectionWriter.execute {
+            if (revision != protonSelectionRevision) return@execute
+            val saved = clientData.setProtonSelection(selection)
+            if (revision != protonSelectionRevision) return@execute
+            val reconnecting = saved && reapply && clientData.isProtonSourceActive() &&
+                SessionReapply.isSessionLikelyActive(appContext, clientData) &&
+                SessionReapply.applyToLiveSession(appContext, clientData)
+            runOnUiThread {
+                if (isFinishing || isDestroyed || revision != protonSelectionRevision) return@runOnUiThread
+                protonSelectionSavedRevision = revision
+                if (reconnecting) updateUiByState(NovaVpnService.STATE_CONNECTING)
+                if (!saved) {
+                    LogManager.log("Proton: не удалось сохранить выбор профиля.")
+                    Toast.makeText(this, NovaLanguage.tr(this, "Не удалось сохранить профиль Proton"), Toast.LENGTH_LONG).show()
+                    refreshProtonPicker()
+                }
+            }
+        }
+    }
+
+    private fun refreshProtonProfilesFromMain() {
+        if (protonRefreshPending || ProtonProfileManager.isRunning()) return
+        protonRefreshPending = true
+        updateMainProtonRefresh(true)
+        Thread({
+            val started = ProtonProfileManager.ensureProfiles(this, force = true) { outcome ->
+                LogManager.log("Главный экран: обновление профилей Proton — ${outcome.message}")
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    protonRefreshPending = false
+                    refreshProtonPicker()
+                    Toast.makeText(this, NovaLanguage.tr(this, outcome.message), Toast.LENGTH_LONG).show()
+                }
+            }
+            if (!started) {
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    protonRefreshPending = false
+                    updateMainProtonRefresh(true)
+                    Toast.makeText(this, NovaLanguage.tr(this, "Выпуск профилей Proton уже идёт"), Toast.LENGTH_SHORT).show()
+                }
+            }
+        }, "NovaProtonRefresh").apply { isDaemon = true; start() }
+    }
+
+    private fun updateMainProtonRefresh(visible: Boolean) {
+        val button = mainProtonRefresh ?: return
+        val visibility = if (visible) View.VISIBLE else View.GONE
+        if (button.visibility != visibility) {
+            button.visibility = visibility
+            (mainRegionGroup as? FlowRadioGroup)?.rowPlan =
+                if (visible) listOf(3, 4, 2) else ConnectionSelectorPolicy.ROWS
+        }
+        val enabled = !protonRefreshPending && !ProtonProfileManager.isRunning()
+        if (button.isEnabled != enabled) {
+            button.isEnabled = enabled
+            button.alpha = if (enabled) 1f else ConnectionSelectorPolicy.DISABLED_ALPHA
+            button.contentDescription = NovaLanguage.tr(
+                this, if (enabled) "Обновить профили Proton" else "Профили Proton выпускаются…",
+            )
+        }
     }
 
     /**
@@ -2489,13 +2561,13 @@ class MainActivity : AppCompatActivity() {
         // помещались, и — поскольку `wrap_content` в `ConstraintLayout` границы
         // не соблюдает — строка подрегиона рисовалась поверх «Настроек».
         // Проверено на устройстве.
-        // С выбранной NOVA четвёртую полосу занимает список профилей (~2,5 полосы).
-        val novaList = novaProfileList?.takeIf { it.shown }
-        val pitch = if (novaList != null) {
+        // NOVA и PROTON занимают место списка под тремя полосами чипов.
+        val rowHeight = visibleProfileListRowHeightPx()
+        val pitch = if (rowHeight != null) {
             // Со списком Nova кнопки держат свой шаг, а список берёт остаток (от двух
             // строк); место под него готовит [distributePortraitSpace].
             val badgeRoom = novaBadgeRoomPx()
-            val forChips = (usable - badgeRoom - 4 * novaList.rowHeightPx) / 3
+            val forChips = (usable - badgeRoom - 4 * rowHeight) / 3
             forChips.coerceAtMost((NOVA_CHIP_PITCH_DP * uiScale() * density).toInt())
         } else {
             (usable / SELECTOR_ROWS.toFloat()).toInt()
@@ -2512,6 +2584,7 @@ class MainActivity : AppCompatActivity() {
         regionChipHeightPx = height
         regionChipGapPx = gap
         mainRegionButtons.forEach { button -> applyChipMetrics(button, height, gap) }
+        applyChipMetrics(mainProtonRefresh, height, gap)
         mainSubRegionGroup?.let { group ->
             for (index in 0 until group.childCount) applyChipMetrics(group.getChildAt(index), height, gap)
         }
@@ -2520,7 +2593,7 @@ class MainActivity : AppCompatActivity() {
     private var portraitConnectShiftPx = 0
 
     /**
-     * Портрет: делит вертикаль между верхом, селектором и низом, когда выбран NOVA
+     * Портрет: делит вертикаль между верхом, селектором и низом для NOVA и PROTON,
      * и под список профилей нужно больше места. Низ экрана уже прижат (шкала, адреса,
      * «Настройки» висят на версии), поэтому сначала сжимается шкала пинга (до
      * [GRAPH_MIN_HEIGHT_DP]) и всё, что над ней, опускается; если этого мало, главная
@@ -2551,11 +2624,11 @@ class MainActivity : AppCompatActivity() {
         var wantedShift = 0
         var wantedPadBottomReduction = 0
         var wantedPadTopReduction = 0
-        if (novaProfileList?.shown == true) {
+        val rowPx = visibleProfileListRowHeightPx()
+        if (rowPx != null) {
             val glowPad = (SELECTION_GLOW_PAD_DP * density).toInt()
             val topMargin = (mainRegionScroll?.layoutParams as? ViewGroup.MarginLayoutParams)?.topMargin ?: 0
             val badgeRoom = novaBadgeRoomPx()
-            val rowPx = novaProfileList?.rowHeightPx ?: (22 * density).toInt()
             val need = topMargin + (SELECTOR_BOTTOM_RESERVE_DP * density).toInt() + 4 * glowPad + badgeRoom +
                 (3 * NOVA_CHIP_PITCH_DP * scale * density).toInt() + NOVA_WANTED_LIST_ROWS * rowPx
             val settingsTopAtBase = settings.top + graph.height - baseGraph
@@ -2608,15 +2681,19 @@ class MainActivity : AppCompatActivity() {
         if (relayout) mainRoot.requestLayout()
     }
 
+    private fun visibleProfileListRowHeightPx(): Int? =
+        protonPicker?.takeIf { it.shown }?.rowHeightPx ?: novaProfileList?.takeIf { it.shown }?.rowHeightPx
+
     /**
-     * Потолок высоты списка Nova: от его верха до «Настроек» (в горизонтали — до
+     * Потолок высоты списка: от его верха до «Настроек» (в горизонтали — до
      * нижней границы селектора), от двух до десяти строк. До первой раскладки
      * координат нет — тогда ничего не делаем, перерисовка придёт ещё раз.
      */
-    private fun fitNovaListHeight() {
-        val controller = novaProfileList ?: return
-        if (!controller.shown) return
-        val list = findViewById<View>(R.id.rv_nova_profiles) ?: return
+    private fun fitProfileListHeight() {
+        val proton = protonPicker?.takeIf { it.shown }
+        val nova = novaProfileList?.takeIf { it.shown }
+        if (proton == null && nova == null) return
+        val list = proton?.view ?: findViewById<View>(R.id.rv_nova_profiles) ?: return
         val listLoc = IntArray(2)
         list.getLocationInWindow(listLoc)
         val limitY = if (isLandscapeLayout) {
@@ -2640,7 +2717,8 @@ class MainActivity : AppCompatActivity() {
                 list.layoutParams = lp
             }
         }
-        controller.fitHeight(limitY - listLoc[1] - reserve - badgeRoom)
+        val available = limitY - listLoc[1] - reserve - badgeRoom
+        if (proton != null) proton.fitHeight(available) else nova?.fitHeight(available)
     }
 
     /**
@@ -2735,6 +2813,12 @@ class MainActivity : AppCompatActivity() {
         dnsModeNotice = findViewById(R.id.tv_dns_mode_notice)
         mainRegionNotice = findViewById(R.id.tv_exit_last)
         mainSubRegionRow = findViewById(R.id.ll_exit_sub_region)
+        protonPicker = findViewById<View>(R.id.panel_proton_selector)?.let {
+            ProtonPicker(it, { themeAccentColor }, ::applyProtonSelection)
+        }
+        mainProtonRefresh = findViewById<View>(R.id.btn_main_proton_refresh)?.apply {
+            setOnClickListener { refreshProtonProfilesFromMain() }
+        }
         novaProfileList = findViewById<NovaMaxHeightRecyclerView>(R.id.rv_nova_profiles)?.let { list ->
             NovaProfileListController(this, list, { themeAccentColor }, ::onNovaProfileChosen)
         }
@@ -2998,30 +3082,6 @@ class MainActivity : AppCompatActivity() {
                 protonPreparationRequested = clientData.isProtonPreparationRequested(),
             )
         )
-        if (chip == "proton") {
-            val previous = clientData.getProtonCountryPreference().trim()
-            clientData.setProtonCountryPreference(value)
-            val label = value.ifBlank { "AUTO" }
-            // Переподключаем только на смене страны: повторное нажатие на уже
-            // выбранную кнопку не должно ронять живой туннель.
-            val changed = !previous.equals(value.trim(), ignoreCase = true)
-            val reconnecting = changed &&
-                hasLiveSessionToReapply() &&
-                SessionReapply.applyToLiveSession(this, clientData)
-            LogManager.log(
-                "Главный экран: страна выхода Proton — $label, смена=$changed, переподключение=$reconnecting."
-            )
-            Toast.makeText(
-                this,
-                if (reconnecting) "Страна Proton: $label, переподключаемся" else "Страна Proton: $label",
-                Toast.LENGTH_SHORT,
-            ).show()
-            if (reconnecting) {
-                updateUiByState(NovaVpnService.STATE_CONNECTING)
-            }
-            refreshMainRegionSelector()
-            return
-        }
         if (chip == ConnectionSelectorPolicy.CHIP_TOR) {
             val previous = TorEntryModeStore.read(this)
             val chosen = ConnectionSelectorPolicy.normalizeTorEntry(value)
@@ -3282,6 +3342,8 @@ class MainActivity : AppCompatActivity() {
             // иначе они остаются поверх блока импортированных профилей.
             applyDnsFrostState("", animate = false)
             mainRegionChips?.visibility = View.GONE
+            updateMainProtonRefresh(false)
+            protonPicker?.hide()
             mainSubRegionRow?.visibility = View.GONE
             novaProfileList?.onVisible(false, false, false)
             notice?.visibility = View.GONE
@@ -3344,7 +3406,7 @@ class MainActivity : AppCompatActivity() {
         // когда результат правда изменился.
         distributePortraitSpace()
         applyRegionChipHeights()
-        fitNovaListHeight()
+        fitProfileListHeight()
 
         // Запрет держится выключенными кнопками, а не снятым обработчиком:
         // выключенную кнопку нажать нельзя, и снимать обработчик — значит терять
@@ -3371,21 +3433,27 @@ class MainActivity : AppCompatActivity() {
     private fun refreshMainSubRegionRow(chipValue: String) {
         val row = mainSubRegionRow ?: return
         val group = mainSubRegionGroup ?: return
-        // NOVA: вместо региональных кнопок в этой же полосе стоит список профилей.
-        if (chipValue == ConnectionSelectorPolicy.CHIP_NOVA && novaProfileList != null) {
-            row.visibility = View.GONE
-            mainDotHintChip = chipValue
-            mainDotHint?.visibility = View.GONE
-            mainSubRegionSignature = ""
-            if (group.childCount > 0) group.removeAllViews()
+        val proton = chipValue == "proton"
+        val nova = chipValue == ConnectionSelectorPolicy.CHIP_NOVA && novaProfileList != null
+        updateMainProtonRefresh(proton)
+        if (proton) protonPicker?.show(protonNodes, protonSelection) else protonPicker?.hide()
+        if (nova) {
             novaProfileList?.onVisible(
                 visible = true,
                 tunnelLive = isTunnelConnected() || vpnState == NovaVpnService.STATE_CONNECTING,
                 dnsSessionActive = isDnsSessionActive(),
             )
+        } else {
+            novaProfileList?.onVisible(false, false, false)
+        }
+        if (proton || nova) {
+            row.visibility = View.GONE
+            mainDotHintChip = chipValue
+            mainDotHint?.visibility = View.GONE
+            mainSubRegionSignature = ""
+            if (group.childCount > 0) group.removeAllViews()
             return
         }
-        novaProfileList?.onVisible(false, false, false)
         // Подсказка про DoT нужна только там, где она что-то меняет: у Tor и у
         // DNS-туннеля, и только при включённом строгом «Частном DNS».
         val dotHintNeeded = (
@@ -3394,10 +3462,7 @@ class MainActivity : AppCompatActivity() {
             ) && TorTransport.strictPrivateDnsHost(this).isNotBlank()
         mainDotHintChip = chipValue
         mainDotHint?.visibility = if (dotHintNeeded) View.VISIBLE else View.GONE
-        val entries = ConnectionSelectorPolicy.subRegionsFor(
-            chipValue,
-            if (chipValue == "proton") protonAvailableCountries else emptyList(),
-        )
+        val entries = ConnectionSelectorPolicy.subRegionsFor(chipValue, emptyList())
         // У DNS подрегионов нет, но строка нужна ради одной подсказки: без неё
         // человек со строгим DoT видел бы «подключено» и ни одного сайта.
         if (entries.isEmpty() && dotHintNeeded) {
@@ -3486,8 +3551,6 @@ class MainActivity : AppCompatActivity() {
             suppressMainSubRegionCallback = false
         }
         val wantedValue = when (chipValue) {
-            // Пустое предпочтение — это кнопка «AUTO», а не первая страна списка.
-            "proton" -> clientData.getProtonCountryPreference()
             // Способ входа в Tor лежит в файле, а не в настройках: его читает
             // процесс `:vpn`, а prefs кэшируются попроцессно (I2).
             ConnectionSelectorPolicy.CHIP_TOR -> TorEntryModeStore.read(this)
@@ -3573,7 +3636,7 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread {
                     if (isFinishing || isDestroyed) return@runOnUiThread
                     Toast.makeText(this, NovaLanguage.tr(this, outcome.message), Toast.LENGTH_LONG).show()
-                    refreshProtonAvailableCountries()
+                    refreshProtonPicker()
                     if (reconnecting) {
                         updateUiByState(NovaVpnService.STATE_CONNECTING)
                     } else {
@@ -7403,7 +7466,10 @@ class MainActivity : AppCompatActivity() {
         val accent = NovaTheme.color(themedForAccent, R.attr.novaAccent)
         val accentChanged = accent != themeAccentColor
         themeAccentColor = accent
-        if (accentChanged) novaProfileList?.accentChanged()
+        if (accentChanged) {
+            novaProfileList?.accentChanged()
+            protonPicker?.accentChanged()
+        }
         listOfNotNull(mainRegionGroup as? FlowRadioGroup, mainSubRegionGroup).forEach { group ->
             group.selectionGlowColor = accent
         }

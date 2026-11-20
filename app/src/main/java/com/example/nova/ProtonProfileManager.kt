@@ -9,7 +9,6 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
-import kotlin.random.Random
 
 /**
  * Выпуск и обновление Proton-профилей.
@@ -500,10 +499,7 @@ object ProtonProfileManager {
         // приходилось писать строго после аккаунта, иначе его вымывало.
         store.writeAlternativeHost(ProtonApi.currentAlternativeHost())
 
-        val whiteHosts = runCatching { TrafficMaskCatalog.getWhiteHosts(context) }
-            .getOrDefault(emptyList())
-            .filter { it.isNotBlank() }
-        val random = Random(System.nanoTime())
+        val selection = ClientData(context).getProtonSelection()
 
         // Пул: проверенные на этом телефоне узлы, список сессии, встроенный список.
         // Срез одной сессии бывает без единого живого узла нужной страны, хотя
@@ -524,12 +520,10 @@ object ProtonProfileManager {
                 )
             }
         val extra = if (liveServers.isNotEmpty()) ProtonNodeCatalog.load(context) else emptyList()
-        // Итоги попыток всех классов сети: из них берутся порт, на котором узел уже
-        // подключался, и список адресов, молчавших недавно (в хвост пула).
+        // Recently silent hosts go behind the rest of the catalog.
         val allOutcomes = runCatching { store.readAllOutcomes() }
             .getOrDefault(ProtonProfileStore.AttemptOutcomes.EMPTY)
         val outcomesNowMs = System.currentTimeMillis()
-        val portHints = ProtonProfileStore.portHints(allOutcomes, outcomesNowMs)
         val pool = ProtonProfileStore.mergeNodePools(
             proven,
             servers,
@@ -537,10 +531,12 @@ object ProtonProfileManager {
             silentHosts = ProtonProfileStore.silentHosts(allOutcomes, outcomesNowMs),
         )
 
-        // Кандидаты: по кругу стран, внутри страны — проверенные, затем наименее
-        // загруженные; портов — по кругу. Если оператор глушит один порт, кандидаты
-        // на нём просто не ответят и отсеются замером.
-        val picked = ProtonProfileStore.pickCandidatesByCountry(pool, CANDIDATE_LIMIT)
+        val picked = ProtonProfileStore.pickCandidatesByCountry(pool, CANDIDATE_LIMIT).toMutableList()
+        val pinned = pool.firstOrNull { it.entryIp.equals(selection.host, ignoreCase = true) }
+        if (pinned != null && pinned !in picked) {
+            if (picked.size == CANDIDATE_LIMIT) picked.removeAt(picked.lastIndex)
+            picked.add(0, pinned)
+        }
         val provenHosts = proven.map { it.entryIp.trim().lowercase(Locale.US) }.toSet()
         val serverHosts = servers.map { it.entryIp.trim().lowercase(Locale.US) }.toSet()
         LogManager.log(
@@ -555,18 +551,17 @@ object ProtonProfileManager {
         )
         val candidates = picked
             .map { server ->
-                val sni = whiteHosts.randomOrNull(random).orEmpty()
                 ProtonProfile(
                     serverName = server.name,
                     country = server.country,
                     city = server.city,
                     entryIp = server.entryIp,
-                    port = ProtonProfileStore.choosePort(server.entryIp, portHints),
+                    port = selection.endpointPort,
                     peerPublicKey = server.peerPublicKey,
                     pingMs = -1,
                     pingSource = ProtonLatency.SOURCE_NONE,
                     load = server.load,
-                    sni = sni,
+                    sni = "",
                     // Параметры мусора — ровно те, что стоят на сайте по умолчанию
                     // и проверены владельцем на живом подключении через Amnezia.
                     // Свои случайные (3-7 пакетов по 30-120 байт) отличались от
@@ -575,7 +570,7 @@ object ProtonProfileManager {
                     junkCount = 3,
                     junkMin = 1,
                     junkMax = 3,
-                    i1 = if (sni.isBlank()) "" else ProtonQuicInitial.buildI1(sni),
+                    i1 = ProtonProfileStore.DEFAULT_I1,
                     createdAt = System.currentTimeMillis(),
                 )
             }
@@ -630,11 +625,7 @@ object ProtonProfileManager {
         // прямо в него), и неудача замера оставляла их на месте сама собой. Теперь
         // кандидаты лежат отдельно, поэтому запасной путь нужен явный.
         val selected = probed?.takeIf { it.isNotEmpty() } ?: run {
-            val fallback = ProtonProfileStore.expandPortFallbacks(
-                candidates.sortedBy { it.load },
-                PROFILE_LIMIT,
-                portHints,
-            )
+            val fallback = candidates.sortedBy { it.load }.take(PROFILE_LIMIT)
             LogManager.log(
                 if (!probeRequested) {
                     "Proton: службу не удалось попросить о замере"
